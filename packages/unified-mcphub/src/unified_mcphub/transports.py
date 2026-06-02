@@ -7,7 +7,9 @@ ASGI app (the hub's MCP server surface). Each harness uses whichever it supports
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
+import socket
 from pathlib import Path
 
 import uvicorn
@@ -17,6 +19,18 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from .config import ListenConfig
+
+
+class PortInUseError(RuntimeError):
+    """Raised when the configured TCP port is already bound (errno EADDRINUSE).
+
+    Carries the port so the CLI can print a one-line, traceback-free message
+    instead of uvicorn's bind failure + sys.exit(1) noise.
+    """
+
+    def __init__(self, port: int) -> None:
+        self.port = port
+        super().__init__(f"TCP {port} in use — another hub is running; pass --port or --no-tcp")
 
 
 def _authenticate(request: Request, hub) -> tuple[str | None, str | None]:
@@ -65,6 +79,21 @@ class TransportServer:
         self._tasks: list[asyncio.Task] = []
         self.uds_path: str | None = None
 
+    @staticmethod
+    def _preflight_tcp(host: str, port: int) -> None:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Mirror uvicorn's bind (SO_REUSEADDR on) so a port merely in TIME_WAIT
+        # is not misreported as in use — only an active listener trips EADDRINUSE.
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, port))
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                raise PortInUseError(port) from None
+            raise
+        finally:
+            probe.close()
+
     async def start(self) -> None:
         configs: list[uvicorn.Config] = []
 
@@ -76,11 +105,13 @@ class TransportServer:
             self.uds_path = uds
             configs.append(uvicorn.Config(self._app, uds=uds, log_level="warning"))
 
-        if self._listen.tcp:
-            host, port = self._listen.tcp.rsplit(":", 1)
-            configs.append(
-                uvicorn.Config(self._app, host=host, port=int(port), log_level="warning")
-            )
+        if self._listen.tcp_enabled:
+            host, port = self._listen.host, self._listen.port
+            # Pre-flight the bind so a port collision surfaces as a clean one-liner
+            # here, instead of uvicorn logging the OSError + sys.exit(1) inside its
+            # serve task (which our started-poll would otherwise see as a timeout).
+            self._preflight_tcp(host, port)
+            configs.append(uvicorn.Config(self._app, host=host, port=port, log_level="warning"))
 
         for cfg in configs:
             server = uvicorn.Server(cfg)

@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import stat
 import textwrap
+from pathlib import Path
 
 import pytest
 
-from unified_mcphub.config import bootstrap, config_path, load_config, mcphub_home
+from unified_mcphub.config import (
+    ListenConfig,
+    bootstrap,
+    config_path,
+    load_config,
+    mcphub_home,
+)
 
 
 def test_bootstrap_seeds_runnable_defaults(tmp_path, monkeypatch):
@@ -25,6 +32,27 @@ def test_bootstrap_seeds_runnable_defaults(tmp_path, monkeypatch):
     assert all(s.upstream.command == "python" for s in cfg.workspace.servers.values())
 
     assert bootstrap() == []  # idempotent
+
+
+def test_seed_listen_resolves_under_unified_home(tmp_path, monkeypatch):
+    # Regression: a temp-$UNIFIED_HOME hub must NOT inherit the real ~ socket/port.
+    # The seed omits listen.*, so ListenConfig defaults resolve under $UNIFIED_HOME.
+    home = tmp_path / ".unified-ai"
+    monkeypatch.setenv("UNIFIED_HOME", str(home))
+    bootstrap()
+    listen = load_config().hub.listen
+
+    sock = Path(listen.unix_socket)
+    assert sock == home / "mcphub" / "mcphub.sock"
+    assert str(Path.home()) not in str(sock)  # never the real home
+    # TCP stays on by default (HTTP installers need it) at the default port.
+    assert listen.tcp_enabled is True
+    assert listen.tcp_address == "127.0.0.1:7712"
+
+
+def test_listen_tcp_address_toggles_with_enabled():
+    assert ListenConfig(port=7799).tcp_address == "127.0.0.1:7799"
+    assert ListenConfig(tcp_enabled=False).tcp_address is None
 
 
 def test_load_defaults(hub_home):

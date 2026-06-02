@@ -42,7 +42,7 @@ def hub_home(tmp_path, monkeypatch):
             f"""
             listen:
               unix_socket: {sock_path}
-              tcp: null
+              tcp_enabled: false
             approval:
               enabled: true
             active_workspace: default
@@ -82,9 +82,11 @@ def enable_tcp(hub_home):
     """Turn on the TCP transport in the seeded config (preserving the socket)."""
 
     def _enable(tcp: str = "127.0.0.1:7712") -> None:
+        host, port = tcp.rsplit(":", 1)
         config = hub_home / "config.yaml"
         data = yaml.safe_load(config.read_text())
-        data.setdefault("listen", {})["tcp"] = tcp
+        listen = data.setdefault("listen", {})
+        listen.update({"tcp_enabled": True, "host": host, "port": int(port)})
         config.write_text(yaml.safe_dump(data, sort_keys=False))
 
     return _enable

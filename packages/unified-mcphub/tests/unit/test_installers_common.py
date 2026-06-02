@@ -11,7 +11,7 @@ from unified_mcphub.installers import _common
 
 
 def test_http_url_none_when_tcp_disabled(hub_home):
-    assert endpoints.http_url() is None  # default fixture config has tcp: null
+    assert endpoints.http_url() is None  # default fixture config has tcp_enabled: false
 
 
 def test_install_errors_without_tcp(hub_home, monkeypatch):

@@ -332,8 +332,8 @@ class Hub:
         listen: dict = {}
         if self._transport.uds_path:
             listen["unix_socket"] = self._transport.uds_path
-        if self.config.hub.listen.tcp:
-            listen["http"] = f"http://{self.config.hub.listen.tcp}"
+        if self.config.hub.listen.tcp_address:
+            listen["http"] = f"http://{self.config.hub.listen.tcp_address}"
         return listen
 
     def _publish_discovery(self) -> None:
@@ -429,13 +429,31 @@ def _summary(tool: str, args: dict) -> str:
     return f"{tool}({rendered[:120]})"
 
 
-async def run(workspace: str | None = None) -> None:
-    """CLI entry: start the hub and run until SIGINT/SIGTERM (spec §8)."""
+async def run(
+    workspace: str | None = None, *, port: int | None = None, no_tcp: bool = False
+) -> None:
+    """CLI entry: start the hub and run until SIGINT/SIGTERM (spec §8).
+
+    `port` / `no_tcp` are the `start --port` / `--no-tcp` overrides, applied over
+    the loaded config (precedence: CLI > config.yaml > defaults).
+    """
     created = bootstrap()  # first-run: seed a working default config
     if created:
         logger.info("seeded default config: %s", ", ".join(str(p) for p in created))
-    hub = Hub(load_config(workspace))
-    await hub.start()
+    config = load_config(workspace)
+    if no_tcp:
+        config.hub.listen.tcp_enabled = False
+    elif port is not None:
+        config.hub.listen.tcp_enabled = True  # asking for a port means: serve on it
+        config.hub.listen.port = port
+    hub = Hub(config)
+    try:
+        await hub.start()
+    except Exception:
+        # A start failure (e.g. the TCP port is in use) happens after upstream
+        # servers are spawned — tear them down so we don't leak subprocesses.
+        await hub.stop()
+        raise
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

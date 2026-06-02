@@ -1,8 +1,9 @@
-"""Prompt path + allow_always persistence — spec §5, ADR-0018 (SEC-MCP-4 slice).
+"""Prompt path + allow_always persistence — spec §5, ADR-0018/0024/0025.
 
 A `prompt`-effect call blocks on the in-process approval; an `allow_always`
-keypress writes a precedence-1 exact rule to the machine-managed `.local.yaml`
-(ADR-0024) and the call proceeds. Audit records `prompt_allowed`.
+(command-scoped, key `c`) keypress writes a precedence-1 exact rule scoped to the
+call's primary argument, to the machine-managed `.local.yaml` (ADR-0024/0025),
+and the call proceeds. Audit records `prompt_allowed`.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ def _add_prompt_rule(hub_home):
 @pytest.mark.asyncio
 async def test_prompt_allow_always_persists_exact_rule(hub_home, monkeypatch):
     _add_prompt_rule(hub_home)
-    monkeypatch.setattr("sys.stdin", io.StringIO("A\n"))  # allow_always
+    monkeypatch.setattr("sys.stdin", io.StringIO("c\n"))  # allow_always (this command)
 
     config = load_config()
     hub = Hub(config)
@@ -59,10 +60,15 @@ async def test_prompt_allow_always_persists_exact_rule(hub_home, monkeypatch):
     received = [e for e in entries if e["phase"] == "received"][-1]
     assert received["authz_decision"] == "prompt_allowed"
 
-    # allow_always wrote a precedence-1 exact rule to the machine-managed
-    # .local.yaml (ADR-0024) — never into the hand-curated workspace file.
+    # allow_always wrote a precedence-1 exact rule, scoped to the call's primary
+    # arg, to the machine-managed .local.yaml (ADR-0024/0025) — never into the
+    # hand-curated workspace file.
+    import yaml
+
     workspaces = hub_home / "workspaces"
-    assert "mcp://filesystem/read_file" in (workspaces / "default.local.yaml").read_text()
+    learned = yaml.safe_load((workspaces / "default.local.yaml").read_text())
+    assert learned[0]["tool"] == "mcp://filesystem/read_file"
+    assert learned[0]["args_filter"] == {"path": {"equals": ["x"]}}
     assert "mcp://filesystem/read_file" not in (workspaces / "default.yaml").read_text()
 
 

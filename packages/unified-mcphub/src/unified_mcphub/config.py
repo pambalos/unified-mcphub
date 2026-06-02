@@ -121,9 +121,27 @@ class Authz(BaseModel):
     rules: list[Rule] = Field(default_factory=list)
 
 
+# Conservative default: bearer tokens only. They are unambiguous secrets and the
+# pattern (Bearer + 16+ hex) won't collide with legitimate tool output. Broader
+# patterns (e.g. bare 64-hex) risk masking real data like sha256 digests, so
+# they are left for the operator to opt into per workspace.
+_DEFAULT_REDACT_PATTERNS = [r"Bearer\s+[0-9a-fA-F]{16,}"]
+
+
+class RedactConfig(BaseModel):
+    """Scrub secret-shaped strings from tool *results* before they are returned
+    to any harness (and before they are written to the audit log). Off by
+    default; harness-agnostic when enabled. See spec §10.2 / ADR redaction."""
+
+    enabled: bool = False
+    patterns: list[str] = Field(default_factory=lambda: list(_DEFAULT_REDACT_PATTERNS))
+    replacement: str = "[REDACTED]"
+
+
 class Workspace(BaseModel):
     servers: dict[str, ServerSpec] = Field(default_factory=dict)
     authz: Authz = Field(default_factory=Authz)
+    redact: RedactConfig = Field(default_factory=RedactConfig)
 
 
 class DangerousCommands(BaseModel):

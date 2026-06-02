@@ -22,7 +22,15 @@ def _config_path() -> Path:
     return Path.home() / ".config" / "opencode" / "opencode.json"
 
 
-def install(*, dry_run: bool = False, append_instructions: str | None = None) -> None:
+def install(
+    *,
+    dry_run: bool = False,
+    append_instructions: str | None = None,
+    scope: str = "local",
+    with_redaction_hook: bool = False,
+) -> None:
+    # OpenCode has no per-scope config or Claude-Code-style hooks; `scope` and
+    # `with_redaction_hook` are accepted (uniform dispatch signature) and ignored.
     url = endpoints.http_url()
     if url is None:
         raise SystemExit("listen.tcp is disabled; enable it to wire an HTTP harness (spec §3.1)")
@@ -43,7 +51,7 @@ def install(*, dry_run: bool = False, append_instructions: str | None = None) ->
         _common.append_guidance(Path(append_instructions), dry_run=dry_run)
 
 
-def uninstall(*, dry_run: bool = False) -> None:
+def uninstall(*, dry_run: bool = False, scope: str = "local") -> None:  # scope: see install()
     _common.remove_json(_config_path(), ["mcp"], "unified-hub", dry_run=dry_run)
     if not dry_run:
         TokenStore().revoke(CALLER)

@@ -51,6 +51,17 @@ servers:
       command: python
       args: ["-m", "unified_mcp_servers.documents"]
 
+# Result redaction (spec §10.2) — scrub secret-shaped strings from tool RESULTS
+# before they're returned to a harness and before they hit the audit log.
+# Off by default. Patterns are regexes; the seeded one masks bearer tokens.
+# Add your own (e.g. "sk-[A-Za-z0-9]+" for API keys) but avoid broad patterns
+# like bare 64-hex — they'd also mask legitimate sha256 digests in output.
+# redact:
+#   enabled: true
+#   replacement: "[REDACTED]"
+#   patterns:
+#     - "Bearer\\s+[0-9a-fA-F]{16,}"
+
 authz:
   rules:
     # --- reads: allow ---------------------------------------------------------

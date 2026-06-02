@@ -39,6 +39,7 @@ from .config import (
     mcphub_home,
     workspace_local_path,
 )
+from .redaction import Redactor
 from .secrets import SecretsStore
 from .supervisor import SupervisedServer
 from .tokens import TokenStore
@@ -77,6 +78,7 @@ class Hub:
         self.servers: dict[str, SupervisedServer] = {}
         self.builtins = BuiltinRegistry()
         self.authz = AuthzResolver(config.workspace, config.dangerous)
+        self.redactor = Redactor(config.workspace.redact)
         self.approval = Approval(
             enabled=config.hub.approval.enabled,
             foreground=sys.stdin.isatty() and sys.stdout.isatty(),
@@ -228,7 +230,9 @@ class Hub:
         t0 = time.monotonic()
         try:
             value = await self._forward(server_name, tool, args)
-            result = _result_dict(value)
+            # Redact secrets before the result is audited or returned, so neither
+            # the audit log nor the caller ever sees them (spec §10.2).
+            result = self.redactor.result(_result_dict(value))
             status = "error" if result.get("isError") else "ok"
         except Exception as exc:  # noqa: BLE001
             duration = (time.monotonic() - t0) * 1000
@@ -368,6 +372,7 @@ class Hub:
             return
         self.config = new
         self.authz = AuthzResolver(new.workspace, new.dangerous)
+        self.redactor = Redactor(new.workspace.redact)
         self.approval.enabled = new.hub.approval.enabled
         await self._apply_server_diff(new.workspace.servers)
         self._write_canonical_truth()

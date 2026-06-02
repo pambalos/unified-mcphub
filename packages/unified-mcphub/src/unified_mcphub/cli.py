@@ -58,13 +58,15 @@ def cmd_install(args: argparse.Namespace) -> int:
         raise SystemExit("specify a harness (or --list). Supported: "
                          + ", ".join(installers.list_harnesses()))
     installers.dispatch_install(
-        args.harness, dry_run=args.dry_run, append_instructions=args.append_instructions
+        args.harness, dry_run=args.dry_run,
+        append_instructions=args.append_instructions, scope=args.scope,
+        with_redaction_hook=args.with_redaction_hook,
     )
     return 0
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
-    installers.dispatch_uninstall(args.harness)
+    installers.dispatch_uninstall(args.harness, scope=args.scope)
     return 0
 
 
@@ -180,10 +182,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_install.add_argument("--list", action="store_true", help="list supported harnesses")
     p_install.add_argument("--dry-run", action="store_true")
     p_install.add_argument("--append-instructions", metavar="PATH")
+    p_install.add_argument(
+        "--scope", choices=["local", "user", "project"], default="local",
+        help="scope for harnesses that support it (claude-code: local=this project, "
+             "user=global/all projects, project=shared ./.mcp.json). default: local",
+    )
+    p_install.add_argument(
+        "--with-redaction-hook", action="store_true",
+        help="claude-code only: also install a user-scope PreToolUse hook that "
+             "redacts bearer tokens from `claude mcp` command output (opt-in)",
+    )
     p_install.set_defaults(func=cmd_install)
 
     p_uninstall = sub.add_parser("uninstall", help="reverse a harness install")
     p_uninstall.add_argument("harness")
+    p_uninstall.add_argument(
+        "--scope", choices=["local", "user", "project"], default="local",
+        help="scope the entry was installed at (default: local)",
+    )
     p_uninstall.set_defaults(func=cmd_uninstall)
 
     p_secrets = sub.add_parser("secrets", help="manage encrypted secrets")

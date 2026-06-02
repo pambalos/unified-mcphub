@@ -33,6 +33,10 @@ is redacted by default; for the extra-safe path (a Claude Code redaction hook + 
 workspace `redact:` result policy) see
 [Secret redaction](packages/unified-mcphub/README.md#secret-redaction-defense-in-depth).
 
+Add an upstream MCP server with `uv run unified-mcphub add-server NAME --npx 'PKG@ver'` — it
+probes the server and proposes default-deny authz rules. See
+[Adding MCP servers](packages/unified-mcphub/README.md#adding-mcp-servers).
+
 ## Develop
 
 ```sh

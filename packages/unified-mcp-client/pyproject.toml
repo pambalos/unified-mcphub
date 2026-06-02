@@ -7,7 +7,7 @@ name = "unified-mcp-client"
 version = "0.0.1"
 description = "Async MCP client (stdio + streamable-HTTP) on the official mcp SDK. Shared by unified-mcphub and (M1) adapter-base. See ADR-0023."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = {text = "Proprietary - All Rights Reserved"}
 authors = [
     {name = "Bradley Justice", email = "bradleyjusticeca@gmail.com"},
@@ -33,7 +33,7 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py312"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

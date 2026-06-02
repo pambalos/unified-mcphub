@@ -83,9 +83,145 @@ digests that appear in tool output.
 ## Workspaces & config
 
 The seeded `default` workspace enables the five bundled light/safe servers (`filesystem`,
-`shell`, `fetch`, `python`, `documents`) and no third-party upstreams, so it runs anywhere. To
-add servers, edit `~/.unified-ai/mcphub/workspaces/default.yaml` — it ships with commented
-examples for stdio `command:` and HTTP `url:` upstreams + rules (container `image:` is M0.5).
+`shell`, `fetch`, `python`, `documents`) and no third-party upstreams, so it runs anywhere. A
+workspace file (`~/.unified-ai/mcphub/workspaces/<name>.yaml`) has two parts: a `servers:` map
+(what to run) and an `authz.rules:` list (what each caller may invoke). **Default-deny is
+implicit** — anything not matched by an `allow`/`prompt` rule is denied. The seeded
+`default.yaml` ships commented stdio + HTTP server templates you can copy.
+
+## Adding MCP servers
+
+### The easy path — `add-server`
+
+```bash
+uv run unified-mcphub add-server memory --npx '@modelcontextprotocol/server-memory@2025.4.0'
+```
+
+This writes the server into the active workspace, **probes it once** to list its tools, and
+**proposes authz rules** from a name heuristic — then you confirm. A running hub picks the change
+up live (file-watch reload); no restart. Useful flags:
+
+| Flag | Effect |
+|---|---|
+| `--npx PKG` / `--uvx PKG` | shorthand for a Node / Python stdio server (`npx -y PKG` / `uvx PKG`) |
+| `--command CMD --arg …` | a raw stdio command (the blessed path — see Supply chain below) |
+| `--url URL [--auth-secret-ref NAME]` | a remote streamable-HTTP server (Bearer from the secrets store) |
+| `--configure-perms` | step through each tool and set its permission by hand (Enter = the heuristic default) |
+| `--no-probe` | don't connect; write the entry with no rules |
+| `--dry-run` | print the resulting workspace YAML, write nothing |
+| `--allow-unpinned` | opt this server out of version-pinning (see below) |
+| `--yes` / `--force` | non-interactive / overwrite an existing entry |
+
+Reverse it with `uv run unified-mcphub remove-server memory` (deletes the entry **and** the rules
+scoped to it, after a confirmation; shared `mcp://*/…` wildcards are left alone).
+
+#### How rules are proposed (three tiers)
+
+The probe classifies each tool by name into a default effect, written as an explicit
+server-scoped rule (`mcp://NAME/tool`) so the workspace stays self-documenting. A verb
+is matched at **either** the leading or trailing word boundary, so both `read_graph`
+and `hub_repo_search` (the `<noun>_<verb>` shape many remote servers use) are caught:
+
+| Tier | Matches (verb at either end) | Default effect |
+|---|---|---|
+| reads | `read list get search find query fetch` | **allow** |
+| mutations | `create add update edit write set execute run generate …` | **prompt** |
+| destructive | `delete remove drop destroy` | **deny** (fail closed) |
+| anything else | (unrecognized) | **prompt** (safe default — review these) |
+
+Destructive tools are denied by default and never silently reachable; flip the rule to
+`prompt`/`allow` (or use `--configure-perms`) to opt in.
+
+### The manual path — edit the workspace YAML
+
+`add-server` just edits the file; you can too. Append under `servers:` and add matching rules.
+Three upstream kinds:
+
+```yaml
+servers:
+  memory:                                   # stdio (Node, via npx)
+    enabled: true
+    upstream:
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-memory@2025.4.0"]
+      env: { MEMORY_FILE_PATH: "~/.unified-ai/memory.json" }
+  remote-thing:                             # remote streamable-HTTP
+    enabled: true
+    upstream: { url: "https://mcp.example.com/v1" }
+    auth_secret_ref: remote-thing-token     # `secrets set remote-thing-token` first
+authz:
+  rules:
+    - tool: "mcp://memory/read_graph"
+      effect: allow
+    - tool: "mcp://memory/delete_entities"
+      effect: deny
+```
+
+Container (`image:`) upstreams arrive at M0.5. A bare `python`/`python3` command resolves to the
+hub's own interpreter; any other command (`npx`, `uvx`, an absolute path) must be on `PATH`.
+
+### Distribution methods
+
+The MCP ecosystem ships servers in four shapes, all expressible here:
+
+| Shape | Config | Notes |
+|---|---|---|
+| Node (npx) | `command: npx`, `args: ["-y", "pkg@ver"]` | the most common |
+| Python (uvx) | `command: uvx`, `args: ["pkg==ver"]` | |
+| container | `image: …` | M0.5 (digest-pinned + Sigstore) |
+| remote | `url: …` + `auth_secret_ref`/`oauth` | no local runtime needed |
+
+### Authenticating a remote server
+
+Store the credential once (`secrets set <name>`), then reference it. Three shapes:
+
+```sh
+# 1) Bearer token (the common case — e.g. Hugging Face: Authorization: Bearer hf_…)
+secrets set hf-token
+add-server hf --url https://huggingface.co/mcp --auth-secret-ref hf-token
+
+# 2) Custom API-key header (e.g. Context7: CONTEXT7_API_KEY: <key>) — empty scheme = raw value
+secrets set c7
+add-server context7 --url https://mcp.context7.com/mcp \
+  --auth-secret-ref c7 --auth-header CONTEXT7_API_KEY --auth-scheme ''
+
+# 3) OAuth — interactive login. Modern remote servers use Dynamic Client Registration:
+#    give just the issuer in the workspace `oauth:` block and `auth login` discovers the
+#    endpoints + registers a client automatically (no pre-registered client_id needed).
+auth login linear
+```
+
+`--auth-header` defaults to `Authorization` and `--auth-scheme` to `Bearer`; pass
+`--auth-scheme ''` to send the secret as the raw header value. OAuth config (static
+`authorize_url`/`token_url`/`client_id`, or DCR via `issuer`) lives in the workspace
+`oauth:` block; tokens are stored encrypted and auto-refreshed.
+
+### Supply chain & version pinning
+
+`npx -y pkg` / `uvx pkg` **download and run remote code at startup** — *upstream* of the hub's
+call-time gating. So pin, or better, don't fetch at all. The hardening ladder:
+
+1. **unpinned `@latest`** — worst; **refused by default** (see below).
+2. **pinned version** (`pkg@1.2.3`, `pkg==1.2.3`) — a **drift guard**: no silent pickup of a
+   freshly-published / hijacked release. Still fetches-and-runs; doesn't protect against a
+   malicious *pinned* package. This is what the policy enforces — necessary, not sufficient.
+3. **integrity/hash pinning** — pin the exact artifact, not just the version string.
+4. **pre-install + point at the binary** (`uv tool install …` / `npm i -g …`, then
+   `--command <binary>`) — **no network at startup**, fully auditable. The gold standard.
+
+`require_pinned_versions: true` (in `config.yaml`, **on by default**) refuses to start an
+unpinned fetch-and-run upstream — both at `add-server` time and on hub load. It's the stdio
+analog of M0.5's image-digest pinning: one "pin your upstreams" policy. Opt a single server out
+with `allow_unpinned: true` (or `--allow-unpinned`) when it genuinely only ships `@latest` or a
+git ref; set the global to `false` to disable the policy entirely.
+
+### Verify
+
+```bash
+uv run unified-mcphub list-servers     # configured servers + kind
+uv run unified-mcphub list-tools       # tools the running hub aggregates
+uv run unified-mcphub audit tail       # watch decisions as calls come in
+```
 
 ## Develop
 

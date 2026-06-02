@@ -29,6 +29,42 @@ _BACKOFF = [1, 2, 4, 8, 16, 32, 60]
 SecretResolver = Callable[[str], str | None]
 
 
+def build_connection(
+    spec: ServerSpec, *, secret_resolver: SecretResolver | None = None, name: str = ""
+) -> MCPConnection:
+    """Build a client connection from a server spec — the single source of truth
+    for connection semantics, shared by the live supervisor and the `add-server`
+    probe (so a server probes exactly the way the hub will later run it).
+
+    A bare `python`/`python3` resolves to the hub's own interpreter, so bundled
+    first-party servers run in the venv that actually has the package. For an HTTP
+    upstream the `auth_secret_ref` Bearer token is resolved at connect time (so
+    credential rotation is picked up, and an authed probe authenticates).
+    """
+    up = spec.upstream
+    if up.command:
+        command = sys.executable if up.command in ("python", "python3") else up.command
+        return StdioConnection(command, up.args, up.env or None)
+    if up.url:
+
+        def headers() -> dict[str, str]:
+            ref = spec.auth_secret_ref
+            if not ref or secret_resolver is None:
+                return {}
+            secret = secret_resolver(ref)
+            if not secret:
+                return {}
+            # `Authorization: Bearer <secret>` by default; a custom header with
+            # `auth_scheme: null` sends the raw secret (API-key style).
+            value = f"{spec.auth_scheme} {secret}" if spec.auth_scheme else secret
+            return {spec.auth_header: value}
+
+        return HttpConnection(up.url, headers_provider=headers)
+    if up.image:
+        raise ValueError(f"server '{name}': container upstreams arrive at M0.5 (SEC-MCP-5)")
+    raise ValueError(f"server '{name}': upstream needs one of command/url/image")
+
+
 class SupervisedServer:
     def __init__(
         self, name: str, spec: ServerSpec, secret_resolver: SecretResolver | None = None
@@ -45,29 +81,8 @@ class SupervisedServer:
         self._task: asyncio.Task | None = None
         self._attempt = 0
 
-    def _auth_headers(self) -> dict[str, str]:
-        # Resolved at connect time so credential rotation is picked up.
-        ref = self.spec.auth_secret_ref
-        if not ref or self._secret_resolver is None:
-            return {}
-        secret = self._secret_resolver(ref)
-        return {"Authorization": f"Bearer {secret}"} if secret else {}
-
     def _make_connection(self) -> MCPConnection:
-        up = self.spec.upstream
-        if up.command:
-            # Resolve a bare `python`/`python3` to the hub's own interpreter, so
-            # bundled first-party servers (unified_mcp_servers.*) run in the venv
-            # that actually has the package — no PATH/activation assumptions.
-            command = sys.executable if up.command in ("python", "python3") else up.command
-            return StdioConnection(command, up.args, up.env or None)
-        if up.url:
-            return HttpConnection(up.url, headers_provider=self._auth_headers)
-        if up.image:
-            raise ValueError(
-                f"server '{self.name}': container upstreams arrive at M0.5 (SEC-MCP-5)"
-            )
-        raise ValueError(f"server '{self.name}': upstream needs one of command/url/image")
+        return build_connection(self.spec, secret_resolver=self._secret_resolver, name=self.name)
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._run(), name=f"supervise:{self.name}")

@@ -25,6 +25,7 @@ from watchfiles import awatch
 from . import audit as audit_mod
 from . import discovery
 from . import endpoints
+from . import servers as servers_mod
 from .approval import Approval
 from .authz import AuthzResolver, Effect
 from .config import (
@@ -268,7 +269,25 @@ class Hub:
 
     # --- server management ---
 
+    def _pinning_ok(self, name: str, spec) -> bool:
+        """Supply-chain floor: refuse to stand up an unpinned fetch-and-run upstream
+        when `require_pinned_versions` is on (unless the server opts out). Fail closed
+        — skip the server, keep the rest of the hub running."""
+        if not self.config.hub.require_pinned_versions or spec.allow_unpinned:
+            return True
+        if servers_mod.is_pinned(spec):
+            return True
+        logger.error(
+            "server '%s' refused: unpinned fetch-and-run upstream and "
+            "require_pinned_versions is on. Pin a version, set `allow_unpinned: true` "
+            "on the server, or disable the policy in config.yaml.",
+            name,
+        )
+        return False
+
     async def _add_server(self, name: str, spec) -> None:
+        if not self._pinning_ok(name, spec):
+            return
         server = SupervisedServer(name, spec, secret_resolver=self.secrets.get)
         self.servers[name] = server
         await server.start()

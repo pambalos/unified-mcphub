@@ -140,7 +140,9 @@ redact:
 Patterns are regexes. Avoid broad ones like bare 64-hex — they'd also mask
 legitimate sha256 digests that appear in tool output.
 
-The seeded `default` workspace runs anywhere. To add
+The seeded `default` workspace enables the five bundled light/safe servers
+(`filesystem`, `shell`, `fetch`, `python`, `documents`) and no third-party
+upstreams, so it runs anywhere. To add
 servers, edit `~/.unified-ai/mcphub/workspaces/default.yaml` — it ships with commented examples for
 stdio `command:` and HTTP `url:` upstreams + rules (container `image:` is M0.5).
 

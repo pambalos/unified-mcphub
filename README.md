@@ -19,6 +19,25 @@ This repo is **standalone** — it does not depend on the orchestrator. Architec
 decisions (ADRs) and roadmap live in the separate `unified-ai-docs` repo; the
 implementation specs for this product live under [`specs/mcphub/`](specs/mcphub).
 
+### Optional servers
+
+Heavier, opt-in servers live under `packages/` but are **excluded from the uv
+workspace** (large deps) — built and run standalone via `uvx`, then added like any
+upstream with `add-server`:
+
+| Package | What it adds |
+|---|---|
+| [`unified-mcp-graphify`](packages/unified-mcp-graphify) | build + query [graphify](https://github.com/safishamsi/graphify) code-knowledge graphs for any repo over MCP — `build_graph` / `graph_status` / 7 graph-query + 3 GitHub-PR tools, all per-call `path` |
+
+```sh
+# once published to your index:
+uv run unified-mcphub add-server graphify --uvx 'unified-mcp-graphify==0.1.0'
+```
+
+Until then, install it from this repo (`packages/unified-mcp-graphify`). See its
+[README](packages/unified-mcp-graphify) for the workspace entry, backend options,
+and authz rules.
+
 ## Quickstart
 
 ```sh
@@ -42,6 +61,8 @@ probes the server and proposes default-deny authz rules. See
 ```sh
 uv run pytest packages/unified-mcphub/tests packages/unified-mcp-servers/tests
 uv run ruff check packages
+# optional servers are excluded from the workspace — test them on their own:
+( cd packages/unified-mcp-graphify && uv run --extra dev pytest )
 ```
 
 ## License

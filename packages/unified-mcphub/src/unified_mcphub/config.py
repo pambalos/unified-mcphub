@@ -84,6 +84,12 @@ class HubConfig(BaseModel):
     audit: AuditConfig = Field(default_factory=AuditConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     active_workspace: str = "default"
+    # Supply-chain safety floor: refuse to stand up an unpinned fetch-and-run
+    # upstream (`npx -y pkg`, bare `uvx pkg`). A *drift guard* — it stops silent
+    # pickup of a freshly-published / hijacked `@latest`; it does NOT stop
+    # fetch-and-run itself (pre-install + point at a binary for that). The stdio
+    # analog of image-digest pinning. Per-server `allow_unpinned: true` opts out.
+    require_pinned_versions: bool = True
 
 
 class Upstream(BaseModel):
@@ -97,17 +103,33 @@ class Upstream(BaseModel):
 
 
 class OAuthConfig(BaseModel):
-    authorize_url: str
-    token_url: str
-    client_id: str
+    # Static registration: provide all three for a pre-registered OAuth client.
+    authorize_url: str | None = None
+    token_url: str | None = None
+    client_id: str | None = None
+    # Dynamic Client Registration (RFC 8414/7591): give `issuer` and the endpoints
+    # are discovered + a client is registered on first `auth login` (the modern
+    # remote-MCP path — e.g. Linear). `registration_url` overrides discovery.
+    issuer: str | None = None
+    registration_url: str | None = None
     scopes: list[str] = Field(default_factory=list)
 
 
 class ServerSpec(BaseModel):
     upstream: Upstream
     auth_secret_ref: str | None = None
+    # Header to carry the `auth_secret_ref` value on an HTTP upstream. Defaults
+    # suit a bearer server (`Authorization: Bearer <secret>`). For an API-key
+    # server that uses a custom header, set `auth_header` (e.g. `X-API-Key`,
+    # `CONTEXT7_API_KEY`) and `auth_scheme: null` to send the raw secret value.
+    auth_header: str = "Authorization"
+    auth_scheme: str | None = "Bearer"
     oauth: OAuthConfig | None = None
     enabled: bool = True  # flip to false to disable a package without deleting its entry
+    # Explicit, audited opt-out of `require_pinned_versions` for this one server
+    # (e.g. it only ships `@latest` or a git ref). Mirrors the `allow_blocked`
+    # fetch override: a deliberate escape hatch, not a default.
+    allow_unpinned: bool = False
 
 
 class Rule(BaseModel):

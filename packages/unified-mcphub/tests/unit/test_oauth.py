@@ -76,3 +76,66 @@ async def test_refresh_rotates_token(monkeypatch):
     _mock_async_client(monkeypatch, {"access_token": "a2", "refresh_token": "r2"})
     await flow.refresh()
     assert store.get("github-oauth-refresh") == "r2"
+
+
+# --- Dynamic Client Registration -------------------------------------------------
+
+_META = {
+    "authorization_endpoint": "https://as/auth",
+    "token_endpoint": "https://as/token",
+    "registration_endpoint": "https://as/register",
+}
+
+
+def _route_mock(monkeypatch, *, on_get, on_post):
+    """Route mock httpx requests by method, tracking POST (registration) count."""
+    real = httpx.AsyncClient
+    counts = {"get": 0, "post": 0}
+
+    def handler(request):
+        if request.method == "GET":
+            counts["get"] += 1
+            return httpx.Response(200, json=on_get)
+        counts["post"] += 1
+        return httpx.Response(200, json=on_post)
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handler))
+    )
+    return counts
+
+
+async def test_build_flow_static_does_no_network():
+    flow = await oauth.build_flow(
+        "gh", FakeStore(), authorize_url="https://gh/a", token_url="https://gh/t", client_id="cid"
+    )
+    assert (flow.authorize_url, flow.token_url, flow.client_id) == (
+        "https://gh/a",
+        "https://gh/t",
+        "cid",
+    )
+
+
+async def test_build_flow_dcr_discovers_and_registers(monkeypatch):
+    store = FakeStore()
+    counts = _route_mock(monkeypatch, on_get=_META, on_post={"client_id": "dyn-123"})
+    flow = await oauth.build_flow("linear", store, issuer="https://as", scopes=["read"])
+    assert flow.authorize_url == "https://as/auth"
+    assert flow.token_url == "https://as/token"
+    assert flow.client_id == "dyn-123"
+    assert store.get("linear-oauth-client-id") == "dyn-123"  # cached for reuse
+    assert counts["post"] == 1  # registered exactly once
+
+
+async def test_build_flow_reuses_cached_client_id(monkeypatch):
+    store = FakeStore()
+    store.set("linear-oauth-client-id", "cached-cid")
+    counts = _route_mock(monkeypatch, on_get=_META, on_post={"client_id": "should-not-be-used"})
+    flow = await oauth.build_flow("linear", store, issuer="https://as")
+    assert flow.client_id == "cached-cid"
+    assert counts["post"] == 0  # no re-registration
+
+
+async def test_build_flow_no_client_no_registration_errors():
+    with pytest.raises(ValueError, match="registration endpoint"):
+        await oauth.build_flow("x", FakeStore(), authorize_url="https://a", token_url="https://t")

@@ -7,7 +7,7 @@ name = "unified-mcp-servers"
 version = "0.0.1"
 description = "First-party light/safe MCP servers bundled as the unified-mcphub default tier"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = {text = "Proprietary - All Rights Reserved"}
 authors = [
     {name = "Bradley Justice", email = "bradleyjusticeca@gmail.com"},

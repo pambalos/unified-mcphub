@@ -1,17 +1,19 @@
-"""Persisting an *_always rule must NOT destroy the hand-edited workspace file.
+"""Persisting an *_always rule writes to the machine-managed .local.yaml.
 
-Regression for the comment-stripping bug: PyYAML's safe_dump round-trip wiped
-comments/ordering; the persist path uses ruamel round-trip instead (ADR-0006
-tier-1 exact rule; spec §5.3).
+ADR-0024: learned rules persist to `workspaces/<name>.local.yaml`, never into the
+hand-curated `workspaces/<name>.yaml`. At load they merge as tier-1 exact rules
+ordered ahead of the curated rules (ADR-0006; first-match-wins → they win).
 """
 
 from __future__ import annotations
 
 import yaml
 
-from unified_mcphub.config import load_config, workspace_path
+from unified_mcphub.authz import Effect
+from unified_mcphub.config import load_config, workspace_local_path, workspace_path
 from unified_mcphub.hub import Hub
 
+# Hand-edited curated workspace — comments/ordering must never be touched by the hub.
 WORKSPACE = """\
 # Default workspace — hand-edited, comments must survive.
 servers: {}
@@ -24,35 +26,80 @@ authz:
 """
 
 
-def test_persist_preserves_comments_and_adds_rule(hub_home):
-    path = workspace_path("default")
-    path.write_text(WORKSPACE)
+def test_allow_always_writes_local_file_and_leaves_curated_untouched(hub_home):
+    curated = workspace_path("default")
+    curated.write_text(WORKSPACE)
+    before = curated.read_bytes()
 
     hub = Hub(load_config())
     hub._persist_exact_rule("mcp://shell/execute_command", "claude-code", allowed=True)
 
-    text = path.read_text()
-    # Comments preserved (this is the whole point):
-    assert "# Default workspace — hand-edited, comments must survive." in text
-    assert "# Reads are safe:" in text
-    assert "# wildcard read allow" in text
+    # The curated file is byte-for-byte unchanged.
+    assert curated.read_bytes() == before
 
-    # New tier-1 rule was prepended and is loadable + correct:
-    data = yaml.safe_load(text)
-    rules = data["authz"]["rules"]
-    assert rules[0] == {
-        "tool": "mcp://shell/execute_command",
-        "callers": ["claude-code"],
-        "effect": "allow",
-    }
-    assert rules[1]["tool"] == "mcp://*/read_*"  # original rule kept, after the new one
+    # The learned rule landed in the separate .local.yaml as a flat list.
+    local = workspace_local_path("default")
+    learned = yaml.safe_load(local.read_text())
+    assert learned == [
+        {"tool": "mcp://shell/execute_command", "callers": ["claude-code"], "effect": "allow"}
+    ]
+
+    # A fresh load merges it as a tier-1 exact rule the resolver returns.
+    cfg = load_config()
+    assert cfg.workspace.authz.rules[0].tool == "mcp://shell/execute_command"
+    assert cfg.workspace.authz.rules[1].tool == "mcp://*/read_*"  # curated rule still after it
+    resolver = Hub(cfg).authz
+    assert resolver.resolve("mcp://shell/execute_command", {}, "claude-code").effect is Effect.ALLOW
 
 
-def test_persist_into_empty_workspace(hub_home):
-    # No existing authz section — must still write a valid file.
-    path = workspace_path("default")
-    path.write_text("servers: {}\n")
+def test_deny_always_writes_local_file_and_leaves_curated_untouched(hub_home):
+    curated = workspace_path("default")
+    curated.write_text(WORKSPACE)
+    before = curated.read_bytes()
+
     hub = Hub(load_config())
     hub._persist_exact_rule("mcp://filesystem/delete_file", "opencode", allowed=False)
-    data = yaml.safe_load(path.read_text())
-    assert data["authz"]["rules"][0]["effect"] == "deny"
+
+    assert curated.read_bytes() == before
+
+    local = workspace_local_path("default")
+    learned = yaml.safe_load(local.read_text())
+    assert learned == [
+        {"tool": "mcp://filesystem/delete_file", "callers": ["opencode"], "effect": "deny"}
+    ]
+
+    cfg = load_config()
+    resolver = Hub(cfg).authz
+    assert resolver.resolve("mcp://filesystem/delete_file", {}, "opencode").effect is Effect.DENY
+
+
+def test_learned_rules_accrete_newest_first(hub_home):
+    workspace_path("default").write_text(WORKSPACE)
+    hub = Hub(load_config())
+    hub._persist_exact_rule("mcp://shell/execute_command", "claude-code", allowed=True)
+    hub._persist_exact_rule("mcp://filesystem/delete_file", "claude-code", allowed=False)
+
+    learned = yaml.safe_load(workspace_local_path("default").read_text())
+    assert [r["tool"] for r in learned] == [
+        "mcp://filesystem/delete_file",  # most recent first
+        "mcp://shell/execute_command",
+    ]
+
+
+def test_learned_deny_overrides_curated_allow(hub_home):
+    # Curated file allows everything via a wildcard; a learned exact deny must win.
+    workspace_path("default").write_text(
+        "servers: {}\n"
+        "authz:\n"
+        "  rules:\n"
+        '    - tool: "mcp://*/*"\n'
+        "      effect: allow\n"
+    )
+    hub = Hub(load_config())
+    hub._persist_exact_rule("mcp://filesystem/delete_file", "claude-code", allowed=False)
+
+    resolver = Hub(load_config()).authz
+    # The learned tier-1 exact deny beats the curated wildcard allow.
+    assert resolver.resolve("mcp://filesystem/delete_file", {}, "claude-code").effect is Effect.DENY
+    # An unrelated tool still rides the curated wildcard allow.
+    assert resolver.resolve("mcp://filesystem/read_file", {}, "claude-code").effect is Effect.ALLOW

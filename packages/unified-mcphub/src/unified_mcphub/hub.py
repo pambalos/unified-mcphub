@@ -17,8 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+import yaml
 from mcp import types
-from ruamel.yaml import YAML
 from ulid import ULID
 from watchfiles import awatch
 
@@ -35,7 +35,9 @@ from .config import (
     canonical_truth_path,
     config_path,
     load_config,
+    load_learned_rules,
     mcphub_home,
+    workspace_local_path,
     workspace_path,
 )
 from .secrets import SecretsStore
@@ -271,21 +273,19 @@ class Hub:
     # --- approval persistence (spec §5.3, ADR-0006 tier-1 exact rule) ---
 
     def _persist_exact_rule(self, tool_uri: str, caller: str, *, allowed: bool) -> None:
-        path = workspace_path(self.config.workspace_name)
         rule = Rule(tool=tool_uri, callers=[caller], effect="allow" if allowed else "deny")
+        # Immediate effect: prepend in-memory so the next call sees it before reload.
         self.config.workspace.authz.rules.insert(0, rule)
         self.authz = AuthzResolver(self.config.workspace, self.config.dangerous)
-        # Round-trip via ruamel so the user's comments/ordering/formatting survive
-        # (PyYAML's safe_dump would strip them — the workspace file is hand-edited).
-        ryaml = YAML()
-        data = ryaml.load(path.read_text()) if path.exists() else None
-        data = data or {}
-        data.setdefault("authz", {}).setdefault("rules", [])
-        data["authz"]["rules"].insert(
-            0, {"tool": tool_uri, "callers": [caller], "effect": rule.effect}
+        # Persist to the machine-managed `.local.yaml` (ADR-0024). The curated
+        # workspace file is never rewritten by the hub, so a plain YAML dump of a
+        # flat rule list is enough — no comments to preserve.
+        name = self.config.workspace_name
+        learned = load_learned_rules(name)
+        learned.insert(0, {"tool": tool_uri, "callers": [caller], "effect": rule.effect})
+        secure_write(
+            workspace_local_path(name), yaml.safe_dump(learned, sort_keys=False).encode()
         )
-        with path.open("w") as fh:
-            ryaml.dump(data, fh)
 
     # --- discovery + canonical truth (spec §11.1, §12) ---
 
@@ -322,9 +322,14 @@ class Hub:
     # --- file-watch reload (spec §8) ---
 
     async def _watch_reload(self) -> None:
+        name = self.config.workspace_name
         watched = [
             p
-            for p in (str(config_path()), str(workspace_path(self.config.workspace_name)))
+            for p in (
+                str(config_path()),
+                str(workspace_path(name)),
+                str(workspace_local_path(name)),
+            )
             if Path(p).exists()
         ]
         if not watched:

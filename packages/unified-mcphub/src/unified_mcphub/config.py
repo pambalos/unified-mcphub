@@ -41,6 +41,11 @@ def workspace_path(name: str) -> Path:
     return mcphub_home() / "workspaces" / f"{name}.yaml"
 
 
+def workspace_local_path(name: str) -> Path:
+    """Machine-managed learned-rules file (ADR-0024) beside the curated workspace."""
+    return mcphub_home() / "workspaces" / f"{name}.local.yaml"
+
+
 def dangerous_commands_path() -> Path:
     return mcphub_home() / "dangerous-commands.yaml"
 
@@ -149,11 +154,31 @@ def load_hub_config() -> HubConfig:
     return HubConfig.model_validate(_read_yaml(config_path()))
 
 
+def load_learned_rules(name: str) -> list[dict]:
+    """Raw learned-rule dicts from `<name>.local.yaml` (ADR-0024); [] if absent.
+
+    The file is a flat YAML list of exact rules, written by the hub on `*_always`.
+    """
+    path = workspace_local_path(name)
+    if not path.exists():
+        return []
+    data = yaml.safe_load(path.read_text()) or []
+    if not isinstance(data, list):
+        raise ValueError(f"{path}: expected a list of rules at the top level")
+    return data
+
+
 def load_workspace(name: str) -> Workspace:
     path = workspace_path(name)
     if not path.exists():
         raise FileNotFoundError(f"workspace '{name}' not found at {path}")
-    return Workspace.model_validate(_read_yaml(path))
+    workspace = Workspace.model_validate(_read_yaml(path))
+    # Learned rules (ADR-0024) live in a separate machine-managed file and merge
+    # as tier-1 exact rules ordered ahead of the curated rules — first-match-wins
+    # means they win. The file is absent until the first `*_always`.
+    learned = [Rule.model_validate(r) for r in load_learned_rules(name)]
+    workspace.authz.rules[:0] = learned
+    return workspace
 
 
 def load_dangerous_commands() -> DangerousCommands:

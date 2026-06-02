@@ -187,11 +187,19 @@ class Hub:
         prompt_ms: float | None = None
         if decision.effect is Effect.PROMPT:
             t0 = time.monotonic()
-            outcome = await self.approval.resolve(tool_uri, caller_id, _summary(tool, args))
+            outcome = await self.approval.resolve(
+                tool_uri,
+                caller_id,
+                _summary(tool, args),
+                args,
+                floored=decision.source == "danger_floor",
+            )
             prompt_ms = (time.monotonic() - t0) * 1000
             authz_decision = outcome.authz_decision
             if outcome.persistent:
-                self._persist_exact_rule(tool_uri, caller_id, allowed=outcome.allowed)
+                self._persist_exact_rule(
+                    tool_uri, caller_id, allowed=outcome.allowed, args_filter=outcome.args_filter
+                )
             denied_reason = outcome.reason
             allowed = outcome.allowed
         else:
@@ -271,17 +279,28 @@ class Hub:
 
     # --- approval persistence (spec §5.3, ADR-0006 tier-1 exact rule) ---
 
-    def _persist_exact_rule(self, tool_uri: str, caller: str, *, allowed: bool) -> None:
-        rule = Rule(tool=tool_uri, callers=[caller], effect="allow" if allowed else "deny")
+    def _persist_exact_rule(
+        self, tool_uri: str, caller: str, *, allowed: bool, args_filter: dict | None = None
+    ) -> None:
+        rule = Rule(
+            tool=tool_uri,
+            callers=[caller],
+            effect="allow" if allowed else "deny",
+            args_filter=args_filter,
+        )
         # Immediate effect: prepend in-memory so the next call sees it before reload.
         self.config.workspace.authz.rules.insert(0, rule)
         self.authz = AuthzResolver(self.config.workspace, self.config.dangerous)
         # Persist to the machine-managed `.local.yaml` (ADR-0024). The curated
         # workspace file is never rewritten by the hub, so a plain YAML dump of a
-        # flat rule list is enough — no comments to preserve.
+        # flat rule list is enough — no comments to preserve. The args_filter
+        # (ADR-0025) is omitted when absent so tool-wide rules stay minimal.
         name = self.config.workspace_name
         learned = load_learned_rules(name)
-        learned.insert(0, {"tool": tool_uri, "callers": [caller], "effect": rule.effect})
+        entry: dict = {"tool": tool_uri, "callers": [caller], "effect": rule.effect}
+        if args_filter:
+            entry["args_filter"] = args_filter
+        learned.insert(0, entry)
         secure_write(
             workspace_local_path(name), yaml.safe_dump(learned, sort_keys=False).encode()
         )

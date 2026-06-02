@@ -84,7 +84,65 @@ While it's running, in another terminal:
 .venv/bin/unified-mcphub install claude-code  # wire a harness (--list / --dry-run)
 ```
 
-The seeded `default` workspace has no external servers (built-ins only) so it runs anywhere. To add
+### Wiring a harness — default vs. extra-safe
+
+**Default install** — wires the harness to the hub at `--scope local` (this project only):
+
+```bash
+.venv/bin/unified-mcphub install claude-code            # this project
+.venv/bin/unified-mcphub install claude-code --scope user   # all projects (global)
+.venv/bin/unified-mcphub install opencode
+```
+
+This already protects you: the CLI itself masks `Bearer <token>` from its own
+output (Layer 1, always on), so the hub auth token never lands in your scrollback,
+and reinstalling is idempotent — it removes-then-adds, which **rotates the token in
+one step**. Add `--dry-run` to preview, `--list` to see supported harnesses.
+
+**Extra-safe install (claude-code only)** — adds an opt-in defense at the harness
+layer on top of the default:
+
+```bash
+.venv/bin/unified-mcphub install claude-code --with-redaction-hook
+```
+
+`--with-redaction-hook` also installs a **user-scope `PreToolUse` hook** (in
+`~/.claude/settings.json`, scoped via `if: "Bash(claude mcp *)"`) that pipes the
+output of any `claude mcp …` command through a bearer-token redactor — so tokens
+are scrubbed even when you (or another tool) run those commands by hand, outside
+the hub. It degrades to a no-op if `jq` is absent or the command is already
+wrapped. Off by default; opt in with the flag. Reverse any install with
+`uninstall <harness> [--scope …]`.
+
+### Secret redaction (defense in depth)
+
+Three independent layers, so a leak has to beat all of them:
+
+| Layer | Scope | Default | How to enable |
+|---|---|---|---|
+| 1 — CLI output masking | the hub's own `claude mcp …` subprocess output | **always on** | — |
+| 2 — Claude Code hook | any `claude mcp …` command, hub-run or hand-run | off | `install claude-code --with-redaction-hook` |
+| 3 — `redact:` result policy | scrubs tool **results** before they're returned *and* before they're audited | off | uncomment the `redact:` block in your workspace |
+
+Layer 3 is harness-agnostic (every connected harness benefits) and lives in the
+workspace file. The seeded `default.yaml` ships it commented-out with a
+conservative example (bearer tokens only):
+
+```yaml
+redact:
+  enabled: true
+  replacement: "[REDACTED]"
+  patterns:
+    - "Bearer\\s+[0-9a-fA-F]{16,}"
+    # - "sk-[A-Za-z0-9]+"          # add your own API-key shapes
+```
+
+Patterns are regexes. Avoid broad ones like bare 64-hex — they'd also mask
+legitimate sha256 digests that appear in tool output.
+
+The seeded `default` workspace enables the five bundled light/safe servers
+(`filesystem`, `shell`, `fetch`, `python`, `documents`) and no third-party
+upstreams, so it runs anywhere. To add
 servers, edit `~/.unified-ai/mcphub/workspaces/default.yaml` — it ships with commented examples for
 stdio `command:` and HTTP `url:` upstreams + rules (container `image:` is M0.5).
 

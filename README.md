@@ -28,6 +28,11 @@ uv run unified-mcphub start          # seeds ~/.unified-ai/mcphub on first run, 
 
 Point a harness at it, or query the socket directly (`~/.unified-ai/mcphub/mcphub.sock`).
 
+Wire a harness with `uv run unified-mcphub install claude-code`. Secret-shaped output
+is redacted by default; for the extra-safe path (a Claude Code redaction hook + the
+workspace `redact:` result policy) see
+[Secret redaction](packages/unified-mcphub/README.md#secret-redaction-defense-in-depth).
+
 ## Develop
 
 ```sh

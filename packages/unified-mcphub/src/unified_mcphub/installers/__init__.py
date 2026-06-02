@@ -22,9 +22,19 @@ def _require(registry: dict, name: str):
     return registry[name]
 
 
-def dispatch_install(name: str, *, dry_run: bool = False, append_instructions: str | None = None) -> None:
-    _require(INSTALLERS, name)(dry_run=dry_run, append_instructions=append_instructions)
+def dispatch_install(
+    name: str,
+    *,
+    dry_run: bool = False,
+    append_instructions: str | None = None,
+    scope: str = "local",
+    with_redaction_hook: bool = False,
+) -> None:
+    _require(INSTALLERS, name)(
+        dry_run=dry_run, append_instructions=append_instructions,
+        scope=scope, with_redaction_hook=with_redaction_hook,
+    )
 
 
-def dispatch_uninstall(name: str, *, dry_run: bool = False) -> None:
-    _require(UNINSTALLERS, name)(dry_run=dry_run)
+def dispatch_uninstall(name: str, *, dry_run: bool = False, scope: str = "local") -> None:
+    _require(UNINSTALLERS, name)(dry_run=dry_run, scope=scope)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from unified_mcphub import installers
 from unified_mcphub.installers import _common
@@ -33,8 +34,11 @@ def test_cli_path_invokes_opencode(hub_home, enable_tcp, monkeypatch):
     enable_tcp()
     monkeypatch.setattr(_common, "harness_cli_present", lambda binary: True)
     captured: dict = {}
-    monkeypatch.setattr(_common.subprocess, "run",
-                        lambda cmd, **kw: captured.setdefault("cmd", cmd))
+    monkeypatch.setattr(
+        _common.subprocess, "run",
+        lambda cmd, **kw: (captured.__setitem__("cmd", cmd),
+                           SimpleNamespace(stdout="", stderr="", returncode=0))[1],
+    )
 
     installers.dispatch_install("opencode")
     assert captured["cmd"][:4] == ["opencode", "mcp", "add", "unified-hub"]

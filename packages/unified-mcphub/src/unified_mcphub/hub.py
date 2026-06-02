@@ -38,7 +38,6 @@ from .config import (
     load_learned_rules,
     mcphub_home,
     workspace_local_path,
-    workspace_path,
 )
 from .secrets import SecretsStore
 from .supervisor import SupervisedServer
@@ -321,17 +320,21 @@ class Hub:
 
     # --- file-watch reload (spec §8) ---
 
-    async def _watch_reload(self) -> None:
-        name = self.config.workspace_name
-        watched = [
+    def _watch_paths(self) -> list[str]:
+        # Watch the hub config file and the whole workspaces directory. The active
+        # workspace's curated <name>.yaml and machine-managed <name>.local.yaml both
+        # live in that directory; watching the directory (rather than the two files)
+        # also catches a .local.yaml created/removed mid-session, which awatch can't
+        # do for a path that is absent when the watch starts. Reload is idempotent
+        # and keyed to the active workspace, so events for other files are no-ops.
+        return [
             p
-            for p in (
-                str(config_path()),
-                str(workspace_path(name)),
-                str(workspace_local_path(name)),
-            )
+            for p in (str(config_path()), str(mcphub_home() / "workspaces"))
             if Path(p).exists()
         ]
+
+    async def _watch_reload(self) -> None:
+        watched = self._watch_paths()
         if not watched:
             return
         # Cancellation on stop() propagates out of awatch and ends this task cleanly.

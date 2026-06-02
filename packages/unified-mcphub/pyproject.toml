@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-mcphub"
+version = "0.0.1"
+description = "Local MCP hub — one audited, policy-gated MCP server for every harness on your machine"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Proprietary - All Rights Reserved"}
+authors = [
+    {name = "Bradley Justice", email = "bradleyjusticeca@gmail.com"},
+]
+keywords = ["mcp", "model-context-protocol", "ai", "agents", "hub", "authz", "audit"]
+
+# Keep this lightweight. The hub must NOT depend on unified-ai-orchestrator
+# (which pulls anthropic/openai/whisper/pyaudio/etc.). It talks OUT to MCP
+# servers via the standalone `unified-mcp-client` package (ADR-0023).
+dependencies = [
+    "unified-mcp-client",    # async upstream MCP client (stdio + HTTP) — ADR-0023
+    "pydantic>=2.0.0",       # config models
+    "pyyaml>=6.0.0",         # config.yaml + workspace files (runtime load)
+    "ruamel.yaml>=0.18.0",   # comment-preserving round-trip when persisting learned rules
+    "fastapi>=0.110.0",      # MCP server surface + /v1/* endpoints
+    "uvicorn>=0.28.0",       # ASGI server (Unix socket + TCP)
+    "httpx>=0.24.0",         # OAuth + upstream HTTP MCP servers
+    "cryptography>=42.0.0",  # secrets.enc
+    "keyring>=24.0.0",       # OS keyring for the secrets key
+    "python-ulid>=2.0.0",    # request_id
+    "filelock>=3.12.0",      # advisory locks (audit, run-lock)
+    "watchfiles>=0.21.0",    # file-watch config reload
+    "rich>=13.0.0",          # in-process approval TUI + audit tail formatting
+    "mcp>=1.0.0",            # official MCP SDK — hub speaks MCP server protocol
+    "unified-mcp-servers",   # bundled light/safe default tool servers (workspace src)
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+    "mypy>=1.9.0",
+]
+
+[project.scripts]
+unified-mcphub = "unified_mcphub.cli:main"
+
+# Resolve the shared client from the uv workspace member (ADR-0023).
+[tool.uv.sources]
+unified-mcp-client = { workspace = true }
+unified-mcp-servers = { workspace = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+unified_mcphub = ["defaults/*.yaml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

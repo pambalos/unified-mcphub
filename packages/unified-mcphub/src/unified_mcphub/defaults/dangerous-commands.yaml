@@ -1,0 +1,33 @@
+# Global safety floor — see specs/mcphub/m0.v1.md §2.4. Seeded on first run; trim to taste.
+#
+# Operations matching these patterns ALWAYS require approval (effect: prompt),
+# regardless of workspace rules — unless you:
+#   - remove the pattern here (drops the floor for that whole category), OR
+#   - add an explicit exact-tool allow rule in your workspace (overrides one op), OR
+#   - set approval.enabled: false in config.yaml (disables ALL prompting, including this floor).
+#
+# Precedence: explicit exact-tool rule > THIS floor > workspace wildcard > implicit default-deny.
+
+require_approval:
+  # --- Destructive data operations ---
+  - "mcp://*/delete_*"
+  - "mcp://*/remove_*"
+  - "mcp://*/destroy_*"
+  - "mcp://*/drop_*"
+  - "mcp://*/truncate_*"
+
+  # --- Dangerous shell ---
+  - "mcp://shell/execute_command:rm -rf*"
+  - "mcp://shell/execute_command:sudo*"
+  - "mcp://shell/execute_command:chmod -R*"
+  - "mcp://shell/execute_command:dd *"
+  - "mcp://shell/execute_command:mkfs*"
+
+  # --- Version-control destructive ---
+  - "mcp://*/force_push*"
+  - "mcp://shell/execute_command:git push --force*"
+  - "mcp://shell/execute_command:git reset --hard*"
+
+  # --- Credential / secret operations ---
+  - "mcp://*/rotate_*"
+  - "mcp://*/revoke_*"

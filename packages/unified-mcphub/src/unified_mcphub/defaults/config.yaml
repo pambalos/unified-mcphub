@@ -1,0 +1,7 @@
+# unified-mcphub hub config — see specs/mcphub/m0.v1.md §2. Seeded on first run; edit freely.
+listen:
+  unix_socket: ~/.unified-ai/mcphub/mcphub.sock   # primary transport (mode 0600)
+  tcp: 127.0.0.1:7712                              # fallback; per-caller bearer token (set by `install`)
+approval:
+  enabled: true                                    # prompt for `prompt`-effect calls; false = no prompts at all
+active_workspace: default

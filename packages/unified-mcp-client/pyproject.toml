@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-mcp-client"
+version = "0.0.1"
+description = "Async MCP client (stdio + streamable-HTTP) on the official mcp SDK. Shared by unified-mcphub and (M1) adapter-base. See ADR-0023."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Proprietary - All Rights Reserved"}
+authors = [
+    {name = "Bradley Justice", email = "bradleyjusticeca@gmail.com"},
+]
+keywords = ["mcp", "model-context-protocol", "client", "async"]
+
+# Deliberately tiny: only the official MCP SDK. No orchestrator, no LLM deps.
+# The interchange type is `mcp.types.Tool` — this package defines no parallel
+# tool model (ADR-0023).
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.3.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

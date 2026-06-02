@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-mcp-servers"
+version = "0.0.1"
+description = "First-party light/safe MCP servers bundled as the unified-mcphub default tier"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Proprietary - All Rights Reserved"}
+authors = [
+    {name = "Bradley Justice", email = "bradleyjusticeca@gmail.com"},
+]
+keywords = ["mcp", "model-context-protocol", "tools", "filesystem", "shell", "fetch"]
+
+# Deliberately tiny: the whole point of this tier is that it stays lightweight
+# (ADR-0023). Logic is stdlib-only; the ONLY runtime dependency is the official
+# MCP SDK. ripgrep is used opportunistically as a system binary (Option A) with
+# a stdlib fallback, so it is NOT a Python dependency. PDF/DOCX support is an
+# optional extra, lazy-imported by the documents server.
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+documents = [
+    "pypdf>=4.0.0",
+    "python-docx>=1.0.0",
+]
+dev = [
+    "pytest>=8.4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

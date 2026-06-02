@@ -1,0 +1,23 @@
+# Virtual uv workspace root for the unified-mcphub product.
+# No [project] table → uv treats this as a virtual workspace; the real packages
+# live under packages/* (the hub CLI + its two internal libraries).
+[tool.uv.workspace]
+members = ["packages/*"]
+
+# Dev tooling for the whole workspace (uv installs this group by default).
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+]
+
+# Shared test/lint config so a workspace-wide run behaves identically to the
+# per-package config (the hub package also declares these locally).
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

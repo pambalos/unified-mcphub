@@ -1,0 +1,97 @@
+"""Prompt path + allow_always persistence — spec §5, ADR-0018 (SEC-MCP-4 slice).
+
+A `prompt`-effect call blocks on the in-process approval; an `allow_always`
+keypress writes a precedence-1 exact rule into the active workspace and the call
+proceeds. Audit records `prompt_allowed`.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+import httpx
+import pytest
+
+from unified_mcphub.config import load_config
+from unified_mcphub.hub import Hub
+
+
+def _add_prompt_rule(hub_home):
+    wf = hub_home / "workspaces" / "default.yaml"
+    wf.write_text(wf.read_text() + '    - tool: "mcp://*/read_*"\n      effect: prompt\n')
+
+
+@pytest.mark.asyncio
+async def test_prompt_allow_always_persists_exact_rule(hub_home, monkeypatch):
+    _add_prompt_rule(hub_home)
+    monkeypatch.setattr("sys.stdin", io.StringIO("A\n"))  # allow_always
+
+    config = load_config()
+    hub = Hub(config)
+    hub.approval.foreground = True  # force the TUI path (isatty() is False under pytest)
+    await hub.start()
+    sock = Path(config.hub.listen.unix_socket)
+    try:
+        transport = httpx.AsyncHTTPTransport(uds=str(sock))
+        async with httpx.AsyncClient(transport=transport, base_url="http://hub", timeout=15) as c:
+            r = await c.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "filesystem__read_file", "arguments": {"path": "x"}},
+                },
+                headers={"X-Caller-Id": "claude-code"},
+            )
+            body = r.json()
+            assert "result" in body, body
+            assert body["result"]["isError"] is False
+    finally:
+        await hub.stop()
+
+    date = datetime.now(timezone.utc).date().isoformat()
+    entries = [
+        json.loads(line)
+        for line in (hub_home / "audit" / f"{date}.jsonl").read_text().splitlines()
+    ]
+    received = [e for e in entries if e["phase"] == "received"][-1]
+    assert received["authz_decision"] == "prompt_allowed"
+
+    # allow_always wrote a precedence-1 exact rule for this op.
+    assert "mcp://filesystem/read_file" in (hub_home / "workspaces" / "default.yaml").read_text()
+
+
+@pytest.mark.asyncio
+async def test_background_prompt_denies_no_channel(hub_home):
+    _add_prompt_rule(hub_home)
+    config = load_config()
+    hub = Hub(config)
+    hub.approval.foreground = False  # detached hub -> no TUI
+    await hub.start()
+    sock = Path(config.hub.listen.unix_socket)
+    try:
+        transport = httpx.AsyncHTTPTransport(uds=str(sock))
+        async with httpx.AsyncClient(transport=transport, base_url="http://hub", timeout=15) as c:
+            r = await c.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "filesystem__read_file", "arguments": {"path": "x"}},
+                },
+                headers={"X-Caller-Id": "claude-code"},
+            )
+            assert "error" in r.json()
+    finally:
+        await hub.stop()
+
+    date = datetime.now(timezone.utc).date().isoformat()
+    entries = [
+        json.loads(line)
+        for line in (hub_home / "audit" / f"{date}.jsonl").read_text().splitlines()
+    ]
+    rec = [e for e in entries if e["phase"] == "received"][-1]
+    assert rec["authz_decision"] == "prompt_denied"
+    assert rec["reason"] == "no_approval_channel"
+    assert not [e for e in entries if e["phase"] == "completed"]  # denied -> received only

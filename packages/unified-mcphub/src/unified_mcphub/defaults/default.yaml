@@ -1,0 +1,117 @@
+# Default workspace — see specs/mcphub/m0.v1.md §2.2 and
+# specs/mcphub/default-core-hub-packages.md. Seeded on first run; edit in place.
+# Default-deny is implicit: anything not matched by a rule below is denied.
+#
+# The five servers below are the bundled light/safe tier (the `unified-mcp-servers`
+# package). `command: python` is resolved to the hub's own interpreter, which has
+# the package — no PATH/activation needed. Flip `enabled: false` on any entry to
+# disable that package without deleting it.
+#
+# To add your own servers, append entries here (stdio `command:`/`args:` or remote
+# `url:` + `auth_secret_ref:`; container `image:` arrives at M0.5).
+servers:
+  filesystem:
+    enabled: true
+    upstream:
+      command: python
+      # --delete-mode soft (move to trash) is the default; switch to `hard` to unlink.
+      args: ["-m", "unified_mcp_servers.filesystem", "--delete-mode", "soft"]
+
+  shell:
+    enabled: true
+    upstream:
+      command: python
+      args: ["-m", "unified_mcp_servers.shell"]
+
+  fetch:
+    enabled: true
+    upstream:
+      command: python
+      # SSRF guard is off by default — localhost/private/LAN fetches just work.
+      # `--block-host` is the ONLY block list: it ships seeded with the cloud-metadata
+      # addresses. Remove a line to stop blocking it; add lines to block more hosts.
+      # A blocked host can still be reached per-call with allow_blocked=true, which
+      # the `mcp://fetch/fetch_webpage` prompt rule below turns into an approval.
+      args: [
+        "-m", "unified_mcp_servers.fetch",
+        "--search-backend", "auto",
+        "--block-host", "169.254.169.254",
+        "--block-host", "fd00:ec2::254",
+      ]
+
+  python:
+    enabled: true
+    upstream:
+      command: python
+      args: ["-m", "unified_mcp_servers.python"]
+
+  documents:
+    enabled: true
+    upstream:
+      command: python
+      args: ["-m", "unified_mcp_servers.documents"]
+
+authz:
+  rules:
+    # --- reads: allow ---------------------------------------------------------
+    # Wildcard verbs cover read_*/list_*/get_* across every server:
+    - tool: "mcp://*/list_*"
+      effect: allow
+    - tool: "mcp://*/read_*"
+      effect: allow
+    - tool: "mcp://*/get_*"
+      effect: allow
+    # Built-in liveness check (harmless; otherwise default-denied):
+    - tool: "mcp://built-in/ping"
+      effect: allow
+    # Read-only tools whose names don't start with those verbs, named explicitly:
+    - tool: "mcp://filesystem/file_info"
+      effect: allow
+    - tool: "mcp://filesystem/search_files"
+      effect: allow
+    - tool: "mcp://filesystem/glob_files"
+      effect: allow
+    - tool: "mcp://filesystem/find_files"
+      effect: allow
+    - tool: "mcp://fetch/search_internet"
+      effect: allow
+    - tool: "mcp://python/check_syntax"
+      effect: allow
+    - tool: "mcp://python/find_function"
+      effect: allow
+
+    # --- fetch_webpage: allow normally, prompt on blocked-host override -------
+    # Order matters (exact rules are first-match-wins). The override rule comes
+    # FIRST: re-targeting a blocked host with allow_blocked=true is the explicit,
+    # audited escape hatch — gate it behind an approval prompt so reaching e.g.
+    # the cloud-metadata endpoint is never silent. A normal fetch (allow_blocked
+    # absent/false) skips this rule and hits the plain allow below.
+    - tool: "mcp://fetch/fetch_webpage"
+      args_filter: { allow_blocked: { equals: ["true"] } }
+      effect: prompt
+    - tool: "mcp://fetch/fetch_webpage"
+      effect: allow
+
+    # --- writes / exec: prompt ------------------------------------------------
+    - tool: "mcp://filesystem/create_file"
+      effect: prompt
+    - tool: "mcp://filesystem/edit_file"
+      effect: prompt
+    - tool: "mcp://filesystem/delete_file"
+      effect: prompt
+    - tool: "mcp://shell/execute_command"
+      effect: prompt
+
+    # Everything else falls through to default-deny.
+    #
+    # Argument-scoped rules — uncomment + adapt. args_filter is a per-argument
+    # operator map (ADR-0006): {arg: {equals|starts_with|matches: [values]}}.
+    # Arg names AND together; multiple values within one operator OR together.
+    # - tool: "mcp://shell/execute_command"        # only allow git/pytest commands
+    #   args_filter: { command: { starts_with: ["git ", "pytest "] } }
+    #   effect: allow
+    #
+    # Allow-everything (sandbox) posture — uncomment; the dangerous-commands floor
+    # still applies:
+    # - tool: "mcp://*/*"
+    #   effect: allow

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-mcp-graphify"
+version = "0.1.0"
+description = "Optional MCP wrapper: build + query graphify knowledge graphs for arbitrary repos on demand"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "Proprietary - All Rights Reserved"}
+authors = [
+    {name = "Bradley Justice", email = "bradleyjusticeca@gmail.com"},
+]
+keywords = ["mcp", "model-context-protocol", "graphify", "knowledge-graph", "code-comprehension"]
+
+# graphify is PINNED HERE (not in the workspace / hub config) so the wrapper owns
+# its version — a workspace config edit can never silently bump it. The [mcp] extra
+# pulls the MCP SDK that graphify.serve's helpers rely on; we also use mcp directly.
+# This package is heavy (graphify pulls ~29 tree-sitter grammars + an LLM backend),
+# so it is deliberately EXCLUDED from the uv workspace (see root pyproject) and the
+# tiny `unified-mcp-servers` tier — it is built/run standalone via uvx.
+dependencies = [
+    "graphifyy[mcp]==0.8.28",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.0",
+]
+
+[project.scripts]
+unified-mcp-graphify = "unified_mcp_graphify.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+# Self-contained pytest config so the suite doesn't inherit the workspace root's
+# asyncio_mode (this package is excluded from the workspace and has no async tests).
+[tool.pytest.ini_options]
+testpaths = ["tests"]

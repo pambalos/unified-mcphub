@@ -1,0 +1,231 @@
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    {
+      "label": "orders.py",
+      "file_type": "code",
+      "source_file": "orders.py",
+      "source_location": "L1",
+      "id": "orders",
+      "community": 1,
+      "norm_label": "orders.py"
+    },
+    {
+      "label": "Order",
+      "file_type": "code",
+      "source_file": "orders.py",
+      "source_location": "L5",
+      "id": "orders_order",
+      "community": 2,
+      "norm_label": "order"
+    },
+    {
+      "label": ".__init__()",
+      "file_type": "code",
+      "source_file": "orders.py",
+      "source_location": "L6",
+      "id": "orders_order_init",
+      "community": 2,
+      "norm_label": ".__init__()"
+    },
+    {
+      "label": ".subtotal()",
+      "file_type": "code",
+      "source_file": "orders.py",
+      "source_location": "L9",
+      "id": "orders_order_subtotal",
+      "community": 0,
+      "norm_label": ".subtotal()"
+    },
+    {
+      "label": "Decimal",
+      "file_type": "code",
+      "source_file": "orders.py",
+      "source_location": "L9",
+      "id": "decimal",
+      "community": 0,
+      "norm_label": "decimal"
+    },
+    {
+      "label": "apply_tax()",
+      "file_type": "code",
+      "source_file": "orders.py",
+      "source_location": "L13",
+      "id": "orders_apply_tax",
+      "community": 0,
+      "norm_label": "apply_tax()"
+    },
+    {
+      "label": "checkout()",
+      "file_type": "code",
+      "source_file": "orders.py",
+      "source_location": "L17",
+      "id": "orders_checkout",
+      "community": 0,
+      "norm_label": "checkout()"
+    },
+    {
+      "label": "Order processing \u2014 tiny fixture for graphify Pass 1 (tree-sitter, no LLM).",
+      "file_type": "rationale",
+      "source_file": "orders.py",
+      "source_location": "L1",
+      "id": "orders_rationale_1",
+      "community": 1,
+      "norm_label": "order processing \u2014 tiny fixture for graphify pass 1 (tree-sitter, no llm)."
+    }
+  ],
+  "links": [
+    {
+      "relation": "imports_from",
+      "context": "import",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L2",
+      "weight": 1.0,
+      "source": "orders",
+      "target": "decimal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L13",
+      "weight": 1.0,
+      "source": "orders",
+      "target": "orders_apply_tax",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L17",
+      "weight": 1.0,
+      "source": "orders",
+      "target": "orders_checkout",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L5",
+      "weight": 1.0,
+      "source": "orders",
+      "target": "orders_order",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L1",
+      "weight": 1.0,
+      "source": "orders_rationale_1",
+      "target": "orders",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "parameter_type",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L13",
+      "weight": 1.0,
+      "source": "orders_apply_tax",
+      "target": "orders_order",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "parameter_type",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L17",
+      "weight": 1.0,
+      "source": "orders_checkout",
+      "target": "orders_order",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L6",
+      "weight": 1.0,
+      "source": "orders_order",
+      "target": "orders_order_init",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "method",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L9",
+      "weight": 1.0,
+      "source": "orders_order",
+      "target": "orders_order_subtotal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L14",
+      "weight": 1.0,
+      "source": "orders_apply_tax",
+      "target": "orders_order_subtotal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "return_type",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L9",
+      "weight": 1.0,
+      "source": "orders_order_subtotal",
+      "target": "decimal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "return_type",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L13",
+      "weight": 1.0,
+      "source": "orders_apply_tax",
+      "target": "decimal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "context": "return_type",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L17",
+      "weight": 1.0,
+      "source": "orders_checkout",
+      "target": "decimal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "orders.py",
+      "source_location": "L18",
+      "weight": 1.0,
+      "source": "orders_checkout",
+      "target": "orders_apply_tax",
+      "confidence_score": 1.0
+    }
+  ],
+  "hyperedges": [],
+  "built_at_commit": "b631db2d6b2e75278cf1f67822c30bf2c3b5eaa6"
+}

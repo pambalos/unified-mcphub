@@ -3,6 +3,11 @@
 # live under packages/* (the hub CLI + its two internal libraries).
 [tool.uv.workspace]
 members = ["packages/*"]
+# unified-mcp-graphify is an optional, heavy server (graphify pulls ~29 tree-sitter
+# grammars + an LLM backend). Keep it OUT of the shared workspace venv/lockfile and
+# the tiny default tier — it is built/run standalone via uvx. Its tests run on their
+# own: `cd packages/unified-mcp-graphify && uv run --extra dev pytest`.
+exclude = ["packages/unified-mcp-graphify"]
 
 # Dev tooling for the whole workspace (uv installs this group by default).
 [dependency-groups]

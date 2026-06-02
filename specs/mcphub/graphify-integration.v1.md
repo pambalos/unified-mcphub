@@ -177,16 +177,26 @@ return anything, and `serve` is tied to one graph location. The wrapper closes
 both gaps with a thin MCP server that **adds an init/build tool** and makes
 graphify **repo-relative**.
 
-### Shape (decided)
+### Shape (decided — **IMPLEMENTED** in `packages/unified-mcp-graphify` v0.1.0)
 
-A small, separate optional package `unified-mcp-graphify`, a **workspace member**
-kept out of the tiny default tier. It **pins graphify in its own `pyproject.toml`**
-(`graphifyy[mcp]==0.8.28`) — so the *wrapper* owns the graphify version and a
-*config* edit can never silently bump it and break things. The workspace YAML
-just points at our pinned wrapper; graphify's pin rides along transitively, and
-add-server's `require_pinned_versions` is satisfied at our package level. Also
-depends on `mcp`. (`unified-mcp-client` is not needed — this is a server.) Run via
-`uvx` / stdio; added to a workspace with `add-server`.
+A small, separate optional package `unified-mcp-graphify`, under `packages/` but
+**excluded from the uv workspace** (`[tool.uv.workspace] exclude`) so its heavy
+graphify deps (~29 tree-sitter grammars + an LLM backend) don't bloat the shared
+hub venv/lockfile; it's built/run standalone via `uvx`. It **pins graphify in its
+own `pyproject.toml`** (`graphifyy[mcp]==0.8.28`) — so the *wrapper* owns the
+graphify version and a *config* edit can never silently bump it and break things.
+The workspace YAML just points at our pinned wrapper; graphify's pin rides along
+transitively, and add-server's `require_pinned_versions` is satisfied at our
+package level. Also depends on `mcp` (FastMCP). (`unified-mcp-client` is not
+needed — this is a server.) Run via `uvx` / stdio; added to a workspace with
+`add-server`.
+
+> **Status:** built + tested. **All 12 tools shipped**: `build_graph`,
+> `graph_status`, the 7 graph-query tools, and the 3 GitHub PR tools
+> (`list_prs`/`get_pr_impact`/`triage_prs`). 24 unit tests; end-to-end MCP stdio
+> probe lists the tools and returns results; the PR tools verified **live**
+> against GitHub (`gh`). The PR tools run `gh`/`git` with cwd = `path` (graph
+> impact uses that repo's graph); they need `gh` installed + authenticated.
 
 **Every tool takes a per-call `path`** (no cwd dependency — see below) and resolves
 the graph at graphify's **native** location `<path>/graphify-out/graph.json`

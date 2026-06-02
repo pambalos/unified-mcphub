@@ -194,26 +194,22 @@ def is_recognized(tool_name: str) -> bool:
 # --- probe (warm + list) ------------------------------------------------------
 
 
-def _probe_connection(spec: ServerSpec):
-    # Build the probe connection exactly as the hub will run it (shared builder),
-    # resolving `auth_secret_ref` so an authenticated remote server can be probed.
-    from .secrets import SecretsStore
-    from .supervisor import build_connection
-
-    return build_connection(spec, secret_resolver=SecretsStore().get)
-
-
-def probe(spec: ServerSpec, *, timeout: float = 120.0) -> list[types.Tool]:
+def probe(spec: ServerSpec, *, name: str = "", timeout: float = 120.0) -> list[types.Tool]:
     """Connect once and list tools, returning [] on any failure.
 
     The single connect absorbs a cold `npx`/`uvx` download (spawn + initialize +
     list happen on the one warm process), bounded by a generous `timeout` that is
     **decoupled from the supervisor's 30s wait_ready** — so a first-run download
-    never races a tight limit.
+    never races a tight limit. Auth is resolved exactly as the hub will at runtime
+    (shared `build_connection`), so an authed remote server probes authenticated.
     """
 
     async def _run() -> list[types.Tool]:
-        conn = _probe_connection(spec)
+        from .secrets import SecretsStore
+        from .supervisor import build_connection, resolve_auth_headers
+
+        headers = await resolve_auth_headers(spec, SecretsStore(), name=name)
+        conn = build_connection(spec, auth_headers=headers, name=name)
         async with conn:
             return await conn.list_tools()
 
@@ -546,7 +542,7 @@ def add_server(
     if no_probe:
         _note("[add-server] --no-probe: writing the server with no rules.")
     else:
-        tools = probe(spec, timeout=probe_timeout)
+        tools = probe(spec, name=server, timeout=probe_timeout)
         if tools and configure and sys.stdin.isatty() and not assume_yes:
             rules = configure_perms(server, tools)
         elif tools:

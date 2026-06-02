@@ -38,20 +38,32 @@ graphify pulls ~29 tree-sitter grammars + an LLM backend, so this package is
 **excluded from the uv workspace** and is never a dependency of the hub core or
 the tiny `unified-mcp-servers` tier. It is built and run standalone via `uvx`.
 
-## Add to a workspace
+## Install & add to a workspace
+
+Not yet published — install the CLI from this repo, then register the
+pre-installed binary with the hub (no fetch-at-spawn):
+
+```sh
+uv tool install ./packages/unified-mcp-graphify
+uv run unified-mcphub add-server graphify --command unified-mcp-graphify
+```
+
+`add-server` probes the server and proposes default-deny authz rules. The
+resulting workspace entry looks like:
 
 ```yaml
 servers:
   graphify:
     enabled: true
     upstream:
-      command: uvx
-      args: ["unified-mcp-graphify==0.1.0"]
+      command: unified-mcp-graphify   # the uv-tool-installed console script
 # authz (probe proposes; operator confirms):
 #   query_graph / get_* / god_nodes / graph_stats / shortest_path → allow
 #   list_prs / get_pr_impact / triage_prs                         → allow
 #   build_graph                                                    → prompt
 ```
+
+(Once published, `--uvx 'unified-mcp-graphify==<ver>'` will be the one-liner.)
 
 ## Develop / test
 

@@ -30,13 +30,14 @@ upstream with `add-server`:
 | [`unified-mcp-graphify`](packages/unified-mcp-graphify) | build + query [graphify](https://github.com/safishamsi/graphify) code-knowledge graphs for any repo over MCP — `build_graph` / `graph_status` / 7 graph-query + 3 GitHub-PR tools, all per-call `path` |
 
 ```sh
-# once published to your index:
-uv run unified-mcphub add-server graphify --uvx 'unified-mcp-graphify==0.1.0'
+# build + install the wrapper CLI from this repo (heavy: pulls graphify)
+uv tool install ./packages/unified-mcp-graphify
+# register the pre-installed binary with the hub (no fetch-at-spawn)
+uv run unified-mcphub add-server graphify --command unified-mcp-graphify
 ```
 
-Until then, install it from this repo (`packages/unified-mcp-graphify`). See its
-[README](packages/unified-mcp-graphify) for the workspace entry, backend options,
-and authz rules.
+See its [README](packages/unified-mcp-graphify) for the workspace entry, backend
+options, and authz rules.
 
 ## Quickstart
 

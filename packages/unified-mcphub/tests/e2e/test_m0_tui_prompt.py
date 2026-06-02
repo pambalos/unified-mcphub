@@ -1,8 +1,8 @@
 """Prompt path + allow_always persistence — spec §5, ADR-0018 (SEC-MCP-4 slice).
 
 A `prompt`-effect call blocks on the in-process approval; an `allow_always`
-keypress writes a precedence-1 exact rule into the active workspace and the call
-proceeds. Audit records `prompt_allowed`.
+keypress writes a precedence-1 exact rule to the machine-managed `.local.yaml`
+(ADR-0024) and the call proceeds. Audit records `prompt_allowed`.
 """
 
 from __future__ import annotations
@@ -59,8 +59,11 @@ async def test_prompt_allow_always_persists_exact_rule(hub_home, monkeypatch):
     received = [e for e in entries if e["phase"] == "received"][-1]
     assert received["authz_decision"] == "prompt_allowed"
 
-    # allow_always wrote a precedence-1 exact rule for this op.
-    assert "mcp://filesystem/read_file" in (hub_home / "workspaces" / "default.yaml").read_text()
+    # allow_always wrote a precedence-1 exact rule to the machine-managed
+    # .local.yaml (ADR-0024) — never into the hand-curated workspace file.
+    workspaces = hub_home / "workspaces"
+    assert "mcp://filesystem/read_file" in (workspaces / "default.local.yaml").read_text()
+    assert "mcp://filesystem/read_file" not in (workspaces / "default.yaml").read_text()
 
 
 @pytest.mark.asyncio

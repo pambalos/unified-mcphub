@@ -5,3 +5,7 @@ listen:
 approval:
   enabled: true                                    # prompt for `prompt`-effect calls; false = no prompts at all
 active_workspace: default
+# Refuse to start an unpinned fetch-and-run upstream (`npx -y pkg`, bare `uvx pkg`).
+# A drift guard, not a fetch-and-run block — see the README "Supply chain" section.
+# Set false to disable globally; set `allow_unpinned: true` on one server to opt it out.
+require_pinned_versions: true

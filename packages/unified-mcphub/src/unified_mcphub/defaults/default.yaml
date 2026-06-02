@@ -51,6 +51,26 @@ servers:
       command: python
       args: ["-m", "unified_mcp_servers.documents"]
 
+  # --- third-party server templates (uncomment + adapt, or use `add-server`) ---
+  # `unified-mcphub add-server NAME --npx PKG@ver` does this for you and proposes
+  # rules from a tool probe; these show the shape if you'd rather edit by hand.
+  # Remember: each server's tools are default-denied until an authz rule matches.
+  #
+  # memory:                                 # Node stdio server (via npx)
+  #   enabled: true
+  #   upstream:
+  #     command: npx
+  #     # Pin the version — require_pinned_versions (config.yaml) refuses an unpinned
+  #     # fetch-and-run upstream. Or pre-install and point `command:` at the binary.
+  #     args: ["-y", "@modelcontextprotocol/server-memory@2025.4.0"]
+  #     env: { MEMORY_FILE_PATH: "~/.unified-ai/memory.json" }
+  #
+  # remote-thing:                           # remote streamable-HTTP server
+  #   enabled: true
+  #   upstream:
+  #     url: "https://mcp.example.com/v1"
+  #   auth_secret_ref: remote-thing-token   # `secrets set remote-thing-token` first
+
 # Result redaction (spec §10.2) — scrub secret-shaped strings from tool RESULTS
 # before they're returned to a harness and before they hit the audit log.
 # Off by default. Patterns are regexes; the seeded one masks bearer tokens.

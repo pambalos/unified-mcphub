@@ -10,7 +10,7 @@ import logging
 import sys
 import urllib.parse
 
-from unified_mcphub import audit_reader, installers, introspect, oauth
+from unified_mcphub import audit_reader, installers, introspect, oauth, servers
 from unified_mcphub.config import audit_dir, bootstrap, load_hub_config, load_workspace
 from unified_mcphub.hub import run
 from unified_mcphub.secrets import SecretsStore
@@ -77,6 +77,52 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_env(pairs: list[str] | None) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for item in pairs or []:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise SystemExit(f"--env expects KEY=VALUE, got {item!r}")
+        env[key] = value
+    return env
+
+
+def cmd_add_server(args: argparse.Namespace) -> int:
+    servers.add_server(
+        args.name,
+        command=args.command,
+        args=args.arg,
+        env=_parse_env(args.env),
+        url=args.url,
+        npx=args.npx,
+        uvx=args.uvx,
+        auth_secret_ref=args.auth_secret_ref,
+        auth_header=args.auth_header,
+        auth_scheme=args.auth_scheme,
+        disabled=args.disabled,
+        allow_unpinned=args.allow_unpinned,
+        workspace=args.workspace,
+        no_probe=args.no_probe,
+        configure=args.configure_perms,
+        no_preflight=args.no_preflight,
+        probe_timeout=args.probe_timeout,
+        assume_yes=args.yes,
+        dry_run=args.dry_run,
+        force=args.force,
+    )
+    return 0
+
+
+def cmd_remove_server(args: argparse.Namespace) -> int:
+    servers.remove_server(
+        args.workspace or load_hub_config().active_workspace,
+        args.name,
+        assume_yes=args.yes,
+        dry_run=args.dry_run,
+    )
+    return 0
+
+
 def cmd_secrets(args: argparse.Namespace) -> int:
     store = SecretsStore()
     if args.sec_command == "set":
@@ -101,19 +147,29 @@ def cmd_auth(args: argparse.Namespace) -> int:
     spec = load_workspace(load_hub_config().active_workspace).servers.get(args.server)
     if spec is None or spec.oauth is None:
         raise SystemExit(f"server '{args.server}' has no `oauth:` config in the active workspace")
-    flow = oauth.OAuthFlow(
-        server=args.server,
-        authorize_url=spec.oauth.authorize_url,
-        token_url=spec.oauth.token_url,
-        client_id=spec.oauth.client_id,
-        store=store,
-        scopes=spec.oauth.scopes,
-    )
-    print(
-        f"Open this URL to authorize, then paste the redirect you land on:\n  {flow.authorization_url()}\n"
-    )
-    params = urllib.parse.parse_qs(urllib.parse.urlparse(input("redirect URL: ").strip()).query)
-    tokens = asyncio.run(flow.exchange_code(params["code"][0], params["state"][0]))
+
+    async def _login() -> dict:
+        # build_flow resolves a static client_id or discovers + dynamically
+        # registers one (DCR) when only an `issuer` is configured.
+        flow = await oauth.build_flow(
+            args.server,
+            store,
+            authorize_url=spec.oauth.authorize_url,
+            token_url=spec.oauth.token_url,
+            client_id=spec.oauth.client_id,
+            issuer=spec.oauth.issuer,
+            registration_url=spec.oauth.registration_url,
+            scopes=spec.oauth.scopes,
+        )
+        print(
+            f"Open this URL to authorize, then paste the redirect you land on:\n"
+            f"  {flow.authorization_url()}\n"
+        )
+        query = urllib.parse.urlparse(input("redirect URL: ").strip()).query
+        params = urllib.parse.parse_qs(query)
+        return await flow.exchange_code(params["code"][0], params["state"][0])
+
+    tokens = asyncio.run(_login())
     print("authorized; refresh token stored" if tokens.get("refresh_token") else "authorized")
     return 0
 
@@ -221,6 +277,79 @@ def build_parser() -> argparse.ArgumentParser:
         help="scope the entry was installed at (default: local)",
     )
     p_uninstall.set_defaults(func=cmd_uninstall)
+
+    p_add = sub.add_parser("add-server", help="add an external MCP server to a workspace")
+    p_add.add_argument("name", help="name for the server (the `mcp://NAME/...` prefix)")
+    src = p_add.add_mutually_exclusive_group(required=True)
+    src.add_argument(
+        "--npx", metavar="PKG", help="Node stdio server: `npx -y PKG` (pin: PKG@1.2.3)"
+    )
+    src.add_argument(
+        "--uvx", metavar="PKG", help="Python stdio server: `uvx PKG` (pin: 'PKG==1.2.3')"
+    )
+    src.add_argument("--command", metavar="CMD", help="raw stdio command (the blessed path)")
+    src.add_argument("--url", metavar="URL", help="remote streamable-HTTP MCP server")
+    p_add.add_argument(
+        "--arg", action="append", default=[], help="extra arg for the command (repeatable)"
+    )
+    p_add.add_argument("--env", action="append", metavar="KEY=VALUE", help="env var (repeatable)")
+    p_add.add_argument(
+        "--auth-secret-ref", metavar="NAME", help="secrets-store name → auth header (url servers)"
+    )
+    p_add.add_argument(
+        "--auth-header",
+        default="Authorization",
+        metavar="HEADER",
+        help="header to carry the secret (default: Authorization)",
+    )
+    p_add.add_argument(
+        "--auth-scheme",
+        default="Bearer",
+        metavar="SCHEME",
+        help="scheme prefix (default: Bearer; pass '' to send the raw secret, e.g. X-API-Key servers)",
+    )
+    p_add.add_argument("--workspace", help="target workspace (default: active)")
+    p_add.add_argument("--disabled", action="store_true", help="write enabled: false")
+    p_add.add_argument(
+        "--allow-unpinned",
+        action="store_true",
+        help="opt this server out of require_pinned_versions (explicit, audited)",
+    )
+    p_add.add_argument(
+        "--no-probe", action="store_true", help="skip connecting to list tools / propose rules"
+    )
+    p_add.add_argument(
+        "--configure-perms",
+        action="store_true",
+        help="step through each probed tool to set its permission (Enter = heuristic default)",
+    )
+    p_add.add_argument("--no-preflight", action="store_true", help="skip the command-on-PATH check")
+    p_add.add_argument(
+        "--probe-timeout",
+        type=float,
+        default=120.0,
+        metavar="SECONDS",
+        help="max seconds for the probe (absorbs first-run downloads; default 120)",
+    )
+    p_add.add_argument("--yes", action="store_true", help="non-interactive: accept proposed rules")
+    p_add.add_argument(
+        "--dry-run", action="store_true", help="print the resulting workspace YAML, write nothing"
+    )
+    p_add.add_argument(
+        "--force", action="store_true", help="overwrite an existing entry of the same name"
+    )
+    p_add.set_defaults(func=cmd_add_server)
+
+    p_rm = sub.add_parser(
+        "remove-server", help="remove a server + its scoped rules from a workspace"
+    )
+    p_rm.add_argument("name")
+    p_rm.add_argument("--workspace", help="target workspace (default: active)")
+    p_rm.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    p_rm.add_argument(
+        "--dry-run", action="store_true", help="print the resulting workspace YAML, write nothing"
+    )
+    p_rm.set_defaults(func=cmd_remove_server)
 
     p_secrets = sub.add_parser("secrets", help="manage encrypted secrets")
     sec_sub = p_secrets.add_subparsers(dest="sec_command", required=True)

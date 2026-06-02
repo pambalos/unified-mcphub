@@ -20,3 +20,7 @@ htmlcov/
 .DS_Store
 
 # Note: uv.lock IS committed (reproducible installs for an application).
+
+# graphify Part A scratch fixtures (not source)
+graphify-smoketest/
+graphify-out/

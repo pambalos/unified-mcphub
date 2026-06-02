@@ -36,3 +36,24 @@ jobs:
 
       - name: Tests
         run: uv run pytest packages
+
+  # unified-mcp-graphify is EXCLUDED from the uv workspace (heavy graphify deps),
+  # so the job above can't import it and skips it via the root pytest --ignore.
+  # This dedicated stage installs it in its own venv and runs its suite, so the
+  # package is still gated by CI. (Lint/format for it are already covered above by
+  # `ruff … packages`, which lints by path regardless of workspace membership.)
+  graphify-package:
+    name: graphify-package (standalone)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Test unified-mcp-graphify (own venv, graphifyy[mcp])
+        working-directory: packages/unified-mcp-graphify
+        run: uv run --extra dev pytest -q

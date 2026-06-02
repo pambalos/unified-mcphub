@@ -80,6 +80,18 @@ async def test_reload_restarts_changed_server(hub_home):
         await hub.stop()
 
 
+def test_watch_covers_workspaces_dir_for_late_created_local(hub_home):
+    # The learned-rules <name>.local.yaml may not exist at hub startup. Watching
+    # the whole workspaces directory (not the individual files) means a .local.yaml
+    # created/edited/removed mid-session still triggers a hot-reload (ADR-0024) —
+    # awatch can't watch a path that is absent when the watch starts.
+    paths = Hub(load_config())._watch_paths()
+    assert str(hub_home / "config.yaml") in paths
+    assert str(hub_home / "workspaces") in paths
+    # The not-yet-existing local file must NOT be watched directly (would raise).
+    assert str(hub_home / "workspaces" / "default.local.yaml") not in paths
+
+
 @pytest.mark.asyncio
 async def test_reload_keeps_prior_config_on_invalid_yaml(hub_home):
     hub = Hub(load_config())

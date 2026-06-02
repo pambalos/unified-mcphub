@@ -24,8 +24,8 @@ from enum import Enum
 class DecisionKind(str, Enum):
     ALLOW = "allow"
     ALLOW_SESSION = "allow_session"
-    ALLOW_ALWAYS_COMMAND = "allow_always_command"   # scope to this exact arg value
-    ALLOW_ALWAYS_PREFIX = "allow_always_prefix"     # scope to this arg prefix
+    ALLOW_ALWAYS_COMMAND = "allow_always_command"  # scope to this exact arg value
+    ALLOW_ALWAYS_PREFIX = "allow_always_prefix"  # scope to this arg prefix
     DENY = "deny"
     DENY_ALWAYS = "deny_always"
 
@@ -33,10 +33,10 @@ class DecisionKind(str, Enum):
 @dataclass
 class PromptOutcome:
     allowed: bool
-    authz_decision: str           # prompt_allowed | prompt_denied | approval_disabled
-    persistent: bool = False      # *_always -> write a rule to <name>.local.yaml
-    session: bool = False         # allow_session -> remember until restart
-    reason: str | None = None     # e.g. no_approval_channel
+    authz_decision: str  # prompt_allowed | prompt_denied | approval_disabled
+    persistent: bool = False  # *_always -> write a rule to <name>.local.yaml
+    session: bool = False  # allow_session -> remember until restart
+    reason: str | None = None  # e.g. no_approval_channel
     args_filter: dict | None = None  # set for the scoped allow-always variants
 
 
@@ -149,9 +149,11 @@ class Approval:
         keys["c"] = DecisionKind.ALLOW_ALWAYS_COMMAND
         if primary is not None:
             keys["p"] = DecisionKind.ALLOW_ALWAYS_PREFIX
-        menu = "[a]llow  [s]ession  [c]ommand-always" + (
-            "  [p]refix-always" if primary is not None else ""
-        ) + "  [d]eny  [D]eny-always"
+        menu = (
+            "[a]llow  [s]ession  [c]ommand-always"
+            + ("  [p]refix-always" if primary is not None else "")
+            + "  [d]eny  [D]eny-always"
+        )
         print(f"\n[approval] {caller} -> {tool_uri}\n  {summary}\n  {menu}: ", end="", flush=True)
         line = sys.stdin.readline()
         key = line.strip()[:1] if line else "d"
@@ -160,7 +162,9 @@ class Approval:
         if kind is DecisionKind.ALLOW_ALWAYS_COMMAND:
             if primary is None:
                 # No scopeable argument -> exact degenerates to tool scope (ADR-0025).
-                print(f"  -> allowing ALL calls to {tool_uri} (no arguments to scope on)", flush=True)
+                print(
+                    f"  -> allowing ALL calls to {tool_uri} (no arguments to scope on)", flush=True
+                )
                 return kind, None
             args_filter = build_arg_filter(primary, args[primary], prefix=False)
             self._echo_rule(tool_uri, args_filter, floored)
@@ -181,6 +185,12 @@ class Approval:
     def _echo_rule(tool_uri: str, args_filter: dict, floored: bool, broad: bool = False) -> None:
         print(f"  -> will persist: allow {tool_uri} where {_describe(args_filter)}", flush=True)
         if floored:
-            print("  ! this was prompted by the danger floor — the floor will stop prompting it", flush=True)
+            print(
+                "  ! this was prompted by the danger floor — the floor will stop prompting it",
+                flush=True,
+            )
         if broad:
-            print("  ! prefix grants are broad — they can match commands you didn't intend", flush=True)
+            print(
+                "  ! prefix grants are broad — they can match commands you didn't intend",
+                flush=True,
+            )

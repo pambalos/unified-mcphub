@@ -66,9 +66,14 @@ def test_ddg_blocked_reports_failure_not_empty_success(monkeypatch):
     monkeypatch.setattr(ft.CONFIG, "search_backend", "duckduckgo")
 
     class _Resp:
-        def read(self): return b"<html>unusual traffic detected, please solve the captcha</html>"
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
+        def read(self):
+            return b"<html>unusual traffic detected, please solve the captcha</html>"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
 
     monkeypatch.setattr(ft.urllib.request, "urlopen", lambda *a, **k: _Resp())
     r = ft.search_internet("anything")

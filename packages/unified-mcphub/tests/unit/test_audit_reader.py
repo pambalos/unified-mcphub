@@ -16,16 +16,26 @@ def _write(audit_dir, date_str, entries):
 
 
 def _received(rid, **over):
-    base = {"phase": "received", "request_id": rid, "ts": "2026-01-01T00:00:00+00:00",
-            "caller_id": "claude-code", "tool": "list_files", "mcp_server": "fs",
-            "authz_decision": "allow"}
+    base = {
+        "phase": "received",
+        "request_id": rid,
+        "ts": "2026-01-01T00:00:00+00:00",
+        "caller_id": "claude-code",
+        "tool": "list_files",
+        "mcp_server": "fs",
+        "authz_decision": "allow",
+    }
     base.update(over)
     return base
 
 
 def _completed(rid, **over):
-    base = {"phase": "completed", "request_id": rid, "ts": "2026-01-01T00:00:01+00:00",
-            "result_status": "ok"}
+    base = {
+        "phase": "completed",
+        "request_id": rid,
+        "ts": "2026-01-01T00:00:01+00:00",
+        "result_status": "ok",
+    }
     base.update(over)
     return base
 
@@ -40,10 +50,14 @@ def test_pair(tmp_path):
 
 def test_search_filters(tmp_path):
     d = tmp_path / "audit"
-    _write(d, "2026-01-01", [
-        _received("r1", caller_id="claude-code", tool="list_files"),
-        _received("r2", caller_id="opencode", tool="read_file"),
-    ])
+    _write(
+        d,
+        "2026-01-01",
+        [
+            _received("r1", caller_id="claude-code", tool="list_files"),
+            _received("r2", caller_id="opencode", tool="read_file"),
+        ],
+    )
     assert [e["request_id"] for e in audit_reader.search(d, caller="claude-code")] == ["r1"]
     assert [e["request_id"] for e in audit_reader.search(d, tool="read_file")] == ["r2"]
     assert audit_reader.search(d, phase="completed") == []
@@ -59,17 +73,26 @@ def test_read_day(tmp_path):
 
 def test_search_remaining_filters(tmp_path):
     d = tmp_path / "audit"
-    _write(d, "2026-01-01", [
-        _received("r1", mcp_server="fs", ts="2026-01-01T01:00:00+00:00"),
-        _completed("r1", result_status="ok"),
-        _received("r2", mcp_server="github", authz_decision="deny",
-                  ts="2026-01-02T01:00:00+00:00"),
-    ])
+    _write(
+        d,
+        "2026-01-01",
+        [
+            _received("r1", mcp_server="fs", ts="2026-01-01T01:00:00+00:00"),
+            _completed("r1", result_status="ok"),
+            _received(
+                "r2", mcp_server="github", authz_decision="deny", ts="2026-01-02T01:00:00+00:00"
+            ),
+        ],
+    )
     assert [e["request_id"] for e in audit_reader.search(d, server="github")] == ["r2"]
     assert [e["request_id"] for e in audit_reader.search(d, decision="deny")] == ["r2"]
     assert [e["request_id"] for e in audit_reader.search(d, status="ok")] == ["r1"]
-    assert [e["request_id"] for e in audit_reader.search(d, since="2026-01-02T00:00:00+00:00")] == ["r2"]
-    assert "r2" not in [e["request_id"] for e in audit_reader.search(d, until="2026-01-01T23:59:59+00:00")]
+    assert [e["request_id"] for e in audit_reader.search(d, since="2026-01-02T00:00:00+00:00")] == [
+        "r2"
+    ]
+    assert "r2" not in [
+        e["request_id"] for e in audit_reader.search(d, until="2026-01-01T23:59:59+00:00")
+    ]
 
 
 def test_tail_order(tmp_path):
@@ -81,12 +104,16 @@ def test_tail_order(tmp_path):
 
 def test_lint_catches_malformed_and_unpaired(tmp_path):
     d = tmp_path / "audit"
-    _write(d, "2026-01-01", [
-        _received("r1", authz_decision="allow"),   # allowed but no completed -> flagged
-        "{ this is not json",                        # malformed -> flagged
-        _completed("orphan"),                        # completed with no received -> flagged
-        _received("r2", authz_decision="deny"),      # deny: received-only is fine
-    ])
+    _write(
+        d,
+        "2026-01-01",
+        [
+            _received("r1", authz_decision="allow"),  # allowed but no completed -> flagged
+            "{ this is not json",  # malformed -> flagged
+            _completed("orphan"),  # completed with no received -> flagged
+            _received("r2", authz_decision="deny"),  # deny: received-only is fine
+        ],
+    )
     problems = audit_reader.lint(d)
     assert any("malformed" in p for p in problems)
     assert any("r1" in p and "no completed" in p for p in problems)

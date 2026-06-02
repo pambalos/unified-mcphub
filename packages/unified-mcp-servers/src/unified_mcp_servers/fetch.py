@@ -51,6 +51,7 @@ CONFIG = Config()
 
 # --- SSRF block list ----------------------------------------------------------
 
+
 def _host_blocked(host: str) -> bool:
     """True if host (literal) or any IP it resolves to matches blocked_hosts."""
     entries = CONFIG.blocked_hosts
@@ -83,6 +84,7 @@ def _host_blocked(host: str) -> bool:
 
 
 # --- HTML → text --------------------------------------------------------------
+
 
 class _TextExtractor(HTMLParser):
     _SKIP = {"script", "style", "noscript", "head", "title"}
@@ -154,6 +156,7 @@ def fetch_webpage(url: str, max_chars: int = 50000, allow_blocked: bool = False)
 
 # --- search backends ----------------------------------------------------------
 
+
 def _resolve_backend() -> str:
     if CONFIG.search_backend != "auto":
         return CONFIG.search_backend
@@ -172,10 +175,20 @@ def _search_brave(query: str, count: int) -> dict:
     with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
         data = json.loads(resp.read().decode("utf-8"))
     results = [
-        {"title": r.get("title", ""), "url": r.get("url", ""), "description": r.get("description", "")}
+        {
+            "title": r.get("title", ""),
+            "url": r.get("url", ""),
+            "description": r.get("description", ""),
+        }
         for r in data.get("web", {}).get("results", [])[:count]
     ]
-    return {"success": True, "backend": "brave", "query": query, "result_count": len(results), "results": results}
+    return {
+        "success": True,
+        "backend": "brave",
+        "query": query,
+        "result_count": len(results),
+        "results": results,
+    }
 
 
 # DuckDuckGo has no free results API; we scrape the no-JS "lite" endpoint, which
@@ -252,7 +265,13 @@ def _search_ddg(query: str, count: int) -> dict:
             + (" (rate-limited / bot-blocked)" if blocked else "")
             + " — set BRAVE_API_KEY for a reliable search backend",
         }
-    return {"success": True, "backend": "duckduckgo", "query": query, "result_count": len(results), "results": results}
+    return {
+        "success": True,
+        "backend": "duckduckgo",
+        "query": query,
+        "result_count": len(results),
+        "results": results,
+    }
 
 
 @mcp.tool()
@@ -262,7 +281,11 @@ def search_internet(query: str, count: int = 10) -> dict:
     backend = _resolve_backend()
     try:
         if backend == "none":
-            return {"success": False, "error": "search backend is disabled (--search-backend none)", "query": query}
+            return {
+                "success": False,
+                "error": "search backend is disabled (--search-backend none)",
+                "query": query,
+            }
         if backend == "brave":
             return _search_brave(query, count)
         return _search_ddg(query, count)
@@ -272,9 +295,16 @@ def search_internet(query: str, count: int = 10) -> dict:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="unified_mcp_servers.fetch")
-    parser.add_argument("--block-host", action="append", default=[], dest="block_hosts",
-                        help="host/IP/CIDR to refuse (repeatable)")
-    parser.add_argument("--search-backend", choices=["auto", "duckduckgo", "brave", "none"], default="auto")
+    parser.add_argument(
+        "--block-host",
+        action="append",
+        default=[],
+        dest="block_hosts",
+        help="host/IP/CIDR to refuse (repeatable)",
+    )
+    parser.add_argument(
+        "--search-backend", choices=["auto", "duckduckgo", "brave", "none"], default="auto"
+    )
     args = parser.parse_args(argv)
     CONFIG.blocked_hosts = args.block_hosts
     CONFIG.search_backend = args.search_backend

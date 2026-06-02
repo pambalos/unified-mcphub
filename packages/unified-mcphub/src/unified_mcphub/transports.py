@@ -29,7 +29,7 @@ def _authenticate(request: Request, hub) -> tuple[str | None, str | None]:
     if request.client is None or not request.client.host:
         return request.headers.get("X-Caller-Id", "unknown"), None  # uds peer
     auth = request.headers.get("Authorization", "")
-    token = auth[len("Bearer "):] if auth.startswith("Bearer ") else ""
+    token = auth[len("Bearer ") :] if auth.startswith("Bearer ") else ""
     caller = hub.tokens.resolve(token) if token else None
     token_id = hub.tokens.caller_token_id(token) if caller else None
     return caller, token_id

@@ -23,7 +23,9 @@ async def test_reload_applies_rule_and_server_diff(hub_home):
     await hub.start()
     try:
         # default: only list_* allowed; the filesystem server is connected.
-        assert hub.authz.resolve("mcp://filesystem/read_file", {}, "claude-code").effect is Effect.DENY
+        assert (
+            hub.authz.resolve("mcp://filesystem/read_file", {}, "claude-code").effect is Effect.DENY
+        )
         assert "filesystem" in hub.servers
 
         (hub_home / "workspaces" / "default.yaml").write_text(
@@ -40,7 +42,10 @@ async def test_reload_applies_rule_and_server_diff(hub_home):
         )
         await hub._reload()
 
-        assert hub.authz.resolve("mcp://filesystem/read_file", {}, "claude-code").effect is Effect.ALLOW
+        assert (
+            hub.authz.resolve("mcp://filesystem/read_file", {}, "claude-code").effect
+            is Effect.ALLOW
+        )
         assert "filesystem" not in hub.servers  # server removed by the diff
     finally:
         await hub.stop()

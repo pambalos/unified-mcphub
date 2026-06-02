@@ -55,9 +55,12 @@ def list_servers(name: str | None = None) -> list[dict]:
     for server_name, spec in load_workspace(name).servers.items():
         upstream = spec.upstream
         kind = (
-            "process" if upstream.command
-            else "http" if upstream.url
-            else "container" if upstream.image
+            "process"
+            if upstream.command
+            else "http"
+            if upstream.url
+            else "container"
+            if upstream.image
             else "unknown"
         )
         servers.append({"name": server_name, "kind": kind})

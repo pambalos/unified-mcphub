@@ -33,10 +33,12 @@ _REDACT_MARKER = "#RDCT_HOOK"
 _REDACT_HOOK_COMMAND = (
     "command -v jq >/dev/null 2>&1 || exit 0; "
     "i=$(cat); c=$(printf '%s' \"$i\" | jq -r '.tool_input.command // empty'); "
-    "[ -z \"$c\" ] && exit 0; "
-    "case \"$c\" in *RDCT_HOOK*) exit 0;; esac; "
-    "n=\"{ $c ; } 2>&1 | sed -E 's/Bearer [0-9a-fA-F]{16,}/Bearer [REDACTED]/g' " + _REDACT_MARKER + "\"; "
-    "printf '%s' \"$i\" | jq -c --arg c \"$n\" "
+    '[ -z "$c" ] && exit 0; '
+    'case "$c" in *RDCT_HOOK*) exit 0;; esac; '
+    "n=\"{ $c ; } 2>&1 | sed -E 's/Bearer [0-9a-fA-F]{16,}/Bearer [REDACTED]/g' "
+    + _REDACT_MARKER
+    + '"; '
+    'printf \'%s\' "$i" | jq -c --arg c "$n" '
     "'{hookSpecificOutput:{hookEventName:\"PreToolUse\",updatedInput:(.tool_input + {command:$c})}}'"
 )
 
@@ -90,8 +92,21 @@ def install(
             ["claude", "mcp", "remove", "unified-hub", "-s", scope], dry_run=dry_run, check=False
         )
         _common.run_cli(
-            ["claude", "mcp", "add", "unified-hub", "--scope", scope, "--transport", "http", url,
-             "--header", f"X-Caller-Id: {CALLER}", "--header", f"Authorization: Bearer {token}"],
+            [
+                "claude",
+                "mcp",
+                "add",
+                "unified-hub",
+                "--scope",
+                scope,
+                "--transport",
+                "http",
+                url,
+                "--header",
+                f"X-Caller-Id: {CALLER}",
+                "--header",
+                f"Authorization: Bearer {token}",
+            ],
             dry_run=dry_run,
         )
     else:
@@ -106,8 +121,11 @@ def install(
     if with_redaction_hook:
         # User-scope settings: a global safety hook, applies in every project.
         _common.merge_hook(
-            _settings_path(), event="PreToolUse",
-            group=_redaction_hook_group(), marker=_REDACT_MARKER, dry_run=dry_run,
+            _settings_path(),
+            event="PreToolUse",
+            group=_redaction_hook_group(),
+            marker=_REDACT_MARKER,
+            dry_run=dry_run,
         )
 
     if append_instructions:

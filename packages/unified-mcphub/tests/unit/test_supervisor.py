@@ -63,7 +63,9 @@ def test_other_commands_left_untouched():
 @pytest.mark.asyncio
 async def test_bundled_server_boots_via_python_resolution():
     # End-to-end: `command: python` resolution lets a bundled server connect.
-    spec = ServerSpec(upstream=Upstream(command="python", args=["-m", "unified_mcp_servers.python"]))
+    spec = ServerSpec(
+        upstream=Upstream(command="python", args=["-m", "unified_mcp_servers.python"])
+    )
     server = SupervisedServer("python", spec)
     await server.start()
     try:

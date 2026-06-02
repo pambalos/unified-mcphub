@@ -121,7 +121,7 @@ def read_file(
     total = len(lines)
     s = (start_line or 1) - 1
     e = end_line if end_line is not None else total
-    selected = lines[max(0, s):e]
+    selected = lines[max(0, s) : e]
     return {
         "success": True,
         "path": path,
@@ -165,7 +165,12 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
         text = fh.read()
     count = text.count(old_string)
     if count == 0:
-        return {"success": False, "error": "old_string not found", "path": path, "searched_for": old_string}
+        return {
+            "success": False,
+            "error": "old_string not found",
+            "path": path,
+            "searched_for": old_string,
+        }
     if count > 1 and not replace_all:
         return {
             "success": False,
@@ -173,7 +178,11 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
             "path": path,
             "occurrences": count,
         }
-    updated = text.replace(old_string, new_string) if replace_all else text.replace(old_string, new_string, 1)
+    updated = (
+        text.replace(old_string, new_string)
+        if replace_all
+        else text.replace(old_string, new_string, 1)
+    )
     with open(full, "w", encoding="utf-8") as fh:
         fh.write(updated)
     return {"success": True, "path": path, "replacements": count if replace_all else 1}
@@ -192,7 +201,9 @@ def list_files(
     base = resolve(path)
     if not os.path.isdir(base):
         return {"success": False, "error": f"not a directory: {path}", "path": path}
-    pattern = os.path.join(base, "**", file_pattern) if recursive else os.path.join(base, file_pattern)
+    pattern = (
+        os.path.join(base, "**", file_pattern) if recursive else os.path.join(base, file_pattern)
+    )
     files, dirs = [], []
     for match in globlib.glob(pattern, recursive=recursive):
         name = os.path.basename(match)
@@ -263,13 +274,15 @@ def glob_files(pattern: str, directory: str | None = None, case_sensitive: bool 
             st = p.stat()
         except OSError:
             continue
-        matches.append({
-            "path": rel,
-            "absolute_path": str(p),
-            "is_file": p.is_file(),
-            "is_dir": p.is_dir(),
-            "size_bytes": st.st_size,
-        })
+        matches.append(
+            {
+                "path": rel,
+                "absolute_path": str(p),
+                "is_file": p.is_file(),
+                "is_dir": p.is_dir(),
+                "size_bytes": st.st_size,
+            }
+        )
         if len(matches) >= 1000:
             break
     return {
@@ -309,11 +322,13 @@ def find_files(
     for p in candidates:
         sub = _search.search_text(content, str(p), "*")
         if sub["results"]:
-            matches.append({
-                "path": os.path.relpath(str(p), base),
-                "content_matches": sub["results"],
-                "match_count": len(sub["results"]),
-            })
+            matches.append(
+                {
+                    "path": os.path.relpath(str(p), base),
+                    "content_matches": sub["results"],
+                    "match_count": len(sub["results"]),
+                }
+            )
     return {
         "success": True,
         "directory": base,

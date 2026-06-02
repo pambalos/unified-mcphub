@@ -10,7 +10,6 @@ from unified_mcphub import installers
 from unified_mcphub.installers import _common
 
 
-
 def _config():
     return Path.home() / ".config" / "opencode" / "opencode.json"
 
@@ -35,9 +34,12 @@ def test_cli_path_invokes_opencode(hub_home, enable_tcp, monkeypatch):
     monkeypatch.setattr(_common, "harness_cli_present", lambda binary: True)
     captured: dict = {}
     monkeypatch.setattr(
-        _common.subprocess, "run",
-        lambda cmd, **kw: (captured.__setitem__("cmd", cmd),
-                           SimpleNamespace(stdout="", stderr="", returncode=0))[1],
+        _common.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            captured.__setitem__("cmd", cmd),
+            SimpleNamespace(stdout="", stderr="", returncode=0),
+        )[1],
     )
 
     installers.dispatch_install("opencode")

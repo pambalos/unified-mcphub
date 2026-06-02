@@ -43,8 +43,11 @@ def test_two_phase_pair(tmp_path):
     try:
         _received(log, "r1")
         log.write_completed(
-            request_id="r1", duration_ms=1.2, result={"content": []},
-            result_status="ok", audit_level="standard",
+            request_id="r1",
+            duration_ms=1.2,
+            result={"content": []},
+            result_status="ok",
+            audit_level="standard",
         )
     finally:
         log.stop()

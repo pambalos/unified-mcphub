@@ -49,8 +49,12 @@ async def _call(hub_home, tool_name):
         async with httpx.AsyncClient(transport=transport, base_url="http://hub", timeout=15) as c:
             r = await c.post(
                 "/mcp",
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                      "params": {"name": tool_name, "arguments": {}}},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": tool_name, "arguments": {}},
+                },
                 headers={"X-Caller-Id": "claude-code"},
             )
             return r.json()

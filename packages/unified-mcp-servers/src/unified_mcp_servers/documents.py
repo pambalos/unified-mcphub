@@ -36,8 +36,13 @@ def read_document(path: str) -> dict:
         return _read_docx(full, path)
     if ext in _TEXT_EXTS or ext == "":
         text = Path(full).read_text(encoding="utf-8", errors="ignore")
-        return {"success": True, "path": path, "format": ext.lstrip(".") or "text",
-                "content": text, "content_length": len(text)}
+        return {
+            "success": True,
+            "path": path,
+            "format": ext.lstrip(".") or "text",
+            "content": text,
+            "content_length": len(text),
+        }
     return {"success": False, "error": f"unsupported format: {ext}", "path": path}
 
 
@@ -45,26 +50,44 @@ def _read_pdf(full: str, path: str) -> dict:
     try:
         import pypdf
     except ImportError:
-        return {"success": False, "path": path,
-                "error": "PDF support needs pypdf — install with: pip install 'unified-mcp-servers[documents]'"}
+        return {
+            "success": False,
+            "path": path,
+            "error": "PDF support needs pypdf — install with: pip install 'unified-mcp-servers[documents]'",
+        }
     reader = pypdf.PdfReader(full)
     pages = [page.extract_text() or "" for page in reader.pages]
     content = "\n\n".join(pages)
-    return {"success": True, "path": path, "format": "pdf", "content": content,
-            "content_length": len(content), "page_count": len(pages)}
+    return {
+        "success": True,
+        "path": path,
+        "format": "pdf",
+        "content": content,
+        "content_length": len(content),
+        "page_count": len(pages),
+    }
 
 
 def _read_docx(full: str, path: str) -> dict:
     try:
         import docx
     except ImportError:
-        return {"success": False, "path": path,
-                "error": "DOCX support needs python-docx — install with: pip install 'unified-mcp-servers[documents]'"}
+        return {
+            "success": False,
+            "path": path,
+            "error": "DOCX support needs python-docx — install with: pip install 'unified-mcp-servers[documents]'",
+        }
     document = docx.Document(full)
     paras = [p.text for p in document.paragraphs]
     content = "\n\n".join(paras)
-    return {"success": True, "path": path, "format": "docx", "content": content,
-            "content_length": len(content), "paragraph_count": len(paras)}
+    return {
+        "success": True,
+        "path": path,
+        "format": "docx",
+        "content": content,
+        "content_length": len(content),
+        "paragraph_count": len(paras),
+    }
 
 
 def main(argv: list[str] | None = None) -> None:

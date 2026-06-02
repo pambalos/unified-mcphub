@@ -18,6 +18,7 @@ from unified_mcphub.secrets import SecretsStore
 
 # --- command handlers ---------------------------------------------------------
 
+
 def cmd_init(args: argparse.Namespace) -> int:
     created = bootstrap()
     for path in created:
@@ -25,10 +26,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     print("ready — run `unified-mcphub start`" if created else "already initialized")
     return 0
 
+
 def cmd_start(args: argparse.Namespace) -> int:
     # MCP-HUB-1: bind Unix socket + TCP, load workspace, supervise servers,
     # serve as MCP server; render approval TUI when approval.enabled.
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     try:
         asyncio.run(run(args.workspace))
     except KeyboardInterrupt:
@@ -55,11 +59,14 @@ def cmd_install(args: argparse.Namespace) -> int:
             print(harness)
         return 0
     if not args.harness:
-        raise SystemExit("specify a harness (or --list). Supported: "
-                         + ", ".join(installers.list_harnesses()))
+        raise SystemExit(
+            "specify a harness (or --list). Supported: " + ", ".join(installers.list_harnesses())
+        )
     installers.dispatch_install(
-        args.harness, dry_run=args.dry_run,
-        append_instructions=args.append_instructions, scope=args.scope,
+        args.harness,
+        dry_run=args.dry_run,
+        append_instructions=args.append_instructions,
+        scope=args.scope,
         with_redaction_hook=args.with_redaction_hook,
     )
     return 0
@@ -102,7 +109,9 @@ def cmd_auth(args: argparse.Namespace) -> int:
         store=store,
         scopes=spec.oauth.scopes,
     )
-    print(f"Open this URL to authorize, then paste the redirect you land on:\n  {flow.authorization_url()}\n")
+    print(
+        f"Open this URL to authorize, then paste the redirect you land on:\n  {flow.authorization_url()}\n"
+    )
     params = urllib.parse.parse_qs(urllib.parse.urlparse(input("redirect URL: ").strip()).query)
     tokens = asyncio.run(flow.exchange_code(params["code"][0], params["state"][0]))
     print("authorized; refresh token stored" if tokens.get("refresh_token") else "authorized")
@@ -132,9 +141,14 @@ def cmd_audit(args: argparse.Namespace) -> int:
     elif cmd == "search":
         results = audit_reader.search(
             directory,
-            caller=args.caller, tool=args.tool, server=args.server,
-            decision=args.decision, status=args.status,
-            since=args.since, until=args.until, phase=args.phase,
+            caller=args.caller,
+            tool=args.tool,
+            server=args.server,
+            decision=args.decision,
+            status=args.status,
+            since=args.since,
+            until=args.until,
+            phase=args.phase,
             limit=int(args.limit) if args.limit else None,
         )
         for entry in results:
@@ -154,6 +168,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
 
 # --- parser -------------------------------------------------------------------
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="unified-mcphub", description="Local MCP hub")
@@ -183,21 +198,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_install.add_argument("--dry-run", action="store_true")
     p_install.add_argument("--append-instructions", metavar="PATH")
     p_install.add_argument(
-        "--scope", choices=["local", "user", "project"], default="local",
+        "--scope",
+        choices=["local", "user", "project"],
+        default="local",
         help="scope for harnesses that support it (claude-code: local=this project, "
-             "user=global/all projects, project=shared ./.mcp.json). default: local",
+        "user=global/all projects, project=shared ./.mcp.json). default: local",
     )
     p_install.add_argument(
-        "--with-redaction-hook", action="store_true",
+        "--with-redaction-hook",
+        action="store_true",
         help="claude-code only: also install a user-scope PreToolUse hook that "
-             "redacts bearer tokens from `claude mcp` command output (opt-in)",
+        "redacts bearer tokens from `claude mcp` command output (opt-in)",
     )
     p_install.set_defaults(func=cmd_install)
 
     p_uninstall = sub.add_parser("uninstall", help="reverse a harness install")
     p_uninstall.add_argument("harness")
     p_uninstall.add_argument(
-        "--scope", choices=["local", "user", "project"], default="local",
+        "--scope",
+        choices=["local", "user", "project"],
+        default="local",
         help="scope the entry was installed at (default: local)",
     )
     p_uninstall.set_defaults(func=cmd_uninstall)
@@ -237,7 +257,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_aud_pair.add_argument("request_id")
     p_aud_pair.set_defaults(func=cmd_audit)
     p_aud_search = aud_sub.add_parser("search")
-    for flag in ("--caller", "--tool", "--server", "--decision", "--status", "--since", "--until", "--phase", "--limit"):
+    for flag in (
+        "--caller",
+        "--tool",
+        "--server",
+        "--decision",
+        "--status",
+        "--since",
+        "--until",
+        "--phase",
+        "--limit",
+    ):
         p_aud_search.add_argument(flag)
     p_aud_search.set_defaults(func=cmd_audit)
     aud_sub.add_parser("tail").set_defaults(func=cmd_audit)

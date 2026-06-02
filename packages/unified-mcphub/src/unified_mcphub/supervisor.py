@@ -64,7 +64,9 @@ class SupervisedServer:
         if up.url:
             return HttpConnection(up.url, headers_provider=self._auth_headers)
         if up.image:
-            raise ValueError(f"server '{self.name}': container upstreams arrive at M0.5 (SEC-MCP-5)")
+            raise ValueError(
+                f"server '{self.name}': container upstreams arrive at M0.5 (SEC-MCP-5)"
+            )
         raise ValueError(f"server '{self.name}': upstream needs one of command/url/image")
 
     async def start(self) -> None:

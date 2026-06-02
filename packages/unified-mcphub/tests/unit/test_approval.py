@@ -24,6 +24,7 @@ ARGS = {"command": "git status"}
 
 # --- pure helpers -------------------------------------------------------------
 
+
 def test_primary_arg_prefers_known_names():
     assert primary_arg({"command": "ls", "timeout": 5}) == "command"
     assert primary_arg({"url": "http://x", "allow_blocked": True}) == "url"
@@ -36,7 +37,7 @@ def test_primary_arg_falls_back_to_sole_string_arg():
 
 def test_primary_arg_none_when_ambiguous_or_absent():
     assert primary_arg({}) is None
-    assert primary_arg({"a": "x", "b": "y"}) is None       # two strings, not in known list
+    assert primary_arg({"a": "x", "b": "y"}) is None  # two strings, not in known list
     assert primary_arg({"count": 3, "flag": True}) is None  # no string args
 
 
@@ -55,6 +56,7 @@ def test_build_arg_filter_exact_and_prefix():
 
 
 # --- master switch / fail-safe (unchanged) ------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_master_switch_off_auto_allows():
@@ -80,6 +82,7 @@ async def test_session_allow_remembered():
 
 
 # --- keypress decisions -------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_keypress_allow_once_not_persistent(monkeypatch):

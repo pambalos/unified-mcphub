@@ -100,12 +100,18 @@ def test_persist_exact_command_scopes_via_args_filter(hub_home):
 
     resolver = Hub(load_config()).authz
     # Only the exact command is allowed; any other command falls through to deny.
-    assert resolver.resolve(
-        "mcp://shell/execute_command", {"command": "git status"}, "claude-code"
-    ).effect is Effect.ALLOW
-    assert resolver.resolve(
-        "mcp://shell/execute_command", {"command": "rm -rf /"}, "claude-code"
-    ).effect is Effect.DENY
+    assert (
+        resolver.resolve(
+            "mcp://shell/execute_command", {"command": "git status"}, "claude-code"
+        ).effect
+        is Effect.ALLOW
+    )
+    assert (
+        resolver.resolve(
+            "mcp://shell/execute_command", {"command": "rm -rf /"}, "claude-code"
+        ).effect
+        is Effect.DENY
+    )
 
 
 def test_persist_prefix_scopes_via_args_filter(hub_home):
@@ -117,22 +123,24 @@ def test_persist_prefix_scopes_via_args_filter(hub_home):
     )
 
     resolver = Hub(load_config()).authz
-    assert resolver.resolve(
-        "mcp://shell/execute_command", {"command": "git log --oneline"}, "claude-code"
-    ).effect is Effect.ALLOW
-    assert resolver.resolve(
-        "mcp://shell/execute_command", {"command": "npm test"}, "claude-code"
-    ).effect is Effect.DENY
+    assert (
+        resolver.resolve(
+            "mcp://shell/execute_command", {"command": "git log --oneline"}, "claude-code"
+        ).effect
+        is Effect.ALLOW
+    )
+    assert (
+        resolver.resolve(
+            "mcp://shell/execute_command", {"command": "npm test"}, "claude-code"
+        ).effect
+        is Effect.DENY
+    )
 
 
 def test_learned_deny_overrides_curated_allow(hub_home):
     # Curated file allows everything via a wildcard; a learned exact deny must win.
     workspace_path("default").write_text(
-        "servers: {}\n"
-        "authz:\n"
-        "  rules:\n"
-        '    - tool: "mcp://*/*"\n'
-        "      effect: allow\n"
+        'servers: {}\nauthz:\n  rules:\n    - tool: "mcp://*/*"\n      effect: allow\n'
     )
     hub = Hub(load_config())
     hub._persist_exact_rule("mcp://filesystem/delete_file", "claude-code", allowed=False)

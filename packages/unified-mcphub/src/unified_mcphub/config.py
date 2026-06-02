@@ -24,6 +24,7 @@ _DEFAULTS_DIR = Path(__file__).parent / "defaults"
 
 # --- paths (resolved lazily so tests can repoint $HOME / $UNIFIED_HOME) -------
 
+
 def unified_home() -> Path:
     env = os.environ.get("UNIFIED_HOME")
     return Path(env) if env else Path.home() / ".unified-ai"
@@ -63,6 +64,7 @@ def canonical_truth_path() -> Path:
 
 
 # --- models (spec §2) ---------------------------------------------------------
+
 
 class ListenConfig(BaseModel):
     unix_socket: str = Field(default_factory=lambda: str(mcphub_home() / "mcphub.sock"))
@@ -109,11 +111,11 @@ class ServerSpec(BaseModel):
 
 
 class Rule(BaseModel):
-    tool: str                                   # mcp:// URI pattern, * wildcards
-    callers: list[str] | None = None            # None = any caller
+    tool: str  # mcp:// URI pattern, * wildcards
+    callers: list[str] | None = None  # None = any caller
     # Per-argument operator map (ADR-0006): {arg_name: {equals|starts_with|matches: [values]}}
     args_filter: dict[str, dict[str, list[str]]] | None = None
-    effect: str                                 # allow | deny | prompt
+    effect: str  # allow | deny | prompt
     audit_level: str = "standard"
 
 
@@ -158,6 +160,7 @@ class Config(BaseModel):
 
 
 # --- loaders ------------------------------------------------------------------
+
 
 def _read_yaml(path: Path) -> dict:
     if not path.exists():

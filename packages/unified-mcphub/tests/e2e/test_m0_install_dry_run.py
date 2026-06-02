@@ -11,7 +11,6 @@ from unified_mcphub.config import mcphub_home
 from unified_mcphub.installers import _common
 
 
-
 def test_dry_run_merge_writes_nothing(hub_home, enable_tcp, monkeypatch, capsys):
     enable_tcp()
     monkeypatch.setattr(_common, "harness_cli_present", lambda binary: False)

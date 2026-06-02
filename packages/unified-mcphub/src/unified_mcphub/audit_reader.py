@@ -93,7 +93,7 @@ def tail(audit_dir: Path, n: int = 20) -> list[dict]:
 
 def lint(audit_dir: Path) -> list[str]:
     problems: list[str] = []
-    received: dict[str, str] = {}      # request_id -> decision
+    received: dict[str, str] = {}  # request_id -> decision
     completed: set[str] = set()
     for filename, lineno, entry in _iter_entries(audit_dir):
         if entry is None:

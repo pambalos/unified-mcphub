@@ -17,9 +17,25 @@ import subprocess
 # Directories never worth descending into. ripgrep already skips these via its
 # own ignore rules; the stdlib fallback honours the same set.
 IGNORE_DIRS = {
-    "__pycache__", ".git", ".svn", ".hg", "node_modules", ".npm", ".yarn",
-    ".venv", "venv", ".tox", ".nox", ".mypy_cache", ".ruff_cache",
-    ".pytest_cache", ".idea", ".vscode", "dist", "build", ".cache",
+    "__pycache__",
+    ".git",
+    ".svn",
+    ".hg",
+    "node_modules",
+    ".npm",
+    ".yarn",
+    ".venv",
+    "venv",
+    ".tox",
+    ".nox",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".pytest_cache",
+    ".idea",
+    ".vscode",
+    "dist",
+    "build",
+    ".cache",
 }
 
 MAX_RESULTS = 50
@@ -40,10 +56,14 @@ def search_text(
     """Grep-like search. Returns {results: [{file, line, content}], engine, ...}."""
     rg = _rg_path()
     if rg:
-        results, truncated = _rg_search(rg, query, directory, file_pattern, case_sensitive, max_results)
+        results, truncated = _rg_search(
+            rg, query, directory, file_pattern, case_sensitive, max_results
+        )
         engine = "ripgrep"
     else:
-        results, truncated = _stdlib_search(query, directory, file_pattern, case_sensitive, max_results)
+        results, truncated = _stdlib_search(
+            query, directory, file_pattern, case_sensitive, max_results
+        )
         engine = "stdlib"
     return {
         "success": True,
@@ -61,8 +81,15 @@ def search_text(
 def _rg_search(rg, query, directory, file_pattern, case_sensitive, max_results):
     # --with-filename forces the `path:` prefix even for a single-file argument
     # (rg omits it otherwise), so the path:line:content split stays aligned.
-    cmd = [rg, "--with-filename", "--line-number", "--no-heading", "--color=never",
-           "--max-count", str(max_results)]
+    cmd = [
+        rg,
+        "--with-filename",
+        "--line-number",
+        "--no-heading",
+        "--color=never",
+        "--max-count",
+        str(max_results),
+    ]
     if not case_sensitive:
         cmd.append("--ignore-case")
     if file_pattern and file_pattern != "*":

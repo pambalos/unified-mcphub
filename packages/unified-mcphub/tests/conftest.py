@@ -80,6 +80,7 @@ def hub_home(tmp_path, monkeypatch):
 @pytest.fixture
 def enable_tcp(hub_home):
     """Turn on the TCP transport in the seeded config (preserving the socket)."""
+
     def _enable(tcp: str = "127.0.0.1:7712") -> None:
         config = hub_home / "config.yaml"
         data = yaml.safe_load(config.read_text())

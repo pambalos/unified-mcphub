@@ -45,7 +45,7 @@ async def test_tcp_requires_valid_bearer(hub_home, enable_tcp):
     try:
         async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=10) as c:
             assert (await _call(c, {"Authorization": f"Bearer {token}"})).status_code == 200
-            assert (await _call(c, {})).status_code == 401                      # no token
+            assert (await _call(c, {})).status_code == 401  # no token
             assert (await _call(c, {"Authorization": "Bearer wrong"})).status_code == 401
     finally:
         await hub.stop()
@@ -63,15 +63,21 @@ async def test_tcp_call_logs_caller_token_id(hub_home, enable_tcp):
         async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=10) as c:
             await c.post(
                 "/mcp",
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                      "params": {"name": "built-in__ping", "arguments": {}}},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "built-in__ping", "arguments": {}},
+                },
                 headers={"Authorization": f"Bearer {token}"},
             )
     finally:
         await hub.stop()
 
     date = datetime.now(timezone.utc).date().isoformat()
-    entries = [json.loads(line) for line in (audit_dir() / f"{date}.jsonl").read_text().splitlines()]
+    entries = [
+        json.loads(line) for line in (audit_dir() / f"{date}.jsonl").read_text().splitlines()
+    ]
     received = [e for e in entries if e["phase"] == "received"][-1]
     assert received["caller_id"] == "claude-code"
     assert received["caller_token_id"] == TokenStore.caller_token_id(token)

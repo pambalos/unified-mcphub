@@ -36,7 +36,9 @@ def _mock_async_client(monkeypatch, json_body):
 
 def test_challenge_is_s256_of_verifier():
     verifier = "test-verifier-value"
-    expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    expected = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    )
     assert oauth.challenge(verifier) == expected
 
 

@@ -49,8 +49,11 @@ async def test_install_and_first_audited_call(hub_home):
                 json=_rpc(
                     "initialize",
                     1,
-                    {"protocolVersion": "2024-11-05", "capabilities": {},
-                     "clientInfo": {"name": "test", "version": "0"}},
+                    {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "0"},
+                    },
                 ),
                 headers=headers,
             )
@@ -66,7 +69,8 @@ async def test_install_and_first_audited_call(hub_home):
             r = await client.post(
                 "/mcp",
                 json=_rpc(
-                    "tools/call", 3,
+                    "tools/call",
+                    3,
                     {"name": "filesystem__list_files", "arguments": {"path": "."}},
                 ),
                 headers=headers,

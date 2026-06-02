@@ -31,8 +31,10 @@ def dispatch_install(
     with_redaction_hook: bool = False,
 ) -> None:
     _require(INSTALLERS, name)(
-        dry_run=dry_run, append_instructions=append_instructions,
-        scope=scope, with_redaction_hook=with_redaction_hook,
+        dry_run=dry_run,
+        append_instructions=append_instructions,
+        scope=scope,
+        with_redaction_hook=with_redaction_hook,
     )
 
 

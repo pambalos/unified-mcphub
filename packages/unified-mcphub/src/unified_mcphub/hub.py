@@ -125,8 +125,8 @@ class Hub:
         await self._transport.stop()
         for server in list(self.servers.values()):
             await server.stop()
-        self.audit.stop()        # release the audit lock first — must always happen
-        discovery.remove()       # best-effort; a leftover entry goes stale (ADR-0013)
+        self.audit.stop()  # release the audit lock first — must always happen
+        discovery.remove()  # best-effort; a leftover entry goes stale (ADR-0013)
 
     # --- MCP server surface (spec §10) ---
 
@@ -305,9 +305,7 @@ class Hub:
         if args_filter:
             entry["args_filter"] = args_filter
         learned.insert(0, entry)
-        secure_write(
-            workspace_local_path(name), yaml.safe_dump(learned, sort_keys=False).encode()
-        )
+        secure_write(workspace_local_path(name), yaml.safe_dump(learned, sort_keys=False).encode())
 
     # --- discovery + canonical truth (spec §11.1, §12) ---
 
@@ -351,9 +349,7 @@ class Hub:
         # do for a path that is absent when the watch starts. Reload is idempotent
         # and keyed to the active workspace, so events for other files are no-ops.
         return [
-            p
-            for p in (str(config_path()), str(mcphub_home() / "workspaces"))
-            if Path(p).exists()
+            p for p in (str(config_path()), str(mcphub_home() / "workspaces")) if Path(p).exists()
         ]
 
     async def _watch_reload(self) -> None:

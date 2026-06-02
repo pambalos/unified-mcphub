@@ -68,8 +68,16 @@ def test_audit_commands(hub_home, capsys):
     directory = audit_dir()
     directory.mkdir(parents=True)
     (directory / "2026-01-01.jsonl").write_text(
-        json.dumps({"phase": "received", "request_id": "r1", "authz_decision": "deny",
-                    "ts": "2026-01-01T00:00:00+00:00", "caller_id": "claude-code"}) + "\n"
+        json.dumps(
+            {
+                "phase": "received",
+                "request_id": "r1",
+                "authz_decision": "deny",
+                "ts": "2026-01-01T00:00:00+00:00",
+                "caller_id": "claude-code",
+            }
+        )
+        + "\n"
     )
     assert main(["audit", "show", "r1"]) == 0
     assert main(["audit", "pair", "r1"]) == 0

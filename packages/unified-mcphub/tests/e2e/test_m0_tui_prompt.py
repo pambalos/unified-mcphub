@@ -41,7 +41,9 @@ async def test_prompt_allow_always_persists_exact_rule(hub_home, monkeypatch):
             r = await c.post(
                 "/mcp",
                 json={
-                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
                     "params": {"name": "filesystem__read_file", "arguments": {"path": "x"}},
                 },
                 headers={"X-Caller-Id": "claude-code"},
@@ -54,8 +56,7 @@ async def test_prompt_allow_always_persists_exact_rule(hub_home, monkeypatch):
 
     date = datetime.now(timezone.utc).date().isoformat()
     entries = [
-        json.loads(line)
-        for line in (hub_home / "audit" / f"{date}.jsonl").read_text().splitlines()
+        json.loads(line) for line in (hub_home / "audit" / f"{date}.jsonl").read_text().splitlines()
     ]
     received = [e for e in entries if e["phase"] == "received"][-1]
     assert received["authz_decision"] == "prompt_allowed"
@@ -86,7 +87,9 @@ async def test_background_prompt_denies_no_channel(hub_home):
             r = await c.post(
                 "/mcp",
                 json={
-                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
                     "params": {"name": "filesystem__read_file", "arguments": {"path": "x"}},
                 },
                 headers={"X-Caller-Id": "claude-code"},
@@ -97,8 +100,7 @@ async def test_background_prompt_denies_no_channel(hub_home):
 
     date = datetime.now(timezone.utc).date().isoformat()
     entries = [
-        json.loads(line)
-        for line in (hub_home / "audit" / f"{date}.jsonl").read_text().splitlines()
+        json.loads(line) for line in (hub_home / "audit" / f"{date}.jsonl").read_text().splitlines()
     ]
     rec = [e for e in entries if e["phase"] == "received"][-1]
     assert rec["authz_decision"] == "prompt_denied"

@@ -47,7 +47,9 @@ def check_syntax(path: str) -> dict:
 
 
 @mcp.tool()
-def find_function(name: str, directory: str = ".", type: str = "any", exact_match: bool = False) -> dict:
+def find_function(
+    name: str, directory: str = ".", type: str = "any", exact_match: bool = False
+) -> dict:
     """Find function/class/method definitions by name across *.py files."""
     if not is_path_safe(directory):
         return path_error(directory)
@@ -72,30 +74,42 @@ def find_function(name: str, directory: str = ".", type: str = "any", exact_matc
             except (SyntaxError, OSError):
                 continue
             for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and want_func and matches(node.name):
+                if (
+                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and want_func
+                    and matches(node.name)
+                ):
                     args = [a.arg for a in node.args.args]
                     is_method = _enclosed(tree, node)
                     if type == "method" and not is_method:
                         continue
                     if type == "function" and is_method:
                         continue
-                    results.append({
-                        "file": os.path.relpath(fpath, base),
-                        "line": node.lineno,
-                        "type": "method" if is_method else "function",
-                        "name": node.name,
-                        "signature": f"{node.name}({', '.join(args)})",
-                    })
+                    results.append(
+                        {
+                            "file": os.path.relpath(fpath, base),
+                            "line": node.lineno,
+                            "type": "method" if is_method else "function",
+                            "name": node.name,
+                            "signature": f"{node.name}({', '.join(args)})",
+                        }
+                    )
                 elif isinstance(node, ast.ClassDef) and want_class and matches(node.name):
-                    methods = [n.name for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-                    results.append({
-                        "file": os.path.relpath(fpath, base),
-                        "line": node.lineno,
-                        "type": "class",
-                        "name": node.name,
-                        "methods": methods[:10],
-                        "method_count": len(methods),
-                    })
+                    methods = [
+                        n.name
+                        for n in node.body
+                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    ]
+                    results.append(
+                        {
+                            "file": os.path.relpath(fpath, base),
+                            "line": node.lineno,
+                            "type": "class",
+                            "name": node.name,
+                            "methods": methods[:10],
+                            "method_count": len(methods),
+                        }
+                    )
                 if len(results) >= 50:
                     break
     return {

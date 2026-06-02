@@ -25,10 +25,12 @@ async def test_disabled_server_is_not_started(hub_home, monkeypatch):
 
     monkeypatch.setattr(hub, "_add_server", fake_add)
 
-    await hub._apply_server_diff({
-        "filesystem": _spec("filesystem", enabled=True),
-        "shell": _spec("shell", enabled=False),
-    })
+    await hub._apply_server_diff(
+        {
+            "filesystem": _spec("filesystem", enabled=True),
+            "shell": _spec("shell", enabled=False),
+        }
+    )
 
     assert added == ["filesystem"]  # disabled 'shell' skipped
 

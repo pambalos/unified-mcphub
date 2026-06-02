@@ -88,24 +88,48 @@ def test_audit_level_propagates():
 
 
 def test_args_filter_matches_regex():
-    r = mk([Rule(tool="mcp://shell/exec", args_filter={"command": {"matches": [r"^git (status|log)$"]}},
-                 effect="allow")])
+    r = mk(
+        [
+            Rule(
+                tool="mcp://shell/exec",
+                args_filter={"command": {"matches": [r"^git (status|log)$"]}},
+                effect="allow",
+            )
+        ]
+    )
     assert r.resolve("mcp://shell/exec", {"command": "git status"}, "x").effect is Effect.ALLOW
     assert r.resolve("mcp://shell/exec", {"command": "git push"}, "x").effect is Effect.DENY
 
 
 def test_args_filter_matches_arbitrary_arg():
     # The new matcher can gate on ANY arg name, not just command/path/repo.
-    r = mk([Rule(tool="mcp://fetch/get", args_filter={"url": {"matches": [r"\.internal\.corp"]}},
-                 effect="allow")])
-    assert r.resolve("mcp://fetch/get", {"url": "https://x.internal.corp/y"}, "u").effect is Effect.ALLOW
+    r = mk(
+        [
+            Rule(
+                tool="mcp://fetch/get",
+                args_filter={"url": {"matches": [r"\.internal\.corp"]}},
+                effect="allow",
+            )
+        ]
+    )
+    assert (
+        r.resolve("mcp://fetch/get", {"url": "https://x.internal.corp/y"}, "u").effect
+        is Effect.ALLOW
+    )
     assert r.resolve("mcp://fetch/get", {"url": "https://evil.com"}, "u").effect is Effect.DENY
 
 
 def test_args_filter_equals_is_case_insensitive_and_bool_friendly():
     # equals matches whether the harness sends JSON true (Python bool) or "true"/"True".
-    r = mk([Rule(tool="mcp://fetch/get", args_filter={"allow_blocked": {"equals": ["true"]}},
-                 effect="prompt")])
+    r = mk(
+        [
+            Rule(
+                tool="mcp://fetch/get",
+                args_filter={"allow_blocked": {"equals": ["true"]}},
+                effect="prompt",
+            )
+        ]
+    )
     assert r.resolve("mcp://fetch/get", {"allow_blocked": True}, "u").effect is Effect.PROMPT
     assert r.resolve("mcp://fetch/get", {"allow_blocked": "true"}, "u").effect is Effect.PROMPT
     # absent / false -> rule doesn't apply -> default-deny
@@ -114,22 +138,43 @@ def test_args_filter_equals_is_case_insensitive_and_bool_friendly():
 
 
 def test_args_filter_arg_names_and_together():
-    r = mk([Rule(
-        tool="mcp://shell/exec",
-        args_filter={"command": {"starts_with": ["git "]}, "path": {"matches": ["^/repo/"]}},
-        effect="allow",
-    )])
-    assert r.resolve("mcp://shell/exec", {"command": "git x", "path": "/repo/a"}, "u").effect is Effect.ALLOW
+    r = mk(
+        [
+            Rule(
+                tool="mcp://shell/exec",
+                args_filter={
+                    "command": {"starts_with": ["git "]},
+                    "path": {"matches": ["^/repo/"]},
+                },
+                effect="allow",
+            )
+        ]
+    )
+    assert (
+        r.resolve("mcp://shell/exec", {"command": "git x", "path": "/repo/a"}, "u").effect
+        is Effect.ALLOW
+    )
     # one condition fails -> whole filter fails (AND)
-    assert r.resolve("mcp://shell/exec", {"command": "git x", "path": "/tmp/a"}, "u").effect is Effect.DENY
+    assert (
+        r.resolve("mcp://shell/exec", {"command": "git x", "path": "/tmp/a"}, "u").effect
+        is Effect.DENY
+    )
 
 
 def test_args_filter_operators_on_one_arg_and_together():
-    r = mk([Rule(tool="mcp://fetch/get",
-                 args_filter={"url": {"starts_with": ["https://"], "matches": [r"\.corp"]}},
-                 effect="allow")])
+    r = mk(
+        [
+            Rule(
+                tool="mcp://fetch/get",
+                args_filter={"url": {"starts_with": ["https://"], "matches": [r"\.corp"]}},
+                effect="allow",
+            )
+        ]
+    )
     assert r.resolve("mcp://fetch/get", {"url": "https://x.corp"}, "u").effect is Effect.ALLOW
-    assert r.resolve("mcp://fetch/get", {"url": "http://x.corp"}, "u").effect is Effect.DENY  # scheme fails
+    assert (
+        r.resolve("mcp://fetch/get", {"url": "http://x.corp"}, "u").effect is Effect.DENY
+    )  # scheme fails
 
 
 def test_args_filter_unknown_operator_fails_closed():

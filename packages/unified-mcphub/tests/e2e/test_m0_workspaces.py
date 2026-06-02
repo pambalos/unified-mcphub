@@ -61,7 +61,9 @@ async def _call_read_file(hub_home, workspace):
             r = await c.post(
                 "/mcp",
                 json={
-                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
                     "params": {"name": "filesystem__read_file", "arguments": {"path": "x"}},
                 },
                 headers={"X-Caller-Id": "claude-code"},

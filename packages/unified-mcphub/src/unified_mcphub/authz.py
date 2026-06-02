@@ -30,9 +30,9 @@ class Effect(str, Enum):
 @dataclass
 class Decision:
     effect: Effect
-    rule: str | None          # the matching rule's `tool` pattern (audit `authz_rule`)
+    rule: str | None  # the matching rule's `tool` pattern (audit `authz_rule`)
     audit_level: str = "standard"
-    source: str = "default"   # exact | danger_floor | wildcard | default
+    source: str = "default"  # exact | danger_floor | wildcard | default
 
 
 def _glob_to_regex(pattern: str) -> re.Pattern[str]:
@@ -65,7 +65,9 @@ def _operator_matches(op: str, values: list[str], actual: str) -> bool:
     return False
 
 
-def _args_filter_matches(args_filter: dict[str, dict[str, list[str]]], args: dict[str, Any]) -> bool:
+def _args_filter_matches(
+    args_filter: dict[str, dict[str, list[str]]], args: dict[str, Any]
+) -> bool:
     """Per-argument operator map (ADR-0006). Arg names AND'd; operators per arg AND'd.
 
     A missing argument compares as "" (so it won't match a non-empty target).

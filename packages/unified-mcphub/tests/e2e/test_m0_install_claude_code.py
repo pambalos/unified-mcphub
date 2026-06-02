@@ -10,7 +10,6 @@ from unified_mcphub import installers
 from unified_mcphub.installers import _common
 
 
-
 def _local_node(config: Path) -> dict:
     """The local-scope mcpServers node: ~/.claude.json projects[<cwd>].mcpServers."""
     return (
@@ -56,6 +55,7 @@ def _fake_run(captured: dict):
     def run(cmd, **kw):
         captured["cmd"] = cmd
         return SimpleNamespace(stdout="", stderr="", returncode=0)
+
     return run
 
 
@@ -76,7 +76,8 @@ def test_cli_path_invokes_claude(hub_home, enable_tcp, monkeypatch):
 def test_run_cli_redacts_token_in_output(monkeypatch, capsys):
     token = "a" * 64
     monkeypatch.setattr(
-        _common.subprocess, "run",
+        _common.subprocess,
+        "run",
         lambda cmd, **kw: SimpleNamespace(
             stdout=f"Headers: Authorization: Bearer {token}\n", stderr="", returncode=0
         ),
@@ -101,11 +102,15 @@ def test_redaction_hook_installed_and_removed(hub_home, enable_tcp, monkeypatch)
 
     # idempotent: a second install doesn't duplicate the hook group
     installers.dispatch_install("claude-code", scope="user", with_redaction_hook=True)
-    groups = json.loads((Path.home() / ".claude" / "settings.json").read_text())["hooks"]["PreToolUse"]
+    groups = json.loads((Path.home() / ".claude" / "settings.json").read_text())["hooks"][
+        "PreToolUse"
+    ]
     assert sum("#RDCT_HOOK" in h["command"] for g in groups for h in g["hooks"]) == 1
 
     installers.dispatch_uninstall("claude-code", scope="user")
-    groups = json.loads((Path.home() / ".claude" / "settings.json").read_text())["hooks"]["PreToolUse"]
+    groups = json.loads((Path.home() / ".claude" / "settings.json").read_text())["hooks"][
+        "PreToolUse"
+    ]
     assert not any("#RDCT_HOOK" in h["command"] for g in groups for h in g["hooks"])
 
 

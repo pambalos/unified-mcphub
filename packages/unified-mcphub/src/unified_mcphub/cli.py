@@ -14,6 +14,7 @@ from unified_mcphub import audit_reader, installers, introspect, oauth, servers
 from unified_mcphub.config import audit_dir, bootstrap, load_hub_config, load_workspace
 from unified_mcphub.hub import run
 from unified_mcphub.secrets import SecretsStore
+from unified_mcphub.transports import PortInUseError
 
 
 # --- command handlers ---------------------------------------------------------
@@ -34,9 +35,12 @@ def cmd_start(args: argparse.Namespace) -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     try:
-        asyncio.run(run(args.workspace))
+        asyncio.run(run(args.workspace, port=args.port, no_tcp=args.no_tcp))
     except KeyboardInterrupt:
         pass  # ctrl-C fallback when signal handlers aren't installed (e.g. Windows)
+    except PortInUseError as exc:
+        print(exc, file=sys.stderr)  # one line, no traceback
+        return 1
     return 0
 
 
@@ -99,6 +103,11 @@ def cmd_add_server(args: argparse.Namespace) -> int:
         auth_secret_ref=args.auth_secret_ref,
         auth_header=args.auth_header,
         auth_scheme=args.auth_scheme,
+        oauth_issuer=args.oauth_issuer,
+        oauth_authorize_url=args.oauth_authorize_url,
+        oauth_token_url=args.oauth_token_url,
+        oauth_client_id=args.oauth_client_id,
+        oauth_scopes=args.oauth_scope,
         disabled=args.disabled,
         allow_unpinned=args.allow_unpinned,
         workspace=args.workspace,
@@ -236,6 +245,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_start = sub.add_parser("start", help="run the hub in the foreground")
     p_start.add_argument("--workspace", help="workspace name (default: config active_workspace)")
+    tcp_group = p_start.add_mutually_exclusive_group()
+    tcp_group.add_argument(
+        "--port",
+        type=int,
+        help="TCP port to bind (overrides config; precedence CLI > config.yaml > 7712)",
+    )
+    tcp_group.add_argument(
+        "--no-tcp",
+        action="store_true",
+        help="serve the unix socket only — disables TCP (and TCP-harness `install`)",
+    )
     p_start.set_defaults(func=cmd_start)
 
     p_ws = sub.add_parser("workspace", help="manage workspaces")
@@ -307,6 +327,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="Bearer",
         metavar="SCHEME",
         help="scheme prefix (default: Bearer; pass '' to send the raw secret, e.g. X-API-Key servers)",
+    )
+    p_add.add_argument(
+        "--oauth-issuer",
+        metavar="URL",
+        help="OAuth via Dynamic Client Registration: the auth server issuer (endpoints "
+        "discovered, client auto-registered on `auth login`)",
+    )
+    p_add.add_argument(
+        "--oauth-authorize-url", metavar="URL", help="static OAuth authorize endpoint"
+    )
+    p_add.add_argument("--oauth-token-url", metavar="URL", help="static OAuth token endpoint")
+    p_add.add_argument("--oauth-client-id", metavar="ID", help="static OAuth client id")
+    p_add.add_argument(
+        "--oauth-scope", action="append", metavar="SCOPE", help="OAuth scope (repeatable)"
     )
     p_add.add_argument("--workspace", help="target workspace (default: active)")
     p_add.add_argument("--disabled", action="store_true", help="write enabled: false")

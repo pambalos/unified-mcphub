@@ -44,6 +44,9 @@ def _spec(command=None, args=None, url=None):
         ("queryset_wipe", "prompt"),  # 'query' not at a boundary -> not auto-allowed
         ("hub_repo_search", "allow"),  # trailing read verb (HF-style naming)
         ("hf_doc_fetch", "allow"),  # trailing read verb
+        ("query-docs", "allow"),  # hyphenated leading read verb (Context7-style)
+        ("get-library-docs", "allow"),  # hyphenated leading read verb
+        ("repo-delete", "deny"),  # hyphenated trailing destructive verb
         ("repo_delete", "deny"),  # trailing destructive verb wins
         ("create_repo", "prompt"),  # leading mutate
         ("hf_whoami", "prompt"),  # no verb at either boundary
@@ -132,26 +135,37 @@ def test_preflight_python_and_url_ok():
 # --- shared connection builder resolves auth for the probe --------------------
 
 
-def test_build_connection_url_resolves_auth_secret():
-    from unified_mcphub.supervisor import build_connection
+class _Store:
+    def __init__(self, data):
+        self.data = data
+
+    def get(self, name):
+        return self.data.get(name)
+
+    def set(self, name, value):
+        self.data[name] = value
+
+
+async def test_probe_auth_resolves_bearer_secret():
+    from unified_mcphub.supervisor import build_connection, resolve_auth_headers
 
     spec = ServerSpec(upstream=Upstream(url="https://mcp.example.com"), auth_secret_ref="tok")
-    conn = build_connection(spec, secret_resolver=lambda ref: "S3KRET" if ref == "tok" else None)
+    headers = await resolve_auth_headers(spec, _Store({"tok": "S3KRET"}), name="ex")
     # The probe now authenticates an HTTP upstream instead of connecting bare.
-    assert conn._resolve_headers() == {"Authorization": "Bearer S3KRET"}
+    assert headers == {"Authorization": "Bearer S3KRET"}
+    assert build_connection(spec, auth_headers=headers)._resolve_headers() == headers
 
 
-def test_build_connection_url_no_secret_sends_no_header():
-    from unified_mcphub.supervisor import build_connection
+async def test_probe_auth_no_secret_sends_no_header():
+    from unified_mcphub.supervisor import resolve_auth_headers
 
     spec = ServerSpec(upstream=Upstream(url="https://mcp.example.com"))  # no auth_secret_ref
-    conn = build_connection(spec, secret_resolver=lambda ref: "x")
-    assert conn._resolve_headers() == {}
+    assert await resolve_auth_headers(spec, _Store({}), name="ex") == {}
 
 
-def test_build_connection_custom_header_raw_value():
+async def test_probe_auth_custom_header_raw_value():
     """An API-key server with a custom header + no scheme sends the raw secret."""
-    from unified_mcphub.supervisor import build_connection
+    from unified_mcphub.supervisor import resolve_auth_headers
 
     spec = ServerSpec(
         upstream=Upstream(url="https://mcp.context7.com/mcp"),
@@ -159,8 +173,8 @@ def test_build_connection_custom_header_raw_value():
         auth_header="CONTEXT7_API_KEY",
         auth_scheme=None,
     )
-    conn = build_connection(spec, secret_resolver=lambda ref: "KEY123")
-    assert conn._resolve_headers() == {"CONTEXT7_API_KEY": "KEY123"}
+    headers = await resolve_auth_headers(spec, _Store({"c7": "KEY123"}), name="context7")
+    assert headers == {"CONTEXT7_API_KEY": "KEY123"}
 
 
 def test_build_spec_custom_auth_persists_non_default():
@@ -170,6 +184,30 @@ def test_build_spec_custom_auth_persists_non_default():
     )
     assert spec.auth_header == "X-API-Key"
     assert spec.auth_scheme is None  # empty string normalized to None (raw value)
+
+
+def test_build_spec_oauth_issuer_builds_dcr_config():
+    spec = servers.build_spec(
+        url="https://mcp.linear.app/mcp",
+        oauth_issuer="https://mcp.linear.app",
+        oauth_scopes=["read"],
+    )
+    assert spec.oauth is not None
+    assert spec.oauth.issuer == "https://mcp.linear.app"
+    assert spec.oauth.scopes == ["read"]
+    assert spec.oauth.client_id is None  # DCR: registered later
+
+
+def test_write_workspace_persists_oauth_block(hub_home):
+    spec = servers.build_spec(
+        url="https://mcp.linear.app/mcp",
+        oauth_issuer="https://mcp.linear.app",
+        oauth_scopes=["read"],
+    )
+    servers.write_workspace("default", "linear", spec, [], dry_run=False, force=False)
+    ws = load_workspace("default")
+    assert ws.servers["linear"].oauth.issuer == "https://mcp.linear.app"
+    assert ws.servers["linear"].oauth.scopes == ["read"]
 
 
 # --- configure_perms wizard ---------------------------------------------------

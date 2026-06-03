@@ -68,7 +68,17 @@ def canonical_truth_path() -> Path:
 
 class ListenConfig(BaseModel):
     unix_socket: str = Field(default_factory=lambda: str(mcphub_home() / "mcphub.sock"))
-    tcp: str | None = "127.0.0.1:7712"
+    # TCP loopback fallback (the unix socket is the primary, trusted transport).
+    # `port` is a first-class field so it is trivial to retarget when 7712 is
+    # already taken; `start --port N` / `--no-tcp` override these at launch.
+    tcp_enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = 7712
+
+    @property
+    def tcp_address(self) -> str | None:
+        """`host:port` when TCP is enabled, else None (the off switch callers test)."""
+        return f"{self.host}:{self.port}" if self.tcp_enabled else None
 
 
 class AuditConfig(BaseModel):

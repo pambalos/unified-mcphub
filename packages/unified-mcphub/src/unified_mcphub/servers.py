@@ -128,16 +128,17 @@ def preflight(spec: ServerSpec) -> None:
 
 
 def _verb_matcher(verbs: tuple[str, ...]) -> "Callable[[str], bool]":
-    """Match a verb at a word boundary, leading OR trailing:
-    - leading: `read_graph`, camelCase `searchNodes`, bare `find` — verb at start,
-      followed by `_`, an uppercase/digit, or end.
-    - trailing (snake): `hub_repo_search`, `hf_doc_fetch` — verb at the end,
-      preceded by `_` (many remote servers name tools `<noun>_<verb>`).
+    """Match a verb at a word boundary, leading OR trailing. The boundary is `_`,
+    `-` (hyphenated names like `query-docs`), an uppercase/digit (camelCase like
+    `searchNodes`), or the string end:
+    - leading: `read_graph`, `query-docs`, `searchNodes`, bare `find`.
+    - trailing: `hub_repo_search`, `hf_doc_fetch` (many servers name tools
+      `<noun>_<verb>`).
     `findings_purge` matches nothing (no boundary), staying out of the tier. The
     verb is case-insensitive; the boundary is not."""
     alt = "|".join(verbs)
-    lead = re.compile(r"^(?i:" + alt + r")(?=_|[A-Z0-9]|$)")
-    trail = re.compile(r"_(?i:" + alt + r")$")
+    lead = re.compile(r"^(?i:" + alt + r")(?=[_-]|[A-Z0-9]|$)")
+    trail = re.compile(r"[_-](?i:" + alt + r")$")
 
     def matches(name: str) -> bool:
         return bool(lead.match(name) or trail.search(name))

@@ -44,6 +44,9 @@ def _spec(command=None, args=None, url=None):
         ("queryset_wipe", "prompt"),  # 'query' not at a boundary -> not auto-allowed
         ("hub_repo_search", "allow"),  # trailing read verb (HF-style naming)
         ("hf_doc_fetch", "allow"),  # trailing read verb
+        ("query-docs", "allow"),  # hyphenated leading read verb (Context7-style)
+        ("get-library-docs", "allow"),  # hyphenated leading read verb
+        ("repo-delete", "deny"),  # hyphenated trailing destructive verb
         ("repo_delete", "deny"),  # trailing destructive verb wins
         ("create_repo", "prompt"),  # leading mutate
         ("hf_whoami", "prompt"),  # no verb at either boundary

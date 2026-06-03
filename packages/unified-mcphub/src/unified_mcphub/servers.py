@@ -32,6 +32,7 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from unified_mcp_client import types
 
 from .config import (
+    OAuthConfig,
     Rule,
     ServerSpec,
     Upstream,
@@ -309,6 +310,17 @@ def _spec_node(spec: ServerSpec) -> CommentedMap:
         node["auth_header"] = spec.auth_header
     if spec.auth_scheme != "Bearer":
         node["auth_scheme"] = spec.auth_scheme
+    if spec.oauth is not None:
+        oauth = CommentedMap()
+        for key in ("issuer", "authorize_url", "token_url", "client_id", "registration_url"):
+            value = getattr(spec.oauth, key)
+            if value:
+                oauth[key] = value
+        if spec.oauth.scopes:
+            scopes = CommentedSeq(spec.oauth.scopes)
+            scopes.fa.set_flow_style()
+            oauth["scopes"] = scopes
+        node["oauth"] = oauth
     if spec.allow_unpinned:
         node["allow_unpinned"] = True
     return node
@@ -435,6 +447,11 @@ def build_spec(
     auth_secret_ref: str | None = None,
     auth_header: str = "Authorization",
     auth_scheme: str | None = "Bearer",
+    oauth_issuer: str | None = None,
+    oauth_authorize_url: str | None = None,
+    oauth_token_url: str | None = None,
+    oauth_client_id: str | None = None,
+    oauth_scopes: Sequence[str] | None = None,
     disabled: bool = False,
     allow_unpinned: bool = False,
 ) -> ServerSpec:
@@ -454,11 +471,22 @@ def build_spec(
     else:
         upstream = Upstream(url=url)
 
+    oauth = None
+    if oauth_issuer or oauth_authorize_url or oauth_token_url or oauth_client_id:
+        oauth = OAuthConfig(
+            issuer=oauth_issuer,
+            authorize_url=oauth_authorize_url,
+            token_url=oauth_token_url,
+            client_id=oauth_client_id,
+            scopes=list(oauth_scopes or []),
+        )
+
     return ServerSpec(
         upstream=upstream,
         auth_secret_ref=auth_secret_ref,
         auth_header=auth_header,
         auth_scheme=auth_scheme or None,  # empty string → raw secret (no scheme)
+        oauth=oauth,
         enabled=not disabled,
         allow_unpinned=allow_unpinned,
     )
@@ -492,6 +520,11 @@ def add_server(
     auth_secret_ref: str | None = None,
     auth_header: str = "Authorization",
     auth_scheme: str | None = "Bearer",
+    oauth_issuer: str | None = None,
+    oauth_authorize_url: str | None = None,
+    oauth_token_url: str | None = None,
+    oauth_client_id: str | None = None,
+    oauth_scopes: Sequence[str] | None = None,
     disabled: bool = False,
     allow_unpinned: bool = False,
     workspace: str | None = None,
@@ -515,6 +548,11 @@ def add_server(
         auth_secret_ref=auth_secret_ref,
         auth_header=auth_header,
         auth_scheme=auth_scheme,
+        oauth_issuer=oauth_issuer,
+        oauth_authorize_url=oauth_authorize_url,
+        oauth_token_url=oauth_token_url,
+        oauth_client_id=oauth_client_id,
+        oauth_scopes=oauth_scopes,
         disabled=disabled,
         allow_unpinned=allow_unpinned,
     )
@@ -565,4 +603,9 @@ def add_server(
         _note(
             "  warning: no rules were written — only tools matched by existing wildcard "
             "rules will be reachable; everything else is default-denied."
+        )
+    if spec.oauth is not None and not dry_run:
+        _note(
+            f"  next: `unified-mcphub auth login {server}` to authorize, then re-run "
+            f"`add-server {server} … --force` to probe + propose rules with the token."
         )

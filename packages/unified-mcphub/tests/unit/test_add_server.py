@@ -186,6 +186,30 @@ def test_build_spec_custom_auth_persists_non_default():
     assert spec.auth_scheme is None  # empty string normalized to None (raw value)
 
 
+def test_build_spec_oauth_issuer_builds_dcr_config():
+    spec = servers.build_spec(
+        url="https://mcp.linear.app/mcp",
+        oauth_issuer="https://mcp.linear.app",
+        oauth_scopes=["read"],
+    )
+    assert spec.oauth is not None
+    assert spec.oauth.issuer == "https://mcp.linear.app"
+    assert spec.oauth.scopes == ["read"]
+    assert spec.oauth.client_id is None  # DCR: registered later
+
+
+def test_write_workspace_persists_oauth_block(hub_home):
+    spec = servers.build_spec(
+        url="https://mcp.linear.app/mcp",
+        oauth_issuer="https://mcp.linear.app",
+        oauth_scopes=["read"],
+    )
+    servers.write_workspace("default", "linear", spec, [], dry_run=False, force=False)
+    ws = load_workspace("default")
+    assert ws.servers["linear"].oauth.issuer == "https://mcp.linear.app"
+    assert ws.servers["linear"].oauth.scopes == ["read"]
+
+
 # --- configure_perms wizard ---------------------------------------------------
 
 

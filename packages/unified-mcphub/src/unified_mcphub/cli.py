@@ -171,11 +171,22 @@ def cmd_auth(args: argparse.Namespace) -> int:
             scopes=spec.oauth.scopes,
         )
         print(
-            f"Open this URL to authorize, then paste the redirect you land on:\n"
-            f"  {flow.authorization_url()}\n"
+            f"Open this URL in a browser and approve. You'll be redirected to a\n"
+            f"127.0.0.1 page that won't load — copy that FULL address-bar URL (it has\n"
+            f"?code=…&state=…) and paste it below:\n\n  {flow.authorization_url()}\n"
         )
-        query = urllib.parse.urlparse(input("redirect URL: ").strip()).query
-        params = urllib.parse.parse_qs(query)
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(input("redirect URL: ").strip()).query)
+        if "error" in params:
+            detail = params.get("error_description", [""])[0]
+            raise SystemExit(
+                f"authorization denied: {params['error'][0]}{f' — {detail}' if detail else ''}"
+            )
+        if "code" not in params or "state" not in params:
+            raise SystemExit(
+                "that URL has no ?code=…&state=… — paste the FULL URL the browser landed on "
+                "AFTER you approved (not the bare callback URL). The page won't load; copy it "
+                "from the address bar."
+            )
         return await flow.exchange_code(params["code"][0], params["state"][0])
 
     tokens = asyncio.run(_login())

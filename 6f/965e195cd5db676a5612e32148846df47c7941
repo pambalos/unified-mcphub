@@ -1,0 +1,22 @@
+packages/unified-mcp-graphify/README.md
+  s_7fbd3faf5f1ff0::t_29c4200494b7da 27-35,38
+  s_7fbd3faf5f1ff0::t_134a0580631ccc 108-115
+  s_7fbd3faf5f1ff0::t_9fd76bf24317d0 72,76-80,83-98
+  s_7fbd3faf5f1ff0::t_160852b7d432c5 19-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "6f965e195cd5db676a5612e32148846df47c7941",
+  "prompts": {},
+  "sessions": {
+    "s_7fbd3faf5f1ff0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "baa056aa-00aa-4088-9b0d-f9e2066742e9",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

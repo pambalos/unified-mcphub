@@ -1,7 +1,8 @@
 """unified-mcp-graphify MCP server.
 
 Tools (all take a per-call ``path`` = repo root → ``<path>/graphify-out/graph.json``):
-  - build_graph   -> subprocess `graphify extract`  (write/compute → gate `prompt`)
+  - build_graph   -> start a background `graphify extract`  (write/compute → gate `prompt`)
+  - build_status  -> progress of an in-flight/finished build  (read → `allow`)
   - graph_status  -> own code (git-HEAD staleness)   (read → `allow`)
   - query_graph / get_node / get_neighbors / get_community / god_nodes /
     graph_stats / shortest_path  -> library-import from graphify.serve  (read → `allow`)
@@ -14,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
+import time
 from pathlib import Path
 
 import networkx as nx
@@ -25,7 +27,8 @@ from graphify.security import sanitize_label
 from graphify.serve import _find_node, _query_graph_text, _score_nodes
 
 from ._graph import GraphNotBuiltError, load
-from .build import build_graph as _build_graph
+from .build import build_state as _build_state
+from .build import start_build as _start_build
 from .status import graph_status as _graph_status
 
 mcp = FastMCP("graphify")
@@ -40,14 +43,41 @@ _NO_GRAPH = "No graph for {path!r}. Run build_graph(path) first."
 
 @mcp.tool()
 def build_graph(path: str, backend: str = "claude-cli", deep: bool = False) -> dict:
-    """Build (or incrementally rebuild) the graphify knowledge graph for a repo.
+    """Start building (or incrementally rebuilding) the graphify knowledge graph.
 
-    Runs graphify extraction over ``path``; the graph lands at
-    ``<path>/graphify-out/graph.json``. ``backend`` defaults to ``claude-cli``
-    (uses the local Claude Code subscription — no API key). Code-only repos never
-    invoke the backend. Synchronous; may take minutes on large/doc-heavy repos.
+    Returns immediately with ``state: "running"`` and runs graphify extraction
+    in the background; the graph lands at ``<path>/graphify-out/graph.json``.
+    Extraction can take many minutes on large/doc-heavy repos — longer than the
+    MCP client's per-call timeout — so poll ``build_status(path)`` for progress
+    rather than waiting on this call. ``backend`` defaults to ``claude-cli``
+    (uses the local Claude Code subscription — no API key); code-only repos never
+    invoke the backend. A build already running for ``path`` is not duplicated.
     """
-    return _build_graph(path, backend=backend, deep=deep)
+    return _start_build(path, backend=backend, deep=deep)
+
+
+@mcp.tool()
+def build_status(path: str) -> dict:
+    """Progress of the most recent build for ``path``.
+
+    ``state`` is ``running`` while extraction is in flight, ``done`` / ``failed``
+    once it finishes (with node/edge/community counts or the error), or ``idle``
+    if no build has run this session — in which case the on-disk graph status is
+    returned so you can tell whether a graph already exists from a prior run.
+    """
+    job = _build_state(path)
+    if job is None:
+        return {**_graph_status(path), "state": "idle"}
+    end = job["finished_at"] or time.time()
+    out: dict = {
+        "state": job["state"],
+        "path": str(Path(path).expanduser().resolve()),
+        "backend": job["backend"],
+        "elapsed_s": round(end - job["started_at"], 1),
+    }
+    if job["result"] is not None:
+        out.update(job["result"])
+    return out
 
 
 @mcp.tool()

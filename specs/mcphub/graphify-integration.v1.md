@@ -282,7 +282,11 @@ graphify:
     # env: { GRAPHIFY_BACKEND: "claude-cli" }
 # authz (probe proposes; operator confirms) — all per-call `path`:
 #   query_graph / get_* / list_* / god_nodes / graph_stats / shortest_path / *_impact → allow
+#   build_status / graph_status (read-only polls)                                      → allow
 #   build_graph                                                                        → prompt
+# NOTE: build_status/graph_status hit the classifier's "unrecognized verb → prompt"
+# safe default, so confirm them to `allow` at add-server time (build_status is a
+# poll — leaving it on `prompt` nags on every status check).
 ```
 
 > **Why not just point the YAML at `graphify.serve`?** Because `serve` binds to one

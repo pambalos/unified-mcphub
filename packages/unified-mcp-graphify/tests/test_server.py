@@ -1,9 +1,10 @@
 import shutil
+import time
 from pathlib import Path
 
 import pytest
 
-from unified_mcp_graphify import _graph, server
+from unified_mcp_graphify import _graph, build, server
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_graph.json"
 
@@ -16,6 +17,24 @@ def repo(tmp_path):
     shutil.copy(FIXTURE, out / "graph.json")
     _graph.clear_cache()
     return str(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _clear_jobs():
+    with build._jobs_lock:
+        build._jobs.clear()
+    yield
+    with build._jobs_lock:
+        build._jobs.clear()
+
+
+def _wait_for(predicate, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if value := predicate():
+            return value
+        time.sleep(0.01)
+    raise AssertionError("condition not met within timeout")
 
 
 def test_graph_stats(repo):
@@ -62,3 +81,36 @@ def test_tools_report_missing_graph(tmp_path):
     _graph.clear_cache()
     out = server.query_graph(str(tmp_path), "anything")
     assert "build_graph" in out
+
+
+# --- async build_graph / build_status ---------------------------------------
+
+
+def test_build_status_idle_without_graph(tmp_path):
+    r = server.build_status(str(tmp_path))
+    assert r["state"] == "idle"
+    assert r["graph_exists"] is False
+
+
+def test_build_status_idle_falls_back_to_disk(repo):
+    r = server.build_status(repo)
+    assert r["state"] == "idle"
+    assert r["graph_exists"] is True  # on-disk graph from a prior run
+
+
+def test_build_graph_returns_running_immediately(tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "build_graph", lambda *a, **k: {"ok": True, "nodes": 1})
+    r = server.build_graph(str(tmp_path))
+    assert r["ok"] is True and r["state"] == "running"
+
+
+def test_build_status_reports_completion(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        build, "build_graph", lambda *a, **k: {"ok": True, "nodes": 9, "edges": 4, "communities": 1}
+    )
+    server.build_graph(str(tmp_path), backend="claude-cli")
+    done = _wait_for(lambda: (s := server.build_status(str(tmp_path)))["state"] == "done" and s)
+    assert done["nodes"] == 9
+    assert done["backend"] == "claude-cli"
+    assert done["ok"] is True
+    assert isinstance(done["elapsed_s"], float)

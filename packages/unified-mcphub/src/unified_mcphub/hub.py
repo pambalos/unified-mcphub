@@ -288,7 +288,7 @@ class Hub:
     async def _add_server(self, name: str, spec) -> None:
         if not self._pinning_ok(name, spec):
             return
-        server = SupervisedServer(name, spec, secret_resolver=self.secrets.get)
+        server = SupervisedServer(name, spec, token_store=self.secrets)
         self.servers[name] = server
         await server.start()
 

@@ -194,7 +194,10 @@ auth login linear
 `--auth-header` defaults to `Authorization` and `--auth-scheme` to `Bearer`; pass
 `--auth-scheme ''` to send the secret as the raw header value. OAuth config (static
 `authorize_url`/`token_url`/`client_id`, or DCR via `issuer`) lives in the workspace
-`oauth:` block; tokens are stored encrypted and auto-refreshed.
+`oauth:` block. After `auth login`, the hub **refreshes the access token on every
+(re)connect** and sends it as `Authorization: Bearer <token>`, persisting any rotated
+refresh token — so an expired token self-heals on the next reconnect. Until you log
+in, an `oauth:` server connects with no auth (and the log points you to `auth login`).
 
 ### Supply chain & version pinning
 

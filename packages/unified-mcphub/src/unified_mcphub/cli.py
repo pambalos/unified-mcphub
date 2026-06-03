@@ -103,6 +103,11 @@ def cmd_add_server(args: argparse.Namespace) -> int:
         auth_secret_ref=args.auth_secret_ref,
         auth_header=args.auth_header,
         auth_scheme=args.auth_scheme,
+        oauth_issuer=args.oauth_issuer,
+        oauth_authorize_url=args.oauth_authorize_url,
+        oauth_token_url=args.oauth_token_url,
+        oauth_client_id=args.oauth_client_id,
+        oauth_scopes=args.oauth_scope,
         disabled=args.disabled,
         allow_unpinned=args.allow_unpinned,
         workspace=args.workspace,
@@ -322,6 +327,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="Bearer",
         metavar="SCHEME",
         help="scheme prefix (default: Bearer; pass '' to send the raw secret, e.g. X-API-Key servers)",
+    )
+    p_add.add_argument(
+        "--oauth-issuer",
+        metavar="URL",
+        help="OAuth via Dynamic Client Registration: the auth server issuer (endpoints "
+        "discovered, client auto-registered on `auth login`)",
+    )
+    p_add.add_argument(
+        "--oauth-authorize-url", metavar="URL", help="static OAuth authorize endpoint"
+    )
+    p_add.add_argument("--oauth-token-url", metavar="URL", help="static OAuth token endpoint")
+    p_add.add_argument("--oauth-client-id", metavar="ID", help="static OAuth client id")
+    p_add.add_argument(
+        "--oauth-scope", action="append", metavar="SCOPE", help="OAuth scope (repeatable)"
     )
     p_add.add_argument("--workspace", help="target workspace (default: active)")
     p_add.add_argument("--disabled", action="store_true", help="write enabled: false")

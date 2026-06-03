@@ -16,50 +16,91 @@ import logging
 import sys
 import time
 from collections import deque
-from collections.abc import Callable
 
 from unified_mcp_client import HttpConnection, MCPConnection, StdioConnection, types
 
+from . import oauth
 from .config import ServerSpec
 
 logger = logging.getLogger(__name__)
 
 _BACKOFF = [1, 2, 4, 8, 16, 32, 60]
 
-SecretResolver = Callable[[str], str | None]
+
+def _static_auth_header(spec: ServerSpec, token_store: oauth.TokenStore | None) -> dict[str, str]:
+    """`auth_secret_ref` → an auth header. `Authorization: Bearer <secret>` by
+    default; a custom `auth_header` with `auth_scheme: null` sends the raw secret
+    (API-key style, e.g. `X-API-Key: <key>`)."""
+    ref = spec.auth_secret_ref
+    if not ref or token_store is None:
+        return {}
+    secret = token_store.get(ref)
+    if not secret:
+        return {}
+    value = f"{spec.auth_scheme} {secret}" if spec.auth_scheme else secret
+    return {spec.auth_header: value}
+
+
+async def resolve_auth_headers(
+    spec: ServerSpec, token_store: oauth.TokenStore | None, *, name: str = ""
+) -> dict[str, str]:
+    """Auth headers for an HTTP upstream, computed at connect time.
+
+    OAuth takes precedence over a static `auth_secret_ref`: if the server has an
+    `oauth:` block AND we hold a refresh token (i.e. `auth login` was run), refresh
+    it to a fresh access token and send `Authorization: Bearer <token>`. Refreshing
+    on each (re)connect means an expired token self-heals on the supervisor's next
+    reconnect. We never trigger discovery/registration before login (no refresh
+    token → fall through), so a probe of an un-authed OAuth server stays side-effect
+    free. Any failure degrades to no auth (the upstream 401s and is marked unhealthy
+    with a clear `auth login` hint)."""
+    if spec.oauth is not None and token_store is not None:
+        if token_store.get(f"{name}-oauth-refresh"):
+            try:
+                flow = await oauth.build_flow(
+                    name,
+                    token_store,
+                    authorize_url=spec.oauth.authorize_url,
+                    token_url=spec.oauth.token_url,
+                    client_id=spec.oauth.client_id,
+                    issuer=spec.oauth.issuer,
+                    registration_url=spec.oauth.registration_url,
+                    scopes=spec.oauth.scopes,
+                )
+                tokens = await flow.refresh()
+                access = tokens.get("access_token")
+                if access:
+                    return {"Authorization": f"Bearer {access}"}
+                logger.warning("server '%s': OAuth refresh returned no access_token", name)
+            except Exception as exc:  # noqa: BLE001 - degrade to no-auth, supervisor surfaces it
+                logger.warning("server '%s': OAuth token refresh failed: %s", name, exc)
+            return {}
+        logger.warning(
+            "server '%s': OAuth configured but not logged in — run `unified-mcphub auth login %s`",
+            name,
+            name,
+        )
+        return {}
+    return _static_auth_header(spec, token_store)
 
 
 def build_connection(
-    spec: ServerSpec, *, secret_resolver: SecretResolver | None = None, name: str = ""
+    spec: ServerSpec, *, auth_headers: dict[str, str] | None = None, name: str = ""
 ) -> MCPConnection:
     """Build a client connection from a server spec — the single source of truth
     for connection semantics, shared by the live supervisor and the `add-server`
     probe (so a server probes exactly the way the hub will later run it).
 
     A bare `python`/`python3` resolves to the hub's own interpreter, so bundled
-    first-party servers run in the venv that actually has the package. For an HTTP
-    upstream the `auth_secret_ref` Bearer token is resolved at connect time (so
-    credential rotation is picked up, and an authed probe authenticates).
+    first-party servers run in the venv that actually has the package. HTTP auth
+    headers are computed by the caller (see `resolve_auth_headers`) and passed in.
     """
     up = spec.upstream
     if up.command:
         command = sys.executable if up.command in ("python", "python3") else up.command
         return StdioConnection(command, up.args, up.env or None)
     if up.url:
-
-        def headers() -> dict[str, str]:
-            ref = spec.auth_secret_ref
-            if not ref or secret_resolver is None:
-                return {}
-            secret = secret_resolver(ref)
-            if not secret:
-                return {}
-            # `Authorization: Bearer <secret>` by default; a custom header with
-            # `auth_scheme: null` sends the raw secret (API-key style).
-            value = f"{spec.auth_scheme} {secret}" if spec.auth_scheme else secret
-            return {spec.auth_header: value}
-
-        return HttpConnection(up.url, headers_provider=headers)
+        return HttpConnection(up.url, headers=dict(auth_headers or {}))
     if up.image:
         raise ValueError(f"server '{name}': container upstreams arrive at M0.5 (SEC-MCP-5)")
     raise ValueError(f"server '{name}': upstream needs one of command/url/image")
@@ -67,13 +108,13 @@ def build_connection(
 
 class SupervisedServer:
     def __init__(
-        self, name: str, spec: ServerSpec, secret_resolver: SecretResolver | None = None
+        self, name: str, spec: ServerSpec, token_store: oauth.TokenStore | None = None
     ) -> None:
         self.name = name
         self.spec = spec
         self.healthy = True
         self.last_error: str | None = None
-        self._secret_resolver = secret_resolver
+        self._token_store = token_store
         self._tools: list[types.Tool] = []
         self._conn: MCPConnection | None = None
         self._ready = asyncio.Event()
@@ -81,8 +122,10 @@ class SupervisedServer:
         self._task: asyncio.Task | None = None
         self._attempt = 0
 
-    def _make_connection(self) -> MCPConnection:
-        return build_connection(self.spec, secret_resolver=self._secret_resolver, name=self.name)
+    async def _make_connection(self) -> MCPConnection:
+        # Auth resolved per (re)connect: OAuth tokens refresh, static secrets rotate.
+        headers = await resolve_auth_headers(self.spec, self._token_store, name=self.name)
+        return build_connection(self.spec, auth_headers=headers, name=self.name)
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._run(), name=f"supervise:{self.name}")
@@ -91,7 +134,7 @@ class SupervisedServer:
         crashes: deque[float] = deque()
         while not self._stop.is_set():
             try:
-                async with self._make_connection() as conn:
+                async with await self._make_connection() as conn:
                     self._tools = await conn.list_tools()
                     self._conn = conn
                     self._attempt = 0

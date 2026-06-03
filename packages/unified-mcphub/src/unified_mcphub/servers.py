@@ -32,6 +32,7 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from unified_mcp_client import types
 
 from .config import (
+    OAuthConfig,
     Rule,
     ServerSpec,
     Upstream,
@@ -128,16 +129,17 @@ def preflight(spec: ServerSpec) -> None:
 
 
 def _verb_matcher(verbs: tuple[str, ...]) -> "Callable[[str], bool]":
-    """Match a verb at a word boundary, leading OR trailing:
-    - leading: `read_graph`, camelCase `searchNodes`, bare `find` — verb at start,
-      followed by `_`, an uppercase/digit, or end.
-    - trailing (snake): `hub_repo_search`, `hf_doc_fetch` — verb at the end,
-      preceded by `_` (many remote servers name tools `<noun>_<verb>`).
+    """Match a verb at a word boundary, leading OR trailing. The boundary is `_`,
+    `-` (hyphenated names like `query-docs`), an uppercase/digit (camelCase like
+    `searchNodes`), or the string end:
+    - leading: `read_graph`, `query-docs`, `searchNodes`, bare `find`.
+    - trailing: `hub_repo_search`, `hf_doc_fetch` (many servers name tools
+      `<noun>_<verb>`).
     `findings_purge` matches nothing (no boundary), staying out of the tier. The
     verb is case-insensitive; the boundary is not."""
     alt = "|".join(verbs)
-    lead = re.compile(r"^(?i:" + alt + r")(?=_|[A-Z0-9]|$)")
-    trail = re.compile(r"_(?i:" + alt + r")$")
+    lead = re.compile(r"^(?i:" + alt + r")(?=[_-]|[A-Z0-9]|$)")
+    trail = re.compile(r"[_-](?i:" + alt + r")$")
 
     def matches(name: str) -> bool:
         return bool(lead.match(name) or trail.search(name))
@@ -194,26 +196,22 @@ def is_recognized(tool_name: str) -> bool:
 # --- probe (warm + list) ------------------------------------------------------
 
 
-def _probe_connection(spec: ServerSpec):
-    # Build the probe connection exactly as the hub will run it (shared builder),
-    # resolving `auth_secret_ref` so an authenticated remote server can be probed.
-    from .secrets import SecretsStore
-    from .supervisor import build_connection
-
-    return build_connection(spec, secret_resolver=SecretsStore().get)
-
-
-def probe(spec: ServerSpec, *, timeout: float = 120.0) -> list[types.Tool]:
+def probe(spec: ServerSpec, *, name: str = "", timeout: float = 120.0) -> list[types.Tool]:
     """Connect once and list tools, returning [] on any failure.
 
     The single connect absorbs a cold `npx`/`uvx` download (spawn + initialize +
     list happen on the one warm process), bounded by a generous `timeout` that is
     **decoupled from the supervisor's 30s wait_ready** — so a first-run download
-    never races a tight limit.
+    never races a tight limit. Auth is resolved exactly as the hub will at runtime
+    (shared `build_connection`), so an authed remote server probes authenticated.
     """
 
     async def _run() -> list[types.Tool]:
-        conn = _probe_connection(spec)
+        from .secrets import SecretsStore
+        from .supervisor import build_connection, resolve_auth_headers
+
+        headers = await resolve_auth_headers(spec, SecretsStore(), name=name)
+        conn = build_connection(spec, auth_headers=headers, name=name)
         async with conn:
             return await conn.list_tools()
 
@@ -312,6 +310,17 @@ def _spec_node(spec: ServerSpec) -> CommentedMap:
         node["auth_header"] = spec.auth_header
     if spec.auth_scheme != "Bearer":
         node["auth_scheme"] = spec.auth_scheme
+    if spec.oauth is not None:
+        oauth = CommentedMap()
+        for key in ("issuer", "authorize_url", "token_url", "client_id", "registration_url"):
+            value = getattr(spec.oauth, key)
+            if value:
+                oauth[key] = value
+        if spec.oauth.scopes:
+            scopes = CommentedSeq(spec.oauth.scopes)
+            scopes.fa.set_flow_style()
+            oauth["scopes"] = scopes
+        node["oauth"] = oauth
     if spec.allow_unpinned:
         node["allow_unpinned"] = True
     return node
@@ -438,6 +447,11 @@ def build_spec(
     auth_secret_ref: str | None = None,
     auth_header: str = "Authorization",
     auth_scheme: str | None = "Bearer",
+    oauth_issuer: str | None = None,
+    oauth_authorize_url: str | None = None,
+    oauth_token_url: str | None = None,
+    oauth_client_id: str | None = None,
+    oauth_scopes: Sequence[str] | None = None,
     disabled: bool = False,
     allow_unpinned: bool = False,
 ) -> ServerSpec:
@@ -457,11 +471,22 @@ def build_spec(
     else:
         upstream = Upstream(url=url)
 
+    oauth = None
+    if oauth_issuer or oauth_authorize_url or oauth_token_url or oauth_client_id:
+        oauth = OAuthConfig(
+            issuer=oauth_issuer,
+            authorize_url=oauth_authorize_url,
+            token_url=oauth_token_url,
+            client_id=oauth_client_id,
+            scopes=list(oauth_scopes or []),
+        )
+
     return ServerSpec(
         upstream=upstream,
         auth_secret_ref=auth_secret_ref,
         auth_header=auth_header,
         auth_scheme=auth_scheme or None,  # empty string → raw secret (no scheme)
+        oauth=oauth,
         enabled=not disabled,
         allow_unpinned=allow_unpinned,
     )
@@ -495,6 +520,11 @@ def add_server(
     auth_secret_ref: str | None = None,
     auth_header: str = "Authorization",
     auth_scheme: str | None = "Bearer",
+    oauth_issuer: str | None = None,
+    oauth_authorize_url: str | None = None,
+    oauth_token_url: str | None = None,
+    oauth_client_id: str | None = None,
+    oauth_scopes: Sequence[str] | None = None,
     disabled: bool = False,
     allow_unpinned: bool = False,
     workspace: str | None = None,
@@ -518,6 +548,11 @@ def add_server(
         auth_secret_ref=auth_secret_ref,
         auth_header=auth_header,
         auth_scheme=auth_scheme,
+        oauth_issuer=oauth_issuer,
+        oauth_authorize_url=oauth_authorize_url,
+        oauth_token_url=oauth_token_url,
+        oauth_client_id=oauth_client_id,
+        oauth_scopes=oauth_scopes,
         disabled=disabled,
         allow_unpinned=allow_unpinned,
     )
@@ -546,7 +581,7 @@ def add_server(
     if no_probe:
         _note("[add-server] --no-probe: writing the server with no rules.")
     else:
-        tools = probe(spec, timeout=probe_timeout)
+        tools = probe(spec, name=server, timeout=probe_timeout)
         if tools and configure and sys.stdin.isatty() and not assume_yes:
             rules = configure_perms(server, tools)
         elif tools:
@@ -568,4 +603,9 @@ def add_server(
         _note(
             "  warning: no rules were written — only tools matched by existing wildcard "
             "rules will be reachable; everything else is default-denied."
+        )
+    if spec.oauth is not None and not dry_run:
+        _note(
+            f"  next: `unified-mcphub auth login {server}` to authorize, then re-run "
+            f"`add-server {server} … --force` to probe + propose rules with the token."
         )

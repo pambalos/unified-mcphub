@@ -15,7 +15,7 @@ from .config import HubConfig, load_hub_config
 
 def http_url(hub: HubConfig | None = None) -> str | None:
     hub = hub or load_hub_config()
-    return f"http://{hub.listen.tcp}/mcp" if hub.listen.tcp else None
+    return f"http://{hub.listen.tcp_address}/mcp" if hub.listen.tcp_address else None
 
 
 def socket_path(hub: HubConfig | None = None) -> Path | None:
@@ -29,6 +29,6 @@ def canonical_truth(workspace_name: str, hub: HubConfig | None = None) -> dict:
     sock = socket_path(hub)
     if sock:
         transports["unix_socket"] = {"path": str(sock), "preferred": True}
-    if hub.listen.tcp:
+    if hub.listen.tcp_address:
         transports["tcp"] = {"url": http_url(hub)}
     return {"name": "unified-hub", "transports": transports, "active_workspace": workspace_name}

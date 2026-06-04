@@ -1,0 +1,32 @@
+LICENSE
+  s_02d888c859ef73::t_8843e4c444c375 1,3-21
+packages/unified-mcphub/pyproject.toml
+  s_02d888c859ef73::t_ba4674c5e840b8 11,16-20
+README.md
+  s_02d888c859ef73::t_4c24543fecac45 33-37
+  s_02d888c859ef73::t_4de5e994d21d36 119
+packages/unified-mcp-graphify/pyproject.toml
+  s_02d888c859ef73::t_c5fc61c80f35d1 11,16-23
+packages/unified-mcp-graphify/README.md
+  s_02d888c859ef73::t_6e42000017bf96 52-54,57-63
+packages/unified-mcp-servers/pyproject.toml
+  s_02d888c859ef73::t_aea00abd4d2a33 11,16-20
+packages/unified-mcp-client/pyproject.toml
+  s_02d888c859ef73::t_e09c3a41aa3566 11,16-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "45b8bf73bb74ffc52c670ce0f8bad45a50485464",
+  "prompts": {},
+  "sessions": {
+    "s_02d888c859ef73": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "311130df-15d6-4fca-b554-ba300ec8df02",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

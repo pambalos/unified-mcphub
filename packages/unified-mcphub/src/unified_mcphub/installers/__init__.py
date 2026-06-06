@@ -1,15 +1,24 @@
 """Harness installers — spec §11.
 
 `install <harness>` / `uninstall <harness>` dispatch to a per-harness module.
-M0 ships claude-code + opencode; add more as small modules (M0.75 / M1+).
+M0 ships claude-code + opencode; openclaw is the first-class reference harness
+(UAI-108); add more as small modules (M1+).
 """
 
 from __future__ import annotations
 
-from . import claude_code, opencode
+from . import claude_code, openclaw, opencode
 
-INSTALLERS = {"claude-code": claude_code.install, "opencode": opencode.install}
-UNINSTALLERS = {"claude-code": claude_code.uninstall, "opencode": opencode.uninstall}
+INSTALLERS = {
+    "claude-code": claude_code.install,
+    "opencode": opencode.install,
+    "openclaw": openclaw.install,
+}
+UNINSTALLERS = {
+    "claude-code": claude_code.uninstall,
+    "opencode": opencode.uninstall,
+    "openclaw": openclaw.uninstall,
+}
 
 
 def list_harnesses() -> list[str]:

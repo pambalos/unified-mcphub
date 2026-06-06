@@ -1,0 +1,23 @@
+packages/unified-mcphub/src/unified_mcphub/installers/openclaw.py
+  s_7ace7d874904c2::t_bd347e2aa717ca 1-86
+packages/unified-mcphub/src/unified_mcphub/installers/__init__.py
+  s_7ace7d874904c2::t_dccf768c17b86b 4-5,10-21
+packages/unified-mcphub/tests/unit/test_installer_openclaw.py
+  s_7ace7d874904c2::t_b9757165ed1873 1-62
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "03d6dbf1cb7bd4b5247b6ae54301be2eeac94f61",
+  "prompts": {},
+  "sessions": {
+    "s_7ace7d874904c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "08782835-4ab6-4fee-a582-184e1edfec5e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

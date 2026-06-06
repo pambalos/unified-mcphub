@@ -19,7 +19,8 @@ with the endpoints, so the registry stays transport-agnostic.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import contextlib
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Literal
 
@@ -121,6 +122,30 @@ class PendingRegistry:
     def _emit(self, event: str, data: dict) -> None:
         if self._publish is not None:
             self._publish(event, data)
+
+
+class ApprovalEventBroadcaster:
+    """Fan-out of approval events to SSE subscribers (UAI-107).
+
+    Each subscriber gets its own queue. `publish` is the sink handed to
+    `PendingRegistry`; it uses `put_nowait` so it never blocks the hot path.
+    """
+
+    def __init__(self) -> None:
+        self._queues: set[asyncio.Queue[tuple[str, dict]]] = set()
+
+    def publish(self, event: str, data: dict) -> None:
+        for queue in list(self._queues):
+            queue.put_nowait((event, data))
+
+    @contextlib.contextmanager
+    def subscribe(self) -> Iterator[asyncio.Queue[tuple[str, dict]]]:
+        queue: asyncio.Queue[tuple[str, dict]] = asyncio.Queue()
+        self._queues.add(queue)
+        try:
+            yield queue
+        finally:
+            self._queues.discard(queue)
 
 
 class ControlApiChannel:

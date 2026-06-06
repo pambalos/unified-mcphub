@@ -1,0 +1,21 @@
+packages/unified-mcphub/src/unified_mcphub/control.py
+  s_7ace7d874904c2::t_555b2ee011bcde 1-157
+packages/unified-mcphub/tests/unit/test_control.py
+  s_7ace7d874904c2::t_1f39daa2fb1d47 1-73,75-129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "49a60aca48b0900b96669650bf779ccbe2c18577",
+  "prompts": {},
+  "sessions": {
+    "s_7ace7d874904c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "08782835-4ab6-4fee-a582-184e1edfec5e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

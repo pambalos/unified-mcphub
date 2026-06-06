@@ -1,0 +1,44 @@
+packages/unified-mcphub/src/unified_mcphub/hub.py
+  s_7ace7d874904c2::t_f8f5028c1102fa 225,229,244
+packages/unified-mcphub/src/unified_mcphub/audit.py
+  s_7ace7d874904c2::t_fbb34c6cd2e596 137-138
+  s_7ace7d874904c2::t_f3b1c01f6383e9 116
+packages/unified-mcphub/src/unified_mcphub/control.py
+  s_7ace7d874904c2::t_93ef7cf440fc1e 178
+  s_7ace7d874904c2::t_f8f2da73a9fda9 71
+  s_7ace7d874904c2::t_cbae8813d5389f 57,73,164
+  s_7ace7d874904c2::t_46b8e341aa69db 29
+  s_7ace7d874904c2::t_b7ed784182124f 93
+  s_7ace7d874904c2::t_1c12c2c79c4daf 118
+packages/unified-mcphub/src/unified_mcphub/approval.py
+  s_7ace7d874904c2::t_ba6f9fc2b60cfa 116
+  s_7ace7d874904c2::t_6df8f62ff0c704 43-52
+  s_7ace7d874904c2::t_3e77e4eb0c2097 159,168
+  s_7ace7d874904c2::t_6264116a16255a 156
+  s_7ace7d874904c2::t_cdfea94bc91a10 223-228,230-231,250-251
+  s_7ace7d874904c2::t_1195a3a5bda8c0 23
+  s_7ace7d874904c2::t_3aa9ff32317fb0 170
+  s_7ace7d874904c2::t_a06283bcd877be 129,133
+packages/unified-mcphub/tests/unit/test_control.py
+  s_7ace7d874904c2::t_948ea068c5ff5b 48-51
+  s_7ace7d874904c2::t_ce8f9b78b0b98d 111-113
+  s_7ace7d874904c2::t_22f50cb1f559f0 129-131
+packages/unified-mcphub/tests/e2e/test_m08_remote_approval.py
+  s_7ace7d874904c2::t_13b5d7de1d7cd1 92-94
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "55a9fca6881e4f80fcf3d3042fbe5d6c8ef83cf0",
+  "prompts": {},
+  "sessions": {
+    "s_7ace7d874904c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "08782835-4ab6-4fee-a582-184e1edfec5e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

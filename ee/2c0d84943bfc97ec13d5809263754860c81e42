@@ -1,0 +1,19 @@
+specs/mcphub/trust-model.v1.md
+  s_7ace7d874904c2::t_3a5fccda66f900 1-69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "ee2c0d84943bfc97ec13d5809263754860c81e42",
+  "prompts": {},
+  "sessions": {
+    "s_7ace7d874904c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "08782835-4ab6-4fee-a582-184e1edfec5e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from unified_mcphub.approval import TerminalChannel
 from unified_mcphub.config import load_config
 from unified_mcphub.hub import Hub
 
@@ -32,7 +33,7 @@ async def test_prompt_allow_always_persists_exact_rule(hub_home, monkeypatch):
 
     config = load_config()
     hub = Hub(config)
-    hub.approval.foreground = True  # force the TUI path (isatty() is False under pytest)
+    hub.approval.channel = TerminalChannel()  # force the TUI path (isatty() is False under pytest)
     await hub.start()
     sock = Path(config.hub.listen.unix_socket)
     try:
@@ -78,7 +79,7 @@ async def test_background_prompt_denies_no_channel(hub_home):
     _add_prompt_rule(hub_home)
     config = load_config()
     hub = Hub(config)
-    hub.approval.foreground = False  # detached hub -> no TUI
+    hub.approval.channel = None  # detached hub -> no TUI / no approval channel
     await hub.start()
     sock = Path(config.hub.listen.unix_socket)
     try:

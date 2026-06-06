@@ -26,7 +26,7 @@ from . import audit as audit_mod
 from . import discovery
 from . import endpoints
 from . import servers as servers_mod
-from .approval import Approval
+from .approval import Approval, TerminalChannel
 from .authz import AuthzResolver, Effect
 from .config import (
     Config,
@@ -82,7 +82,7 @@ class Hub:
         self.redactor = Redactor(config.workspace.redact)
         self.approval = Approval(
             enabled=config.hub.approval.enabled,
-            foreground=sys.stdin.isatty() and sys.stdout.isatty(),
+            channel=(TerminalChannel() if sys.stdin.isatty() and sys.stdout.isatty() else None),
         )
         self.audit = audit_mod.AuditLog(audit_dir())
         self.tokens = TokenStore()

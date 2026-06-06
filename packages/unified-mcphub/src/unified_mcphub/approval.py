@@ -1,12 +1,13 @@
 """In-process approval — spec §5, ADR-0018 (decisions), ADR-0025 (scoped allows).
 
 When a call resolves to `effect: prompt`, the decision is made here. The
-keypress comes ONLY from the hub's own terminal (the same-user defense) — never
-an HTTP endpoint.
-
-Master switch (`approval.enabled`) and the background fail-safe are pure logic
-and fully exercised. The interactive TUI keypress reader (SEC-MCP-4) is the only
-piece left thin; it is never reached on the allow/deny or non-foreground paths.
+"ask a human" step is delegated to a pluggable `ApprovalChannel` (UAI-109):
+`TerminalChannel` reads a keypress from the hub's own terminal (the same-user
+defense) for an interactive hub; an out-of-process channel over the control API
+(UAI-107) sources the decision for a headless hub. `Approval` keeps the
+security-critical logic — master switch (`approval.enabled`), the session cache,
+the no-channel fail-safe, and the outcome computation; channels only return the
+operator's raw decision.
 
 Allow-always is argument-scoped (ADR-0025): rather than one tool-wide grant, the
 operator allows *this command* (exact) or *this prefix*. Broad, whole-tool trust
@@ -19,6 +20,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from enum import Enum
+from typing import Protocol
 
 
 class DecisionKind(str, Enum):
@@ -83,66 +85,42 @@ _BASE_KEYS = {
 }
 
 
-class Approval:
-    """Resolves a `prompt`-effect call to allow/deny per ADR-0018/0025."""
+class ApprovalChannel(Protocol):
+    """A source of approval decisions for a `prompt`-effect call.
 
-    def __init__(self, enabled: bool, foreground: bool) -> None:
-        self.enabled = enabled
-        self.foreground = foreground
-        self._session_allows: set[str] = set()
+    Implementations return the operator's decision and, for the scoped
+    allow-always variants, the `args_filter` to persist. They must NOT
+    re-implement the master switch, session cache, or fail-safe — that stays in
+    `Approval`. A channel that cannot reach an operator should raise; `Approval`
+    treats the absence of a channel (and, in later phases, a channel failure) as
+    fail-closed deny.
+    """
 
-    async def resolve(
+    async def ask(
         self,
         tool_uri: str,
         caller: str,
         summary: str,
-        args: dict | None = None,
-        *,
-        floored: bool = False,
-    ) -> PromptOutcome:
-        # Master switch off -> no prompts at all, auto-allow (spec §5.1, ADR-0018).
-        if not self.enabled:
-            return PromptOutcome(allowed=True, authz_decision="approval_disabled")
+        args: dict,
+        floored: bool,
+    ) -> tuple[DecisionKind, dict | None]: ...
 
-        # Background hub (no TUI) -> fail safe: deny, never silently run.
-        if not self.foreground:
-            return PromptOutcome(
-                allowed=False, authz_decision="prompt_denied", reason="no_approval_channel"
-            )
 
-        # Session allow remembered from a prior allow_session this run.
-        if tool_uri in self._session_allows:
-            return PromptOutcome(allowed=True, authz_decision="prompt_allowed", session=True)
+class TerminalChannel:
+    """Reads one keypress from the hub's own terminal (the same-user defense).
 
-        kind, args_filter = await self._ask(tool_uri, caller, summary, args or {}, floored)
-        if kind is DecisionKind.ALLOW_SESSION:
-            self._session_allows.add(tool_uri)
-        allowed = kind in (
-            DecisionKind.ALLOW,
-            DecisionKind.ALLOW_SESSION,
-            DecisionKind.ALLOW_ALWAYS_COMMAND,
-            DecisionKind.ALLOW_ALWAYS_PREFIX,
-        )
-        persistent = kind in (
-            DecisionKind.ALLOW_ALWAYS_COMMAND,
-            DecisionKind.ALLOW_ALWAYS_PREFIX,
-            DecisionKind.DENY_ALWAYS,
-        )
-        return PromptOutcome(
-            allowed=allowed,
-            authz_decision="prompt_allowed" if allowed else "prompt_denied",
-            persistent=persistent,
-            session=kind is DecisionKind.ALLOW_SESSION,
-            args_filter=args_filter,
-        )
+    The interactive-hub / local-dev source. Full TUI cards: SEC-MCP-4. This is
+    the path that was previously inlined into `Approval`; it is selected when the
+    hub runs attached to a TTY.
+    """
 
-    async def _ask(
+    async def ask(
         self, tool_uri: str, caller: str, summary: str, args: dict, floored: bool
     ) -> tuple[DecisionKind, dict | None]:
         """Read one keypress from the hub's terminal (+ a prefix line for `p`).
 
         Returns the decision and, for the scoped allow-always variants, the
-        args_filter to persist. Full TUI cards: SEC-MCP-4.
+        args_filter to persist.
         """
         primary = primary_arg(args)
         keys = dict(_BASE_KEYS)
@@ -194,3 +172,64 @@ class Approval:
                 "  ! prefix grants are broad — they can match commands you didn't intend",
                 flush=True,
             )
+
+
+class Approval:
+    """Resolves a `prompt`-effect call to allow/deny per ADR-0018/0025.
+
+    `channel` is the decision source (a `TerminalChannel` for an interactive hub,
+    or an out-of-process channel for a headless one). `channel=None` means there
+    is no way to reach an operator: the hub fails closed to deny
+    (`no_approval_channel`), exactly as a detached hub did before.
+    """
+
+    def __init__(self, enabled: bool, channel: ApprovalChannel | None) -> None:
+        self.enabled = enabled
+        self.channel = channel
+        self._session_allows: set[str] = set()
+
+    async def resolve(
+        self,
+        tool_uri: str,
+        caller: str,
+        summary: str,
+        args: dict | None = None,
+        *,
+        floored: bool = False,
+    ) -> PromptOutcome:
+        # Master switch off -> no prompts at all, auto-allow (spec §5.1, ADR-0018).
+        if not self.enabled:
+            return PromptOutcome(allowed=True, authz_decision="approval_disabled")
+
+        # No reachable approval channel (headless hub, no bridge) -> fail safe:
+        # deny, never silently run.
+        if self.channel is None:
+            return PromptOutcome(
+                allowed=False, authz_decision="prompt_denied", reason="no_approval_channel"
+            )
+
+        # Session allow remembered from a prior allow_session this run.
+        if tool_uri in self._session_allows:
+            return PromptOutcome(allowed=True, authz_decision="prompt_allowed", session=True)
+
+        kind, args_filter = await self.channel.ask(tool_uri, caller, summary, args or {}, floored)
+        if kind is DecisionKind.ALLOW_SESSION:
+            self._session_allows.add(tool_uri)
+        allowed = kind in (
+            DecisionKind.ALLOW,
+            DecisionKind.ALLOW_SESSION,
+            DecisionKind.ALLOW_ALWAYS_COMMAND,
+            DecisionKind.ALLOW_ALWAYS_PREFIX,
+        )
+        persistent = kind in (
+            DecisionKind.ALLOW_ALWAYS_COMMAND,
+            DecisionKind.ALLOW_ALWAYS_PREFIX,
+            DecisionKind.DENY_ALWAYS,
+        )
+        return PromptOutcome(
+            allowed=allowed,
+            authz_decision="prompt_allowed" if allowed else "prompt_denied",
+            persistent=persistent,
+            session=kind is DecisionKind.ALLOW_SESSION,
+            args_filter=args_filter,
+        )

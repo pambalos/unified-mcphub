@@ -222,9 +222,11 @@ class Hub:
                 )
             denied_reason = outcome.reason
             allowed = outcome.allowed
+            decided_by = outcome.decided_by
         else:
             allowed = decision.effect is Effect.ALLOW
             denied_reason = None
+            decided_by = None
 
         self.audit.write_received(
             request_id=request_id,
@@ -239,6 +241,7 @@ class Hub:
             authz_rule=decision.rule,
             audit_level=decision.audit_level,
             reason=denied_reason,
+            decided_by=decided_by,
         )
 
         if not allowed:

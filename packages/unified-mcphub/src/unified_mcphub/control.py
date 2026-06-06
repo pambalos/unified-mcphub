@@ -26,9 +26,8 @@ from typing import Literal
 
 from ulid import ULID
 
-from .approval import DecisionKind
+from .approval import ChannelDecision, DecisionKind
 
-DecisionResult = tuple[DecisionKind, dict | None]
 SubmitResult = Literal["accepted", "already_resolved"]
 EventSink = Callable[[str, dict], None]
 
@@ -55,7 +54,7 @@ class PendingApproval:
 @dataclass
 class _Entry:
     info: PendingApproval
-    future: asyncio.Future[DecisionResult]
+    future: asyncio.Future[ChannelDecision]
 
 
 class PendingRegistry:
@@ -69,9 +68,9 @@ class PendingRegistry:
         self._entries: dict[str, _Entry] = {}
         self._publish = publish
 
-    def register(self, info: PendingApproval) -> asyncio.Future[DecisionResult]:
+    def register(self, info: PendingApproval) -> asyncio.Future[ChannelDecision]:
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[DecisionResult] = loop.create_future()
+        future: asyncio.Future[ChannelDecision] = loop.create_future()
         self._entries[info.pending_id] = _Entry(info, future)
         self._emit("pending.created", info.created_event())
         return future
@@ -91,7 +90,7 @@ class PendingRegistry:
         entry = self._entries.pop(pending_id, None)
         if entry is None or entry.future.done():
             return "already_resolved"
-        entry.future.set_result((kind, args_filter))
+        entry.future.set_result(ChannelDecision(kind, args_filter, decided_by))
         self._emit(
             "pending.resolved",
             {"pending_id": pending_id, "kind": kind.value, "decided_by": decided_by},
@@ -116,7 +115,7 @@ class PendingRegistry:
         """Fail-closed: deny every outstanding pending on teardown."""
         for pending_id, entry in list(self._entries.items()):
             if not entry.future.done():
-                entry.future.set_result((DecisionKind.DENY, None))
+                entry.future.set_result(ChannelDecision(DecisionKind.DENY, None, "system"))
             self._entries.pop(pending_id, None)
 
     def _emit(self, event: str, data: dict) -> None:
@@ -162,7 +161,7 @@ class ControlApiChannel:
 
     async def ask(
         self, tool_uri: str, caller: str, summary: str, args: dict, floored: bool
-    ) -> DecisionResult:
+    ) -> ChannelDecision:
         info = PendingApproval(
             pending_id=str(ULID()),
             tool_uri=tool_uri,
@@ -176,7 +175,7 @@ class ControlApiChannel:
             return await asyncio.wait_for(future, self._timeout_s)
         except asyncio.TimeoutError:
             self._registry.expire(info.pending_id, reason="timeout")
-            return DecisionKind.DENY, None
+            return ChannelDecision(DecisionKind.DENY, None, "timeout")
         except asyncio.CancelledError:
             self._registry.expire(info.pending_id, reason="cancelled")
             raise

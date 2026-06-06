@@ -20,7 +20,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 
 class DecisionKind(str, Enum):
@@ -40,6 +40,16 @@ class PromptOutcome:
     session: bool = False  # allow_session -> remember until restart
     reason: str | None = None  # e.g. no_approval_channel
     args_filter: dict | None = None  # set for the scoped allow-always variants
+    decided_by: str | None = None  # responder identity for the audit trail
+
+
+class ChannelDecision(NamedTuple):
+    """What an ApprovalChannel returns: the decision, the optional persist filter
+    for scoped allow-always, and who decided (audited as the responder)."""
+
+    kind: DecisionKind
+    args_filter: dict | None = None
+    decided_by: str | None = None
 
 
 # Argument names that count as the call's "primary" (command-like) argument, in
@@ -103,7 +113,7 @@ class ApprovalChannel(Protocol):
         summary: str,
         args: dict,
         floored: bool,
-    ) -> tuple[DecisionKind, dict | None]: ...
+    ) -> ChannelDecision: ...
 
 
 class TerminalChannel:
@@ -116,11 +126,11 @@ class TerminalChannel:
 
     async def ask(
         self, tool_uri: str, caller: str, summary: str, args: dict, floored: bool
-    ) -> tuple[DecisionKind, dict | None]:
+    ) -> ChannelDecision:
         """Read one keypress from the hub's terminal (+ a prefix line for `p`).
 
         Returns the decision and, for the scoped allow-always variants, the
-        args_filter to persist.
+        args_filter to persist. The responder is the local terminal operator.
         """
         primary = primary_arg(args)
         keys = dict(_BASE_KEYS)
@@ -143,10 +153,10 @@ class TerminalChannel:
                 print(
                     f"  -> allowing ALL calls to {tool_uri} (no arguments to scope on)", flush=True
                 )
-                return kind, None
+                return ChannelDecision(kind, None, "terminal")
             args_filter = build_arg_filter(primary, args[primary], prefix=False)
             self._echo_rule(tool_uri, args_filter, floored)
-            return kind, args_filter
+            return ChannelDecision(kind, args_filter, "terminal")
 
         if kind is DecisionKind.ALLOW_ALWAYS_PREFIX:
             default = default_prefix(args[primary])  # primary not None when `p` offered
@@ -155,9 +165,9 @@ class TerminalChannel:
             prefix = typed.rstrip("\r\n") or default
             args_filter = build_arg_filter(primary, prefix, prefix=True)
             self._echo_rule(tool_uri, args_filter, floored, broad=True)
-            return kind, args_filter
+            return ChannelDecision(kind, args_filter, "terminal")
 
-        return kind, None
+        return ChannelDecision(kind, None, "terminal")
 
     @staticmethod
     def _echo_rule(tool_uri: str, args_filter: dict, floored: bool, broad: bool = False) -> None:
@@ -210,9 +220,15 @@ class Approval:
 
         # Session allow remembered from a prior allow_session this run.
         if tool_uri in self._session_allows:
-            return PromptOutcome(allowed=True, authz_decision="prompt_allowed", session=True)
+            return PromptOutcome(
+                allowed=True,
+                authz_decision="prompt_allowed",
+                session=True,
+                decided_by="session",
+            )
 
-        kind, args_filter = await self.channel.ask(tool_uri, caller, summary, args or {}, floored)
+        decision = await self.channel.ask(tool_uri, caller, summary, args or {}, floored)
+        kind = decision.kind
         if kind is DecisionKind.ALLOW_SESSION:
             self._session_allows.add(tool_uri)
         allowed = kind in (
@@ -231,5 +247,6 @@ class Approval:
             authz_decision="prompt_allowed" if allowed else "prompt_denied",
             persistent=persistent,
             session=kind is DecisionKind.ALLOW_SESSION,
-            args_filter=args_filter,
+            args_filter=decision.args_filter,
+            decided_by=decision.decided_by,
         )

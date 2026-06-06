@@ -45,9 +45,10 @@ async def test_first_responder_wins_and_late_submit_is_already_resolved():
     # A second decision (TUI, duplicate, late reaction) loses — anti-replay.
     assert reg.submit(pid, DecisionKind.DENY, decided_by="tui") == "already_resolved"
 
-    kind, args_filter = await task
-    assert kind is DecisionKind.ALLOW
-    assert args_filter is None
+    decision = await task
+    assert decision.kind is DecisionKind.ALLOW
+    assert decision.args_filter is None
+    assert decision.decided_by == "discord"
     assert reg.list_pending() == []
     assert [name for name, _ in events] == ["pending.created", "pending.resolved"]
     assert events[1][1] == {"pending_id": pid, "kind": "allow", "decided_by": "discord"}
@@ -107,8 +108,9 @@ async def test_timeout_fails_closed_to_deny():
     reg = PendingRegistry(publish=lambda e, d: events.append((e, d)))
     ch = ControlApiChannel(reg, timeout_s=0.01)
 
-    kind, args_filter = await ch.ask(SHELL, "caller", "summary", ARGS, False)
-    assert kind is DecisionKind.DENY and args_filter is None
+    decision = await ch.ask(SHELL, "caller", "summary", ARGS, False)
+    assert decision.kind is DecisionKind.DENY and decision.args_filter is None
+    assert decision.decided_by == "timeout"
     assert reg.list_pending() == []
     # subscribers see the pending get retracted
     assert events[-1][0] == "pending.resolved"
@@ -124,6 +126,7 @@ async def test_shutdown_denies_outstanding_pending():
     await _wait_registered(reg)
     reg.shutdown()
 
-    kind, _ = await task
-    assert kind is DecisionKind.DENY
+    decision = await task
+    assert decision.kind is DecisionKind.DENY
+    assert decision.decided_by == "system"
     assert reg.list_pending() == []

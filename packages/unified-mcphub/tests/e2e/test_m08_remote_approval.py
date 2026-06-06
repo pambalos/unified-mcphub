@@ -89,7 +89,9 @@ async def test_remote_prompt_allow_round_trip(hub_home):
     finally:
         await hub.stop()
 
-    assert _last_received(hub_home)["authz_decision"] == "prompt_allowed"
+    received = _last_received(hub_home)
+    assert received["authz_decision"] == "prompt_allowed"
+    assert received["decided_by"] == "operator"  # responder identity is audited
 
 
 @pytest.mark.asyncio

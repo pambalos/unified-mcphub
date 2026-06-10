@@ -87,6 +87,12 @@ class AuditConfig(BaseModel):
 
 class ApprovalConfig(BaseModel):
     enabled: bool = True
+    # Source `prompt` decisions from out-of-process clients (TUI / Discord bridge
+    # / web UI) over the local control API when the hub has no terminal. Off -> a
+    # headless hub fails closed to deny, as before (UAI-107/109).
+    remote: bool = False
+    # Seconds to wait for a remote decision before failing closed to deny.
+    remote_timeout_s: float = 300.0
 
 
 class HubConfig(BaseModel):

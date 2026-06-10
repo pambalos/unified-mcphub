@@ -113,6 +113,7 @@ class AuditLog:
         authz_rule: str | None,
         audit_level: str,
         reason: str | None = None,
+        decided_by: str | None = None,
     ) -> None:
         entry = {
             "phase": "received",
@@ -133,6 +134,8 @@ class AuditLog:
         }
         if reason:
             entry["reason"] = reason
+        if decided_by:
+            entry["decided_by"] = decided_by
         self._write(entry)
 
     def write_completed(

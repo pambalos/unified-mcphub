@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import json
 import os
 import socket
 from pathlib import Path
@@ -15,10 +16,19 @@ from pathlib import Path
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from .approval import DecisionKind
 from .config import ListenConfig
+
+# Heartbeat cadence for the SSE approval stream — keeps idle proxies/clients from
+# dropping the connection without burning CPU.
+_SSE_KEEPALIVE_S = 15.0
+
+
+def _sse_frame(event: str, data: dict) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
 class PortInUseError(RuntimeError):
@@ -63,10 +73,61 @@ def build_app(hub) -> Starlette:
     async def status_endpoint(_: Request) -> Response:
         return JSONResponse(hub.status())
 
+    # --- control API: out-of-process approvals (UAI-107) ---
+    # Same auth posture as /mcp: a resolved caller (UDS trusted, TCP bearer). The
+    # caller identity is the audited responder; localhost-only, do not expose.
+
+    async def approvals_pending(request: Request) -> Response:
+        caller, _ = _authenticate(request, hub)
+        if caller is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return JSONResponse({"pending": [p.created_event() for p in hub.pending.list_pending()]})
+
+    async def approvals_stream(request: Request) -> Response:
+        caller, _ = _authenticate(request, hub)
+        if caller is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+        async def events():
+            with hub.approval_events.subscribe() as queue:
+                # Replay current outstanding so a just-connected client is in sync.
+                for pending in hub.pending.list_pending():
+                    yield _sse_frame("pending.created", pending.created_event())
+                while not await request.is_disconnected():
+                    try:
+                        event, data = await asyncio.wait_for(queue.get(), _SSE_KEEPALIVE_S)
+                    except asyncio.TimeoutError:
+                        yield b": keep-alive\n\n"
+                        continue
+                    yield _sse_frame(event, data)
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    async def approvals_decision(request: Request) -> Response:
+        caller, _ = _authenticate(request, hub)
+        if caller is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        body = await request.json()
+        pending_id = body.get("pending_id")
+        kind_raw = body.get("kind")
+        if not pending_id or kind_raw is None:
+            return JSONResponse({"error": "pending_id and kind required"}, status_code=400)
+        try:
+            kind = DecisionKind(kind_raw)
+        except ValueError:
+            return JSONResponse({"error": f"unknown kind: {kind_raw!r}"}, status_code=400)
+        result = hub.pending.submit(
+            pending_id, kind, decided_by=caller, args_filter=body.get("args_filter")
+        )
+        return JSONResponse({"result": result})
+
     return Starlette(
         routes=[
             Route("/mcp", mcp_endpoint, methods=["POST"]),
             Route("/status", status_endpoint, methods=["GET"]),
+            Route("/approvals/pending", approvals_pending, methods=["GET"]),
+            Route("/approvals/stream", approvals_stream, methods=["GET"]),
+            Route("/approvals/decision", approvals_decision, methods=["POST"]),
         ]
     )
 

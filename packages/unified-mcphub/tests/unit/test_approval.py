@@ -13,6 +13,7 @@ import pytest
 
 from unified_mcphub.approval import (
     Approval,
+    TerminalChannel,
     build_arg_filter,
     default_prefix,
     primary_arg,
@@ -60,14 +61,16 @@ def test_build_arg_filter_exact_and_prefix():
 
 @pytest.mark.asyncio
 async def test_master_switch_off_auto_allows():
-    outcome = await Approval(enabled=False, foreground=True).resolve(SHELL, "c", "s", ARGS)
+    outcome = await Approval(enabled=False, channel=TerminalChannel()).resolve(
+        SHELL, "c", "s", ARGS
+    )
     assert outcome.allowed
     assert outcome.authz_decision == "approval_disabled"
 
 
 @pytest.mark.asyncio
 async def test_background_hub_fails_safe_to_deny():
-    outcome = await Approval(enabled=True, foreground=False).resolve(SHELL, "c", "s", ARGS)
+    outcome = await Approval(enabled=True, channel=None).resolve(SHELL, "c", "s", ARGS)
     assert not outcome.allowed
     assert outcome.authz_decision == "prompt_denied"
     assert outcome.reason == "no_approval_channel"
@@ -75,7 +78,7 @@ async def test_background_hub_fails_safe_to_deny():
 
 @pytest.mark.asyncio
 async def test_session_allow_remembered():
-    appr = Approval(enabled=True, foreground=True)
+    appr = Approval(enabled=True, channel=TerminalChannel())
     appr._session_allows.add(SHELL)
     outcome = await appr.resolve(SHELL, "c", "s", ARGS)
     assert outcome.allowed and outcome.session
@@ -87,14 +90,14 @@ async def test_session_allow_remembered():
 @pytest.mark.asyncio
 async def test_keypress_allow_once_not_persistent(monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("a\n"))
-    outcome = await Approval(enabled=True, foreground=True).resolve(SHELL, "c", "s", ARGS)
+    outcome = await Approval(enabled=True, channel=TerminalChannel()).resolve(SHELL, "c", "s", ARGS)
     assert outcome.allowed and not outcome.persistent and outcome.args_filter is None
 
 
 @pytest.mark.asyncio
 async def test_keypress_allow_always_command_scopes_to_exact_value(monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("c\n"))
-    outcome = await Approval(enabled=True, foreground=True).resolve(SHELL, "c", "s", ARGS)
+    outcome = await Approval(enabled=True, channel=TerminalChannel()).resolve(SHELL, "c", "s", ARGS)
     assert outcome.allowed and outcome.persistent
     assert outcome.args_filter == {"command": {"equals": ["git status"]}}
 
@@ -103,7 +106,7 @@ async def test_keypress_allow_always_command_scopes_to_exact_value(monkeypatch):
 async def test_keypress_allow_always_prefix_default(monkeypatch):
     # 'p' then an empty line -> accept the default prefix ('git ').
     monkeypatch.setattr("sys.stdin", io.StringIO("p\n\n"))
-    outcome = await Approval(enabled=True, foreground=True).resolve(SHELL, "c", "s", ARGS)
+    outcome = await Approval(enabled=True, channel=TerminalChannel()).resolve(SHELL, "c", "s", ARGS)
     assert outcome.allowed and outcome.persistent
     assert outcome.args_filter == {"command": {"starts_with": ["git "]}}
 
@@ -111,7 +114,7 @@ async def test_keypress_allow_always_prefix_default(monkeypatch):
 @pytest.mark.asyncio
 async def test_keypress_allow_always_prefix_typed(monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("p\ngit log \n"))
-    outcome = await Approval(enabled=True, foreground=True).resolve(SHELL, "c", "s", ARGS)
+    outcome = await Approval(enabled=True, channel=TerminalChannel()).resolve(SHELL, "c", "s", ARGS)
     assert outcome.args_filter == {"command": {"starts_with": ["git log "]}}
 
 
@@ -119,7 +122,7 @@ async def test_keypress_allow_always_prefix_typed(monkeypatch):
 async def test_command_always_with_no_scopeable_arg_degenerates_to_tool(monkeypatch):
     # No primary string arg -> 'c' allows the whole tool, transparently (ADR-0025).
     monkeypatch.setattr("sys.stdin", io.StringIO("c\n"))
-    outcome = await Approval(enabled=True, foreground=True).resolve(
+    outcome = await Approval(enabled=True, channel=TerminalChannel()).resolve(
         "mcp://built-in/refresh", "c", "s", {}
     )
     assert outcome.allowed and outcome.persistent and outcome.args_filter is None
@@ -128,14 +131,16 @@ async def test_command_always_with_no_scopeable_arg_degenerates_to_tool(monkeypa
 @pytest.mark.asyncio
 async def test_floor_prompt_warns_on_scoped_allow(monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO("c\n"))
-    await Approval(enabled=True, foreground=True).resolve(SHELL, "c", "s", ARGS, floored=True)
+    await Approval(enabled=True, channel=TerminalChannel()).resolve(
+        SHELL, "c", "s", ARGS, floored=True
+    )
     assert "danger floor" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
 async def test_keypress_deny_always_is_persistent_tool_wide(monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("D\n"))
-    outcome = await Approval(enabled=True, foreground=True).resolve(SHELL, "c", "s", ARGS)
+    outcome = await Approval(enabled=True, channel=TerminalChannel()).resolve(SHELL, "c", "s", ARGS)
     assert not outcome.allowed and outcome.persistent
     assert outcome.args_filter is None  # deny stays tool-wide
 
@@ -143,14 +148,14 @@ async def test_keypress_deny_always_is_persistent_tool_wide(monkeypatch):
 @pytest.mark.asyncio
 async def test_unknown_keypress_defaults_to_deny(monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("z\n"))
-    outcome = await Approval(enabled=True, foreground=True).resolve(SHELL, "c", "s", ARGS)
+    outcome = await Approval(enabled=True, channel=TerminalChannel()).resolve(SHELL, "c", "s", ARGS)
     assert not outcome.allowed
 
 
 @pytest.mark.asyncio
 async def test_session_allow_records_for_next_call(monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("s\n"))
-    appr = Approval(enabled=True, foreground=True)
+    appr = Approval(enabled=True, channel=TerminalChannel())
     first = await appr.resolve(SHELL, "c", "s", ARGS)
     assert first.allowed and first.session
     assert SHELL in appr._session_allows

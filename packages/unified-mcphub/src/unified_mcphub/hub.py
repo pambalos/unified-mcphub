@@ -26,9 +26,11 @@ from . import audit as audit_mod
 from . import discovery
 from . import endpoints
 from . import servers as servers_mod
-from .approval import Approval
+from .approval import Approval, ApprovalChannel, TerminalChannel
+from .control import ApprovalEventBroadcaster, ControlApiChannel, PendingRegistry
 from .authz import AuthzResolver, Effect
 from .config import (
+    ApprovalConfig,
     Config,
     Rule,
     audit_dir,
@@ -80,9 +82,12 @@ class Hub:
         self.builtins = BuiltinRegistry()
         self.authz = AuthzResolver(config.workspace, config.dangerous)
         self.redactor = Redactor(config.workspace.redact)
+        approval_cfg = config.hub.approval
+        self.approval_events = ApprovalEventBroadcaster()
+        self.pending = PendingRegistry(publish=self.approval_events.publish)
         self.approval = Approval(
-            enabled=config.hub.approval.enabled,
-            foreground=sys.stdin.isatty() and sys.stdout.isatty(),
+            enabled=approval_cfg.enabled,
+            channel=self._select_approval_channel(approval_cfg),
         )
         self.audit = audit_mod.AuditLog(audit_dir())
         self.tokens = TokenStore()
@@ -91,6 +96,16 @@ class Hub:
         self._started_at = now_iso()
         self._reload_task: asyncio.Task | None = None
         self._refresh_task: asyncio.Task | None = None
+
+    def _select_approval_channel(self, cfg: ApprovalConfig) -> ApprovalChannel | None:
+        # Attached to a real terminal -> keypress reader (local dev / interactive).
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            return TerminalChannel()
+        # Headless + remote approvals enabled -> decisions arrive over the control
+        # API (TUI / Discord bridge / web UI). Otherwise fail closed (None -> deny).
+        if cfg.remote:
+            return ControlApiChannel(self.pending, timeout_s=cfg.remote_timeout_s)
+        return None
 
     # --- lifecycle (spec §8) ---
 
@@ -118,6 +133,8 @@ class Hub:
         )
 
     async def stop(self) -> None:
+        # Fail-closed: deny any in-flight remote prompts so their calls unblock.
+        self.pending.shutdown()
         tasks = [t for t in (self._reload_task, self._refresh_task) if t is not None]
         for task in tasks:
             task.cancel()
@@ -205,9 +222,11 @@ class Hub:
                 )
             denied_reason = outcome.reason
             allowed = outcome.allowed
+            decided_by = outcome.decided_by
         else:
             allowed = decision.effect is Effect.ALLOW
             denied_reason = None
+            decided_by = None
 
         self.audit.write_received(
             request_id=request_id,
@@ -222,6 +241,7 @@ class Hub:
             authz_rule=decision.rule,
             audit_level=decision.audit_level,
             reason=denied_reason,
+            decided_by=decided_by,
         )
 
         if not allowed:

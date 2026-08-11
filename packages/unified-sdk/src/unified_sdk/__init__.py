@@ -20,6 +20,7 @@ the network layer (E3). The SDK raises the resolution of policy — it is not
 what makes enforcement happen.
 """
 
+from .adapters import ToolGuard
 from .client import CORRELATION_HEADER, Acting, UnifiedAI
 from .errors import ApprovalRequired, Denied, EnforcementError
 
@@ -29,5 +30,6 @@ __all__ = [
     "ApprovalRequired",
     "Denied",
     "EnforcementError",
+    "ToolGuard",
     "UnifiedAI",
 ]

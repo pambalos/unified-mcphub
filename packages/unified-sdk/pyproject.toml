@@ -21,6 +21,11 @@ dependencies = [
     "unified-enforce",
 ]
 
+[project.optional-dependencies]
+# Adapters import their framework lazily, so the base install stays tiny and
+# `unified_sdk.adapters` is safe to import with none of these present.
+langchain = ["langchain-core>=0.3.0"]
+
 [tool.uv.sources]
 unified-enforce = { workspace = true }
 

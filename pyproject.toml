@@ -24,6 +24,7 @@ dev = [
     # plus grpcio-tools to regenerate the vendored ext_authz stubs.
     "grpcio>=1.60.0",
     "grpcio-tools>=1.60.0",
+    "langchain-core>=1.5.4",
 ]
 
 # Shared test/lint config so a workspace-wide run behaves identically to the

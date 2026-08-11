@@ -1,0 +1,24 @@
+# A real OTLP receiver, writing what it accepts to a file the test can read.
+#
+# The point is that this is not our decoder: the collector applies the same
+# validation any production OTLP pipeline would, so a span it accepts and
+# re-serializes is genuinely wire-compatible rather than merely parseable by
+# the library that produced it.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  file:
+    path: /out/traces.json
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [file]
+  telemetry:
+    logs:
+      level: warn

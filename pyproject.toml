@@ -20,17 +20,24 @@ dev = [
     # workspace venv (the extra itself stays optional for consumers).
     "opentelemetry-sdk>=1.25.0",
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+    # unified-enforce[gateway] equivalents for the ext_authz transport tests,
+    # plus grpcio-tools to regenerate the vendored ext_authz stubs.
+    "grpcio>=1.60.0",
+    "grpcio-tools>=1.60.0",
 ]
 
 # Shared test/lint config so a workspace-wide run behaves identically to the
 # per-package config (the hub package also declares these locally).
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "integration: needs external services (Docker/Envoy); excluded from the default run",
+]
 # unified-mcp-graphify is excluded from the workspace (heavy graphify deps), so it
 # is NOT installed in the workspace venv. Skip it in the workspace-wide `pytest
 # packages` run — it has its own standalone suite (`cd packages/unified-mcp-graphify
 # && uv run --extra dev pytest`). Without this, collection would ImportError.
-addopts = "--ignore=packages/unified-mcp-graphify"
+addopts = "--ignore=packages/unified-mcp-graphify -m 'not integration'"
 
 [tool.ruff]
 line-length = 100

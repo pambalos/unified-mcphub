@@ -59,8 +59,45 @@ def _trace_ids(headers: dict[str, str]) -> tuple[str | None, str | None]:
 
 
 class ExtAuthzCore:
-    def __init__(self, enforcer: Enforcer) -> None:
+    """Transport-agnostic ext_authz decision path.
+
+    Principal trust (spec §5) is a deployment property, so it is configured
+    here rather than assumed by a transport:
+
+    - `default_principal` — per-agent **sidecar** mode: identity comes from
+      *which* sidecar received the request, so set it at startup
+      (`agent:crew-1`) and leave the header untrusted.
+    - `trust_principal_header` — **gateway** (multi-tenant) mode: identity
+      arrives in `x-unified-principal`, which is only as trustworthy as the
+      infrastructure that sets it. The header MUST be stripped from
+      client-supplied traffic at the trust boundary (the shipped Envoy
+      templates do this); otherwise an agent can impersonate any principal.
+    - mTLS SAN, when the mesh provides it, outranks both and is unspoofable.
+    """
+
+    def __init__(
+        self,
+        enforcer: Enforcer,
+        *,
+        default_principal: str = "agent:unknown",
+        trust_principal_header: bool = True,
+    ) -> None:
         self._enforcer = enforcer
+        self._default_principal = default_principal
+        self._trust_principal_header = trust_principal_header
+
+    def principal_for(self, *, mtls: str | None = None, header: str | None = None) -> str:
+        """Resolve the acting principal: mTLS identity > header > default.
+
+        An mTLS SAN (e.g. `spiffe://cluster.local/ns/prod/sa/crew-1`) is passed
+        through verbatim — policy globs match SPIFFE paths directly, and any
+        rewrite here would be lossy guesswork.
+        """
+        if mtls:
+            return mtls
+        if header and self._trust_principal_header:
+            return header
+        return self._default_principal
 
     def check(self, req: CheckInput) -> CheckResult:
         trace_id, span_id = _trace_ids(req.headers)
@@ -115,7 +152,7 @@ def create_http_service(core: ExtAuthzCore) -> Any:
             full_path += "?" + request.url.query
         result = core.check(
             CheckInput(
-                principal_id=headers.get(PRINCIPAL_HEADER, "agent:unknown"),
+                principal_id=core.principal_for(header=headers.get(PRINCIPAL_HEADER)),
                 method=request.method,
                 host=headers.get("x-forwarded-host") or headers.get("host", ""),
                 path=full_path,

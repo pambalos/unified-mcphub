@@ -1,21 +1,16 @@
-# Envoy sidecar template — unified-enforce ext_authz (HTTP transport). E3 scaffold.
+# Envoy sidecar template — unified-enforce ext_authz (gRPC transport). E3.
 #
-# Every request an agent makes egresses through this listener; the ext_authz
-# filter consults the engine (127.0.0.1:9002) and enforces its verdict.
-# failure_mode_allow is false: if the engine is down, traffic is DENIED.
+# The locked data-plane target: Envoy consults the engine's
+# envoy.service.auth.v3.Authorization servicer (unified_enforce.extauthz_grpc)
+# on every request and enforces the verdict.
 #
-# The no-bypass guarantee is egress policy AROUND this sidecar (NetworkPolicy /
-# iptables / security groups): the agent's network namespace must have no route
-# out except this listener. Templates per deployment mode ship with E3 proper.
-#
-# gRPC transport (the locked target, same engine core) ships alongside this
-# file as ext_authz-grpc.yaml — prefer it; this HTTP variant is for
-# environments where a gRPC sidecar hop is inconvenient.
+# Pair with an egress policy from deploy/egress/ — Envoy is only the lock if
+# the agent has no route around it.
 #
 # Validated against Envoy's real schema by
 # tests/integration/test_envoy_ext_authz.py (needs Docker). Manually:
 #   docker run --rm -v "$PWD:/cfg" envoyproxy/envoy:v1.31-latest \
-#     envoy --mode validate -c /cfg/ext_authz-http.yaml
+#     envoy --mode validate -c /cfg/ext_authz-grpc.yaml
 
 static_resources:
   listeners:
@@ -30,6 +25,10 @@ static_resources:
                 stat_prefix: agent_egress
                 route_config:
                   name: all
+                  # An agent must not be able to name its own principal: strip the
+                  # header on ingress so only trusted infrastructure (or the mTLS
+                  # SAN, or the sidecar's configured default_principal) sets it.
+                  request_headers_to_remove: ["x-unified-principal"]
                   virtual_hosts:
                     - name: upstream
                       domains: ["*"]
@@ -42,26 +41,10 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
                       transport_api_version: V3
                       failure_mode_allow: false   # engine down => deny (fail closed)
-                      http_service:
-                        server_uri:
-                          uri: http://127.0.0.1:9002
-                          cluster: unified_enforce
-                          timeout: 0.050s          # decision budget is <10ms; 50ms is headroom
-                        authorization_request:
-                          allowed_headers:
-                            patterns:
-                              - exact: x-unified-principal
-                              - exact: traceparent
-                              - exact: host
-                              - exact: x-forwarded-host
-                              - exact: x-forwarded-proto
-                        authorization_response:
-                          allowed_upstream_headers:
-                            patterns:
-                              - prefix: x-unified-
-                          allowed_client_headers:
-                            patterns:
-                              - prefix: x-unified-
+                      include_peer_certificate: true  # populates source.principal (mTLS SAN)
+                      grpc_service:
+                        envoy_grpc: { cluster_name: unified_enforce }
+                        timeout: 0.050s           # decision budget is <10ms; 50ms is headroom
                   - name: envoy.filters.http.dynamic_forward_proxy
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
@@ -75,13 +58,18 @@ static_resources:
     - name: unified_enforce
       type: STATIC
       connect_timeout: 0.25s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}   # gRPC requires HTTP/2
       load_assignment:
         cluster_name: unified_enforce
         endpoints:
           - lb_endpoints:
               - endpoint:
                   address:
-                    socket_address: { address: 127.0.0.1, port_value: 9002 }
+                    socket_address: { address: 127.0.0.1, port_value: 9001 }
     - name: dynamic_forward
       connect_timeout: 5s
       lb_policy: CLUSTER_PROVIDED

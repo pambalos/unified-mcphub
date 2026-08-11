@@ -1,0 +1,63 @@
+# Kubernetes egress lock — agents may only reach their Envoy sidecar. E3.
+#
+# Assumes the sidecar runs in the SAME pod as the agent (shared netns), so
+# agent -> sidecar is loopback and needs no NetworkPolicy rule; the policy's
+# job is to ensure NOTHING ELSE leaves the pod except via the sidecar's own
+# egress. Apply to the namespace running agent workloads.
+#
+# Requires a CNI that enforces NetworkPolicy (Calico, Cilium, etc.) — on a CNI
+# that ignores it, this file is decoration and there is no no-bypass guarantee.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: unified-agents-deny-all-egress
+  namespace: agents
+spec:
+  podSelector:
+    matchLabels:
+      unified.ai/enforced: "true"
+  policyTypes: ["Egress"]
+  egress:
+    # DNS only, to the cluster resolver. Without this, name resolution inside
+    # the sidecar fails and every upstream call breaks.
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# The sidecar's own egress: what the agents are ultimately allowed to reach.
+# Keep this list tight — it is defense in depth behind policy, not a substitute
+# for it (policy decides per action; this decides per destination).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: unified-sidecar-egress-allowlist
+  namespace: agents
+spec:
+  podSelector:
+    matchLabels:
+      unified.ai/role: "sidecar"
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Internal services the agents are permitted to call at all.
+    - to:
+        - namespaceSelector:
+            matchLabels: { unified.ai/upstream: "true" }
+      ports:
+        - { protocol: TCP, port: 443 }
+    # Add explicit ipBlock rules for external SaaS upstreams if required, e.g.:
+    # - to: [{ ipBlock: { cidr: 203.0.113.0/24 } }]
+    #   ports: [{ protocol: TCP, port: 443 }]

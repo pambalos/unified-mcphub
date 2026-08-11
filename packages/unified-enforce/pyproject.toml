@@ -32,8 +32,12 @@ otel = [
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
 ]
 gateway = [
-    "fastapi>=0.110.0",  # ext_authz HTTP transport (E3); gRPC transport adds grpcio here
+    "fastapi>=0.110.0",   # ext_authz HTTP transport (E3)
     "uvicorn>=0.28.0",
+    "grpcio>=1.60.0",     # ext_authz gRPC transport — the locked data-plane target
+    # NOT xds-protos: it ships a stale opentelemetry/proto/** that overwrites the
+    # real opentelemetry-proto package, breaking [otel]. We vendor a minimal
+    # wire-compatible subset instead (src/unified_enforce/protos/ext_authz.proto).
 ]
 
 [tool.setuptools.packages.find]
@@ -41,6 +45,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "integration: needs external services (Docker/Envoy); excluded from the default run",
+]
 
 [tool.ruff]
 line-length = 100

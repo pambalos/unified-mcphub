@@ -37,6 +37,7 @@ from typing import Any
 from unified_enforce import (
     Action,
     ActionContext,
+    Approvals,
     AuditChain,
     Decision,
     Enforcer,
@@ -168,6 +169,7 @@ class UnifiedAI:
         audit_dir: str | Path | None = None,
         telemetry: Telemetry | None = None,
         workspace: str | None = None,
+        approvals: "Approvals | None" = None,
     ) -> "UnifiedAI":
         """Build the full stack in-process: policy engine, audit chain, telemetry.
 
@@ -181,7 +183,7 @@ class UnifiedAI:
             chain = AuditChain(audit_dir)
             chain.start()
         client = cls(
-            Enforcer(engine, chain=chain, telemetry=telemetry),
+            Enforcer(engine, chain=chain, telemetry=telemetry, approvals=approvals),
             principal=principal,
             workspace=workspace,
         )
@@ -217,8 +219,19 @@ class UnifiedAI:
         Use when the caller wants to branch on the verdict (offer the user an
         approval path, fall back to a cheaper operation) rather than abort.
         """
+        action = self._build(tool, verb, resource, params, extra)
+        return Acting(action, self._enforcer.enforce(action))
+
+    def _build(
+        self,
+        tool: str,
+        verb: str,
+        resource: str,
+        params: dict[str, Any] | None,
+        extra: dict[str, Any] | None,
+    ) -> Action:
         trace_id, span_id = _current_trace()
-        action = Action.build(
+        return Action.build(
             principal=self._principal,
             tool=tool,
             verb=verb,
@@ -232,7 +245,33 @@ class UnifiedAI:
                 extra=_normalize(extra or {}),
             ),
         )
-        return Acting(action, self._enforcer.enforce(action))
+
+    async def check_async(
+        self,
+        tool: str,
+        *,
+        verb: str,
+        resource: str = "*",
+        params: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+        summary: str = "",
+    ) -> Acting:
+        """Decide, and take a DEFER to a human if approvals are configured.
+
+        The async twin of `check()`. It exists separately because asking a
+        person is a fundamentally different operation from evaluating policy:
+        `check()` returns in microseconds and never blocks, this one may wait
+        as long as an operator takes. Code that cannot wait — anything on a
+        request path with a timeout — should keep using `check()` and treat
+        DEFER as a refusal, which is what the gateway does.
+
+        Without approvals configured this is `check()` with an await: DEFER
+        comes back as DEFER rather than a synthesized deny, so a missing
+        approval channel is visible instead of silently strict.
+        """
+        action = self._build(tool, verb, resource, params, extra)
+        outcome = await self._enforcer.enforce_with_approval(action, summary=summary)
+        return Acting(action, outcome.decision)
 
     @contextmanager
     def acting(
@@ -268,6 +307,7 @@ class UnifiedAI:
         resource: str = "*",
         params: Sequence[str] = (),
         extra: dict[str, Any] | None = None,
+        summary: str = "",
     ) -> Callable[[Callable], Callable]:
         """Decorate a function so calling it is an enforced action.
 
@@ -291,7 +331,7 @@ class UnifiedAI:
                 if name not in sig.parameters:
                     raise TypeError(signature_error.format(name=name, fn=fn.__qualname__))
 
-            def build(args: tuple, kwargs: dict) -> Acting:
+            def resolve_call(args: tuple, kwargs: dict) -> dict[str, Any]:
                 bound = sig.bind(*args, **kwargs)
                 bound.apply_defaults()
                 values = bound.arguments
@@ -302,28 +342,35 @@ class UnifiedAI:
                     raise TypeError(
                         signature_error.format(name=exc.args[0], fn=fn.__qualname__)
                     ) from exc
-                return self.check(
-                    resolved_tool,
-                    verb=verb,
-                    resource=resolved_resource,
-                    params={name: values[name] for name in params},
-                    extra=extra,
-                )
+                return {
+                    "tool": resolved_tool,
+                    "verb": verb,
+                    "resource": resolved_resource,
+                    "params": {name: values[name] for name in params},
+                    "extra": extra,
+                }
 
             if inspect.iscoroutinefunction(fn):
                 # A sync wrapper around an async function would decide, then
                 # return a coroutine that runs the real work after the guard
                 # has already exited — authorized, but at a misleading moment.
+                #
+                # This path also routes through approvals: an async agent action
+                # is exactly where waiting for a human is affordable, and it is
+                # the only call style that can await one at all.
                 @functools.wraps(fn)
                 async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-                    build(args, kwargs).raise_for_verdict()
+                    call = resolve_call(args, kwargs)
+                    acting = await self.check_async(call.pop("tool"), summary=summary, **call)
+                    acting.raise_for_verdict()
                     return await fn(*args, **kwargs)
 
                 return async_wrapper
 
             @functools.wraps(fn)
             def wrapper(*args: Any, **kwargs: Any) -> Any:
-                build(args, kwargs).raise_for_verdict()
+                call = resolve_call(args, kwargs)
+                self.check(call.pop("tool"), **call).raise_for_verdict()
                 return fn(*args, **kwargs)
 
             return wrapper

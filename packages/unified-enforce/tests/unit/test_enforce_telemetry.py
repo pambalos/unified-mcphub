@@ -92,6 +92,26 @@ def test_malformed_trace_ids_never_break_emission(engine, telemetry, exporter):
     assert span.parent is None
 
 
+def test_float_params_do_not_break_span_emission(engine, telemetry, exporter):
+    """MCP tool arguments are free-form JSON and may hold floats, which strict
+    canonicalization refuses. The span digest is a correlation key, not
+    evidence, so it is computed leniently — a strict one would crash the call
+    path of every integration with free-form params."""
+    action = act(params={"threshold": 0.75})
+    telemetry.record_decision(action, engine.decide(action))
+    (span,) = exporter.get_finished_spans()
+    assert len(span.attributes["unified.action.digest"]) == 64
+
+
+def test_the_span_digest_matches_the_audit_entry_it_points_at(engine, telemetry, exporter):
+    """The whole point of carrying a digest on the span: joining it to the
+    chained record of the same action."""
+    action = act(params={"threshold": 0.75})
+    telemetry.record_decision(action, engine.decide(action))
+    (span,) = exporter.get_finished_spans()
+    assert span.attributes["unified.action.digest"] == action.digest(strict=False)
+
+
 def test_disabled_telemetry_is_a_noop(engine):
     t = Telemetry.disabled()
     assert not t.enabled

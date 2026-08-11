@@ -77,11 +77,18 @@ async def test_background_hub_fails_safe_to_deny():
 
 
 @pytest.mark.asyncio
-async def test_session_allow_remembered():
+async def test_session_allow_remembered(monkeypatch):
+    """A session grant must satisfy the next call without re-prompting.
+
+    Asserted through behaviour rather than the cache itself: stdin holds a
+    single `s`, so a second prompt would read EOF and deny.
+    """
+    monkeypatch.setattr("sys.stdin", io.StringIO("s\n"))
     appr = Approval(enabled=True, channel=TerminalChannel())
-    appr._session_allows.add(SHELL)
+    assert (await appr.resolve(SHELL, "c", "s", ARGS)).allowed
     outcome = await appr.resolve(SHELL, "c", "s", ARGS)
     assert outcome.allowed and outcome.session
+    assert outcome.decided_by == "session"
 
 
 # --- keypress decisions -------------------------------------------------------
@@ -153,9 +160,27 @@ async def test_unknown_keypress_defaults_to_deny(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_session_allow_records_for_next_call(monkeypatch):
+async def test_session_allow_does_not_leak_to_another_tool(monkeypatch):
+    """The grant is scoped to the tool it was given for."""
     monkeypatch.setattr("sys.stdin", io.StringIO("s\n"))
     appr = Approval(enabled=True, channel=TerminalChannel())
-    first = await appr.resolve(SHELL, "c", "s", ARGS)
-    assert first.allowed and first.session
-    assert SHELL in appr._session_allows
+    assert (await appr.resolve(SHELL, "c", "s", ARGS)).allowed
+    # stdin is exhausted, so a fresh prompt reads EOF and denies.
+    other = await appr.resolve("mcp://shell/other_tool", "c", "s", ARGS)
+    assert not other.allowed
+
+
+@pytest.mark.asyncio
+async def test_a_broken_channel_denies_rather_than_raising():
+    """UAI-133: a channel that cannot reach an operator raises, and the engine
+    turns that into a deny — previously the exception escaped into the call
+    path, which is a 500 where a refusal belongs."""
+
+    class Broken:
+        async def ask(self, *_args):
+            raise RuntimeError("discord bridge down")
+
+    outcome = await Approval(enabled=True, channel=Broken()).resolve(SHELL, "c", "s", ARGS)
+    assert not outcome.allowed
+    assert outcome.authz_decision == "prompt_denied"
+    assert outcome.reason == "approval_channel_error"

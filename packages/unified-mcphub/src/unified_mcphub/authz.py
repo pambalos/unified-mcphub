@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from unified_enforce import Action, Principal
+from unified_enforce import Action, Enforcer, Principal, Telemetry
 from unified_enforce.policy import Floor as EngineFloor
 from unified_enforce.policy import Match as EngineMatch
 from unified_enforce.policy import PolicyDoc, PolicyEngine, Verdict
@@ -100,7 +100,12 @@ def _floor_from_pattern(pattern: str, index: int) -> EngineFloor | None:
 
 
 class AuthzResolver:
-    def __init__(self, workspace: Workspace, dangerous: DangerousCommands) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        dangerous: DangerousCommands,
+        telemetry: Telemetry | None = None,
+    ) -> None:
         rules: list[EngineRule] = []
         names: dict[str, str] = {}  # engine rule id -> hub tool pattern (audit `authz_rule`)
         for i, rule in enumerate(workspace.authz.rules):
@@ -131,6 +136,11 @@ class AuthzResolver:
                 floors.append(floor)
         self._engine = PolicyEngine(PolicyDoc(version=1, rules=rules, floors=floors))
         self._names = names
+        # Route through the Enforcer rather than the raw engine so every hub
+        # decision emits a span (UAI-86). No audit chain here: the hub keeps its
+        # own two-phase AuditLog, which is already chained and records the
+        # completion half that the engine's single-entry form cannot express.
+        self._enforcer = Enforcer(self._engine, telemetry=telemetry)
 
     def resolve(
         self, tool_uri: str, args: dict[str, Any], caller: str, action: Action | None = None
@@ -143,7 +153,7 @@ class AuthzResolver:
                 resource="*",
                 params=args,
             )
-        d = self._engine.decide(action)
+        d = self._enforcer.enforce(action)
         return Decision(
             effect=_VERDICT_TO_EFFECT[d.verdict],
             rule=self._names.get(d.rule_id) if d.rule_id else None,

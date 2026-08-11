@@ -34,8 +34,35 @@ Langfuse rendering: `langfuse.observation.level` — ALLOW → `DEFAULT`,
 DENY / DEFER → `WARNING` (blocked is signal, not failure),
 `condition_error` → `ERROR` (broken policy is failure).
 
+## Hub emission (UAI-86)
+
+The engine's spans were unused for their first iteration: the hub drove the
+policy engine directly, so the one product actually running the enforcement
+plane produced no traces. `AuthzResolver` now decides through an `Enforcer`
+carrying the hub's `Telemetry`, configured by `hub.otel` (off by default,
+non-breaking when off, `[otel]` extra not required to run).
+
+No audit chain is attached to that Enforcer. The hub keeps its own two-phase
+`AuditLog` — already chained since the E2 migration — because it records the
+*completion* half of a call, which the engine's single-entry decision form
+cannot express.
+
+One defect surfaced in the wiring and is worth remembering: `record_decision`
+computed a **strict** action digest, and MCP tool arguments are free-form JSON
+that may contain floats, which strict canonicalization refuses. Enabling
+telemetry would have raised on the hot path of any call carrying a float. The
+span digest is now computed leniently — it is a *correlation key*, meant to
+join a span to the audit entry for the same action, not evidence, and the hub's
+audit writes `strict=False` digests, so a strict one would both crash and fail
+to match the entry it points at. Wherever strict succeeds the bytes are
+identical, so nothing else changes.
+
+Telemetry construction degrades to the no-op on failure and logs: enforcement
+does not depend on being observed, and a bad collector endpoint must not stop
+the hub from serving tools.
+
 ## Out of scope here
 
 The `unified-collector` daemon, embedded Tempo store, log-tail bridges, and the
 Grafana bundle remain the rest of the M0.5 Observability milestone — this spec
-covers only the engine's emission seam.
+covers the engine's emission seam and the hub's use of it.

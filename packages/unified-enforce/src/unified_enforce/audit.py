@@ -22,7 +22,7 @@ import fcntl
 import json
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -251,6 +251,18 @@ class AuditChain:
                 "elapsed_us": int(decision.elapsed_ms * 1000),
             },
         )
+
+    def append_approval(self, recorded: Any) -> dict[str, Any]:
+        """Record how a deferred action was resolved (see approval.py).
+
+        A separate entry rather than a rewrite of the DEFER: that review was
+        demanded, and that a named human resolved it, are two events. An
+        evidence log that collapses them cannot answer "who approved this?" —
+        and the chain is append-only anyway, so the earlier entry stands.
+
+        `action_digest` is the join back to the decision entry.
+        """
+        return self.append("approval", asdict(recorded))
 
     # --- verification ---
 

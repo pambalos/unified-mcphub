@@ -232,3 +232,104 @@ def test_wrapping_an_existing_enforcer_shares_one_chain(tmp_path):
     finally:
         chain.stop()
     assert len(entries(tmp_path)) == 1
+
+
+# --- approvals (UAI-133) ---
+
+
+class _Operator:
+    """A scripted human."""
+
+    def __init__(self, kind, decided_by="alice"):
+        self.kind = kind
+        self.decided_by = decided_by
+        self.asked = []
+
+    async def ask(self, request):
+        from unified_enforce import ApprovalResponse
+
+        self.asked.append(request)
+        return ApprovalResponse(self.kind, decided_by=self.decided_by)
+
+
+def with_approvals(operator, tmp_path=None):
+    from unified_enforce import Approvals
+
+    return UnifiedAI.local(
+        PolicyEngine.from_yaml(POLICY),
+        principal="agent:crew-1",
+        audit_dir=(tmp_path / "audit") if tmp_path else None,
+        approvals=Approvals(operator),
+    )
+
+
+async def test_a_human_can_release_a_deferred_action():
+    """Without this the SDK's ApprovalRequired was a dead end — DEFER meant
+    'deny with a nicer label' outside the hub."""
+    from unified_enforce import ApprovalKind
+
+    operator = _Operator(ApprovalKind.ALLOW)
+    with with_approvals(operator) as ua:
+        act = await ua.check_async("stripe://payouts", verb="create", summary="pay $9,000")
+    assert act.allowed
+    assert operator.asked[0].summary == "pay $9,000"
+
+
+async def test_a_human_denial_is_a_denial():
+    from unified_enforce import ApprovalKind
+
+    with with_approvals(_Operator(ApprovalKind.DENY)) as ua:
+        act = await ua.check_async("stripe://payouts", verb="create")
+    assert not act.allowed
+
+
+async def test_the_decorator_waits_for_approval_on_async_actions():
+    from unified_enforce import ApprovalKind
+
+    operator = _Operator(ApprovalKind.ALLOW)
+    with with_approvals(operator) as ua:
+
+        @ua.action("stripe://payouts", verb="create", summary="payout")
+        async def issue_payout():
+            return "paid"
+
+        assert await issue_payout() == "paid"
+    assert len(operator.asked) == 1
+
+
+async def test_a_denied_approval_stops_the_decorated_body():
+    from unified_enforce import ApprovalKind
+
+    ran = []
+    with with_approvals(_Operator(ApprovalKind.DENY)) as ua:
+
+        @ua.action("stripe://payouts", verb="create")
+        async def issue_payout():
+            ran.append(1)  # pragma: no cover
+
+        # A human's "no" is a settled denial, not a pending approval.
+        with pytest.raises(Denied):
+            await issue_payout()
+    assert ran == []
+
+
+async def test_without_approvals_a_defer_stays_a_defer(ua):
+    """A missing approval channel stays visible rather than becoming a silent
+    deny that looks like policy."""
+    act = await ua.check_async("stripe://payouts", verb="create")
+    assert not act.allowed
+    with pytest.raises(ApprovalRequired):
+        act.raise_for_verdict()
+
+
+async def test_both_halves_of_an_approval_are_chained(tmp_path):
+    from unified_enforce import ApprovalKind
+
+    with with_approvals(_Operator(ApprovalKind.ALLOW), tmp_path) as ua:
+        await ua.check_async("stripe://payouts", verb="create")
+    recorded = [
+        json.loads(line)
+        for line in next((tmp_path / "audit").glob("*.jsonl")).read_text().splitlines()
+    ]
+    assert [e["kind"] for e in recorded] == ["decision", "approval"]
+    assert recorded[1]["payload"]["decided_by"] == "alice"

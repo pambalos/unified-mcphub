@@ -134,7 +134,15 @@ class Telemetry:
 
         attributes: dict[str, Any] = {
             "unified.action.id": action.id,
-            "unified.action.digest": action.digest(),
+            # Lenient on purpose. This digest is a correlation key — it exists so
+            # a span can be joined to the audit entry for the same action — not
+            # evidence, which is what the chain itself holds. Strict mode raises
+            # on floats, and integrations with free-form params (the MCP hub's
+            # tool arguments) chain with strict=False, so a strict digest here
+            # would both crash the call path and fail to match the entry it is
+            # supposed to point at. Wherever strict succeeds the bytes are
+            # identical, so nothing else changes.
+            "unified.action.digest": action.digest(strict=False),
             "unified.principal.id": action.principal.id,
             "unified.principal.kind": action.principal.kind,
             "unified.tool": action.tool,

@@ -10,6 +10,15 @@ Canonicalize → decide → record:
 """
 
 from .action import Action, ActionContext, Principal, SCHEMA_VERSION
+from .approval import (
+    ApprovalChannel,
+    ApprovalKind,
+    ApprovalOutcome,
+    ApprovalRequest,
+    ApprovalResponse,
+    Approvals,
+    RecordedApproval,
+)
 from .audit import AuditChain, HashChainWriter, VerifyResult
 from .canonical import CanonicalizationError, GENESIS_HASH, canonical_bytes, digest, sha256_hex
 from .enforcer import Enforcer
@@ -35,9 +44,16 @@ __all__ = [
     "GENESIS_HASH",
     "Action",
     "ActionContext",
+    "ApprovalChannel",
+    "ApprovalKind",
+    "ApprovalOutcome",
+    "ApprovalRequest",
+    "ApprovalResponse",
+    "Approvals",
     "AuditChain",
     "AuditIndex",
     "BodyInspection",
+    "RecordedApproval",
     "CanonicalizationError",
     "CheckInput",
     "CheckResult",

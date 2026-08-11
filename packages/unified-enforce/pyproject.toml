@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-enforce"
+version = "0.0.1"
+description = "The enforcement plane for AI agents — canonical Actions, deterministic policy verdicts, hash-chained audit"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Bradley Justice", email = "bradleyjusticeca@gmail.com"},
+]
+keywords = ["ai", "agents", "authorization", "policy", "audit", "enforcement", "cel"]
+
+# Policy-path deps must be synchronous, local, allocation-cheap (technologies.md).
+# No network clients, no framework deps — the engine embeds anywhere.
+dependencies = [
+    "pydantic>=2.0.0",       # Action + policy models (JSON Schema export)
+    "pyyaml>=6.0.0",         # policy files
+    "cel-python>=0.2.0",     # rule conditions (compiled once at policy load)
+    "cryptography>=42.0.0",  # Ed25519 action signing
+    "python-ulid>=2.0.0",    # action ids
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

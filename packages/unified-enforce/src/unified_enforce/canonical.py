@@ -39,11 +39,20 @@ def _check(value: Any, path: str) -> None:
         raise CanonicalizationError(f"non-JSON value at {path}: {type(value).__name__}")
 
 
-def canonical_bytes(payload: dict[str, Any]) -> bytes:
-    _check(payload, "$")
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8"
-    )
+def canonical_bytes(payload: dict[str, Any], *, strict: bool = True) -> bytes:
+    """strict (default) enforces the float/type rules above — required for anything
+    signed or compared across machines. strict=False serializes floats and str()s
+    unknown types: deterministic within a Python verifier, which is what integrations
+    with pre-existing free-form payloads (the MCP hub's audit entries) chain with."""
+    if strict:
+        _check(payload, "$")
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=None if strict else str,
+    ).encode("utf-8")
 
 
 def sha256_hex(data: bytes) -> str:

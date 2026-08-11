@@ -1654,6 +1654,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+gateway = [
+    { name = "fastapi" },
+    { name = "uvicorn" },
+]
 otel = [
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
@@ -1663,13 +1667,15 @@ otel = [
 requires-dist = [
     { name = "cel-python", specifier = ">=0.2.0" },
     { name = "cryptography", specifier = ">=42.0.0" },
+    { name = "fastapi", marker = "extra == 'gateway'", specifier = ">=0.110.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otel'", specifier = ">=1.25.0" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.25.0" },
     { name = "pydantic", specifier = ">=2.0.0" },
     { name = "python-ulid", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
+    { name = "uvicorn", marker = "extra == 'gateway'", specifier = ">=0.28.0" },
 ]
-provides-extras = ["otel"]
+provides-extras = ["otel", "gateway"]
 
 [[package]]
 name = "unified-mcp-client"
@@ -1737,6 +1743,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
     { name = "ruamel-yaml" },
+    { name = "unified-enforce" },
     { name = "unified-mcp-client" },
     { name = "unified-mcp-servers" },
     { name = "uvicorn" },
@@ -1770,6 +1777,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0.0" },
     { name = "ruamel-yaml", specifier = ">=0.18.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.3.0" },
+    { name = "unified-enforce", editable = "packages/unified-enforce" },
     { name = "unified-mcp-client", editable = "packages/unified-mcp-client" },
     { name = "unified-mcp-servers", editable = "packages/unified-mcp-servers" },
     { name = "uvicorn", specifier = ">=0.28.0" },

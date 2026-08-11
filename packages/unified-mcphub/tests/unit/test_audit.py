@@ -151,6 +151,89 @@ def test_write_failure_raises_audit_error(tmp_path):
         log.stop()
 
 
+def test_entries_are_hash_chained(tmp_path):
+    # Post unified-enforce migration: flat two-phase entries carry the chain.
+    from unified_mcphub import audit_reader
+
+    log = AuditLog(tmp_path / "audit")
+    log.start()
+    try:
+        _received(log, "r1")
+        _received(log, "r2")
+    finally:
+        log.stop()
+    entries = _read(tmp_path / "audit")
+    assert entries[0]["prev_hash"] == "0" * 64
+    assert entries[1]["prev_hash"] == entries[0]["hash"]
+    assert entries[0]["phase"] == "received"  # flat shape preserved
+    result = audit_reader.verify(tmp_path / "audit")
+    assert result.ok and result.entries == 2
+
+
+def test_tampered_entry_fails_verify(tmp_path):
+    import json as json_mod
+
+    from unified_mcphub import audit_reader
+
+    log = AuditLog(tmp_path / "audit")
+    log.start()
+    try:
+        _received(log, "r1")
+    finally:
+        log.stop()
+    path = next((tmp_path / "audit").glob("*.jsonl"))
+    entry = json_mod.loads(path.read_text())
+    entry["authz_decision"] = "allow-actually-it-was-deny"
+    path.write_text(json_mod.dumps(entry) + "\n")
+    result = audit_reader.verify(tmp_path / "audit")
+    assert not result.ok and "hash mismatch" in result.error
+
+
+def test_chain_resumes_across_restarts(tmp_path):
+    from unified_mcphub import audit_reader
+
+    log1 = AuditLog(tmp_path / "audit")
+    log1.start()
+    try:
+        _received(log1, "r1")
+    finally:
+        log1.stop()
+    log2 = AuditLog(tmp_path / "audit")
+    log2.start()
+    try:
+        _received(log2, "r2")
+    finally:
+        log2.stop()
+    entries = _read(tmp_path / "audit")
+    assert entries[1]["prev_hash"] == entries[0]["hash"]
+    assert entries[1]["seq"] == 2  # seq now survives restarts too
+    assert audit_reader.verify(tmp_path / "audit").ok
+
+
+def test_float_args_are_recorded_not_rejected(tmp_path):
+    # Hub args are free-form JSON (strict=False chaining) — floats must not raise.
+    from unified_mcphub import audit_reader
+
+    log = AuditLog(tmp_path / "audit")
+    log.start()
+    try:
+        _received(log, "r1", args={"amount": 1.5}, audit_level="detailed")
+    finally:
+        log.stop()
+    assert _read(tmp_path / "audit")[0]["args"]["amount"] == 1.5
+    assert audit_reader.verify(tmp_path / "audit").ok
+
+
+def test_action_digest_recorded_when_given(tmp_path):
+    log = AuditLog(tmp_path / "audit")
+    log.start()
+    try:
+        _received(log, "r1", action_digest="ab" * 32)
+    finally:
+        log.stop()
+    assert _read(tmp_path / "audit")[0]["action_digest"] == "ab" * 32
+
+
 def test_daily_utc_rotation(tmp_path, monkeypatch):
     clock = {"now": datetime(2026, 1, 1, tzinfo=timezone.utc)}
     monkeypatch.setattr(audit_mod, "utcnow", lambda: clock["now"])

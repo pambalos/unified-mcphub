@@ -10,9 +10,10 @@ Canonicalize → decide → record:
 """
 
 from .action import Action, ActionContext, Principal, SCHEMA_VERSION
-from .audit import AuditChain, VerifyResult
+from .audit import AuditChain, HashChainWriter, VerifyResult
 from .canonical import CanonicalizationError, GENESIS_HASH, canonical_bytes, digest, sha256_hex
 from .enforcer import Enforcer
+from .extauthz import CheckInput, CheckResult, ExtAuthzCore, create_http_service
 from .index import AuditIndex
 from .policy import Decision, Match, PolicyDoc, PolicyEngine, PolicyError, Rule, Verdict
 from .replay import Divergence, ReplayReport, replay
@@ -27,9 +28,13 @@ __all__ = [
     "AuditChain",
     "AuditIndex",
     "CanonicalizationError",
+    "CheckInput",
+    "CheckResult",
     "Decision",
     "Divergence",
+    "ExtAuthzCore",
     "Enforcer",
+    "HashChainWriter",
     "ReplayReport",
     "Telemetry",
     "replay",
@@ -44,6 +49,7 @@ __all__ = [
     "Verdict",
     "VerifyResult",
     "canonical_bytes",
+    "create_http_service",
     "digest",
     "sha256_hex",
 ]

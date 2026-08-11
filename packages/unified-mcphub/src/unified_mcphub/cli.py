@@ -240,6 +240,13 @@ def cmd_audit(args: argparse.Namespace) -> int:
     elif cmd == "prune":
         removed = audit_reader.prune(directory, load_hub_config().audit.retention_days)
         print(f"removed {len(removed)} file(s): {', '.join(removed) or '(none)'}")
+    elif cmd == "verify":
+        result = audit_reader.verify(directory)
+        if result.ok:
+            print(f"chain OK: {result.entries} entries verified (anchor {result.anchor})")
+        else:
+            print(f"chain BROKEN after {result.entries} entries: {result.error}")
+            return 1
     return 0
 
 
@@ -447,6 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
     aud_sub.add_parser("tail").set_defaults(func=cmd_audit)
     aud_sub.add_parser("lint").set_defaults(func=cmd_audit)
     aud_sub.add_parser("prune").set_defaults(func=cmd_audit)
+    aud_sub.add_parser("verify", help="verify the audit hash chain").set_defaults(func=cmd_audit)
 
     return p
 

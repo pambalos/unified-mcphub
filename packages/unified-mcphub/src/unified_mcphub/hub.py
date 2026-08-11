@@ -22,6 +22,8 @@ from mcp import types
 from ulid import ULID
 from watchfiles import awatch
 
+from unified_enforce import Action, ActionContext, Principal
+
 from . import audit as audit_mod
 from . import discovery
 from . import endpoints
@@ -201,6 +203,16 @@ class Hub:
         tool_uri = f"mcp://{server_name}/{tool}"
         request_id = str(ULID())
         trace_id, span_id = audit_mod.new_trace_id(), audit_mod.new_span_id()
+        # Canonical Action (unified.action/v1): the enforcement engine's identity
+        # for this call. strict=False — MCP args are free-form JSON (may hold floats).
+        action = Action.build(
+            principal=Principal(id=f"agent:{caller_id}"),
+            tool=tool_uri,
+            verb="call",
+            resource="*",
+            params=args,
+            context=ActionContext(origin="mcp", trace_id=trace_id, span_id=span_id),
+        )
         decision = self.authz.resolve(tool_uri, args, caller_id)
 
         authz_decision = decision.effect.value
@@ -242,6 +254,7 @@ class Hub:
             audit_level=decision.audit_level,
             reason=denied_reason,
             decided_by=decided_by,
+            action_digest=action.digest(strict=False),
         )
 
         if not allowed:

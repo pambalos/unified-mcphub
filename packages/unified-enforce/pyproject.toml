@@ -31,6 +31,10 @@ otel = [
     "opentelemetry-sdk>=1.25.0",
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
 ]
+gateway = [
+    "fastapi>=0.110.0",  # ext_authz HTTP transport (E3); gRPC transport adds grpcio here
+    "uvicorn>=0.28.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -85,10 +85,13 @@ class Action(BaseModel):
             context=context or ActionContext(),
         )
 
-    def canonical(self) -> bytes:
-        """Canonical bytes of the full action. Raises CanonicalizationError on
-        payloads that cannot be represented deterministically (e.g. floats)."""
-        return canonical_bytes(self.model_dump(mode="json"))
+    def canonical(self, *, strict: bool = True) -> bytes:
+        """Canonical bytes of the full action. Strict (the default, and required
+        for signing) raises CanonicalizationError on payloads that cannot be
+        represented deterministically (e.g. floats); strict=False is for
+        integrations whose params are pre-existing free-form JSON (see
+        canonical.py)."""
+        return canonical_bytes(self.model_dump(mode="json"), strict=strict)
 
-    def digest(self) -> str:
-        return sha256_hex(self.canonical())
+    def digest(self, *, strict: bool = True) -> str:
+        return sha256_hex(self.canonical(strict=strict))

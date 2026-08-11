@@ -1,0 +1,47 @@
+packages/unified-enforce/src/unified_enforce/audit.py
+  s_b24ad4c243d6fd::t_140e05bccb1e18 102-108,113,118
+packages/unified-enforce/src/unified_enforce/telemetry.py
+  s_b24ad4c243d6fd::t_8850dab776edf3 1-166
+pyproject.toml
+  s_b24ad4c243d6fd::t_732de4a9103512 19-22
+packages/unified-enforce/src/unified_enforce/__init__.py
+  s_b24ad4c243d6fd::t_4dff2ba2a4bddc 15,20,32,34
+  s_b24ad4c243d6fd::t_97c89379a571ec 16,18
+  s_b24ad4c243d6fd::t_19f1619ddc2f83 28,31,33,35
+packages/unified-enforce/tests/unit/test_enforce_e2.py
+  s_b24ad4c243d6fd::t_7868f39232578d 1-165
+packages/unified-enforce/tests/unit/test_enforce_telemetry.py
+  s_b24ad4c243d6fd::t_7586ec91842292 1-146
+specs/enforce/observability.v1.md
+  s_b24ad4c243d6fd::t_aacd5d49616a8e 1-41
+packages/unified-enforce/pyproject.toml
+  s_b24ad4c243d6fd::t_d74b2be2bffa63 27-34
+packages/unified-enforce/src/unified_enforce/index.py
+  s_b24ad4c243d6fd::t_cf34bce825c402 1-147
+packages/unified-enforce/src/unified_enforce/redaction.py
+  s_b24ad4c243d6fd::t_f803e186a4137b 1-60,62-63
+packages/unified-enforce/src/unified_enforce/replay.py
+  s_b24ad4c243d6fd::t_c9156770547520 1-86
+technologies.md
+  s_b24ad4c243d6fd::t_876a057667f8f9 81
+specs/enforce/e2.v1.md
+  s_b24ad4c243d6fd::t_bf6bd9570850f4 1-53
+packages/unified-enforce/src/unified_enforce/enforcer.py
+  s_b24ad4c243d6fd::t_af6e8ee644570d 1-40
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "56141313a79d54f523719e17363ace7cd96b1c67",
+  "prompts": {},
+  "sessions": {
+    "s_b24ad4c243d6fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "18a252bb-92e9-41e0-8235-2461e06281b3",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

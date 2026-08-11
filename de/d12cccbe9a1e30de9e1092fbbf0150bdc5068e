@@ -1,0 +1,58 @@
+packages/unified-enforce/src/unified_enforce/enforcer.py
+  s_b24ad4c243d6fd::t_2816b13bc0a518 30-40
+packages/unified-enforce/src/unified_enforce/__init__.py
+  s_b24ad4c243d6fd::t_ce912da3a6449a 16-22
+  s_b24ad4c243d6fd::t_bb9a4e8b287d06 36
+packages/unified-enforce/tests/unit/test_enforce_extauthz_body.py
+  s_b24ad4c243d6fd::t_c65ffea659aa5b 1-123,125-145,155-156,159-185,193-200,202-204,207-217,219-221,224-233,235-237,240-265
+  s_b24ad4c243d6fd::t_0a23599b7a4c2e 146-154,157-158
+  s_b24ad4c243d6fd::t_4ba1fd6941d5b6 186-192
+packages/unified-enforce/deploy/envoy/ext_authz-grpc-mtls.yaml
+  s_b24ad4c243d6fd::t_ca38bb2eb69d16 1-137
+packages/unified-enforce/src/unified_enforce/extauthz.py
+  s_b24ad4c243d6fd::t_65c7bc771114f3 120,125
+  s_b24ad4c243d6fd::t_8cbfc5ac17c9eb 22,25,35-65,76-79
+  s_b24ad4c243d6fd::t_b20de8060fa4ed 140-167,170-176,182-185,187-201
+  s_b24ad4c243d6fd::t_35e5c129b0e6d5 242,251-258
+packages/unified-enforce/tests/integration/test_envoy_ext_authz.py
+  s_b24ad4c243d6fd::t_2204c363c6337e 1,5-7,29-30,43-46,80-83,99,110-117,130-138,141,147-178,204-207,218,233,244-245,248-250,252-256,259-266,276-287,292-293,295-314,319,335,346-378,380-419,427-432
+packages/unified-enforce/tests/unit/test_enforce_extauthz_mtls.py
+  s_b24ad4c243d6fd::t_5750e80301d534 5-6
+  s_b24ad4c243d6fd::t_11683b4ecf1f0f 1-4,7-139
+packages/unified-enforce/tests/integration/test_latency.py
+  s_b24ad4c243d6fd::t_2a495a46ef4efd 1-26,29-82,85-88,124-131,140-162,169-172,174-175
+  s_b24ad4c243d6fd::t_4fd37e680c6fdb 163-168,173
+  s_b24ad4c243d6fd::t_b426991fa0d4c5 83-84,89-123,132-139
+  s_b24ad4c243d6fd::t_63a194b4fb6894 27-28
+packages/unified-enforce/src/unified_enforce/extauthz_grpc.py
+  s_b24ad4c243d6fd::t_8f81d573cf268c 115-175,177-181,188-191,200-203
+  s_b24ad4c243d6fd::t_e2297e5733a16f 47-51,62-63
+  s_b24ad4c243d6fd::t_4a0c48f8f8b2f7 30-31
+packages/unified-enforce/deploy/envoy/ext_authz-grpc.yaml
+  s_b24ad4c243d6fd::t_59dd873ae40d73 48-64
+packages/unified-enforce/tests/conftest.py
+  s_b24ad4c243d6fd::t_391e6e9109b5bd 1-91
+packages/unified-enforce/src/unified_enforce/protos/ext_authz.proto
+  s_b24ad4c243d6fd::t_c48071e4f0f856 37-44
+specs/enforce/e3.v1.md
+  s_b24ad4c243d6fd::t_3e6c8bd514fb34 111-112,117-125
+  s_b24ad4c243d6fd::t_fc2e25af82374e 133-237
+  s_b24ad4c243d6fd::t_1c51d093219536 3-6
+  s_b24ad4c243d6fd::t_a676630e57c4da 78-85,87-88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "ded12cccbe9a1e30de9e1092fbbf0150bdc5068e",
+  "prompts": {},
+  "sessions": {
+    "s_b24ad4c243d6fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "18a252bb-92e9-41e0-8235-2461e06281b3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

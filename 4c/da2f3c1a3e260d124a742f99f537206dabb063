@@ -1,0 +1,52 @@
+packages/unified-enforce/src/unified_enforce/extauthz_grpc.py
+  s_b24ad4c243d6fd::t_29673c0448f6b2 113,122
+  s_b24ad4c243d6fd::t_3f5a84f45fffcc 8-17,20,33,35-37,39,58-80,82-103,121
+  s_b24ad4c243d6fd::t_9deba199c0704f 1-7,18-19,21-32,34,38,40-57,81,104-112,114-120,123
+packages/unified-enforce/src/unified_enforce/extauthz.py
+  s_b24ad4c243d6fd::t_18b9efc3349fb3 62-84,86-100
+  s_b24ad4c243d6fd::t_36505d61b57e50 155
+packages/unified-enforce/pyproject.toml
+  s_b24ad4c243d6fd::t_9a071838495827 35,37
+packages/unified-enforce/tests/unit/test_enforce_extauthz_grpc.py
+  s_b24ad4c243d6fd::t_28466ec42f90e7 3-4,9-12,38,56,78,83-85,88-89,94,103,110,118-119,135,147-157,159,161-162,165-175
+  s_b24ad4c243d6fd::t_eb5f93d2c66f62 1-2,5-8,14-37,39-55,57-59,61-69,71-77,79-82,86-87,90-93,95-102,104-109,111-117,120-134,136-141,143-146,158,160,163-164
+  s_b24ad4c243d6fd::t_bbe6854f4c541a 142
+pyproject.toml
+  s_b24ad4c243d6fd::t_db8c41fe0cc5a7 25
+packages/unified-enforce/deploy/envoy/ext_authz-http.yaml
+  s_b24ad4c243d6fd::t_5d56cb809bea4d 11-14,17-18
+specs/enforce/e3.v1.md
+  s_b24ad4c243d6fd::t_55405e6074fb20 1,12-13,20-23,34,41,62-69,72-75,77-80,83,87,90-100,103,123-125
+  s_b24ad4c243d6fd::t_8f0d8a8bd4d66f 3-6,14-16,18-19,24-33,35-40,42-61,70-71,76,81-82,84-86,88-89,101-102,104-122,127-128,130-131
+packages/unified-enforce/deploy/envoy/ext_authz-grpc.yaml
+  s_b24ad4c243d6fd::t_5a24251a801dad 1-8,14-82
+  s_b24ad4c243d6fd::t_7812bb2e06978a 9,12-13
+packages/unified-enforce/deploy/egress/README.md
+  s_b24ad4c243d6fd::t_cf587ab2776761 1-40
+packages/unified-enforce/deploy/egress/iptables-sidecar.sh
+  s_b24ad4c243d6fd::t_744826beac74bb 1-56
+packages/unified-enforce/deploy/egress/aws-security-groups.tf
+  s_b24ad4c243d6fd::t_3b209f9cff77de 1-73
+packages/unified-enforce/deploy/egress/kubernetes-networkpolicy.yaml
+  s_b24ad4c243d6fd::t_75eca16a293e46 1-63
+packages/unified-enforce/src/unified_enforce/protos/ext_authz.proto
+  s_b24ad4c243d6fd::t_39f28b47dd6457 1-91
+packages/unified-enforce/tests/integration/test_envoy_ext_authz.py
+  s_b24ad4c243d6fd::t_f0bfade7980a36 1-74,76-78,80,84,86-100,102-266,268-271,279-282,284-293,295-303,305-311
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "4cda2f3c1a3e260d124a742f99f537206dabb063",
+  "prompts": {},
+  "sessions": {
+    "s_b24ad4c243d6fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "18a252bb-92e9-41e0-8235-2461e06281b3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

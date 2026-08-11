@@ -1,0 +1,35 @@
+packages/unified-enforce/README.md
+  s_b24ad4c243d6fd::t_0986d949c52636 1-31
+specs/enforce/e1.v1.md
+  s_b24ad4c243d6fd::t_ab26cb0d1b005d 1-125
+packages/unified-enforce/pyproject.toml
+  s_b24ad4c243d6fd::t_23bcd3616b03d9 1-35
+packages/unified-enforce/src/unified_enforce/action.py
+  s_b24ad4c243d6fd::t_417d7407394c82 1-94
+packages/unified-enforce/src/unified_enforce/policy.py
+  s_b24ad4c243d6fd::t_ca255d2d2bf0b5 1-246
+packages/unified-enforce/src/unified_enforce/canonical.py
+  s_b24ad4c243d6fd::t_b63906790ebc78 1-54
+packages/unified-enforce/src/unified_enforce/__init__.py
+  s_b24ad4c243d6fd::t_612c1276ae3096 1-39
+packages/unified-enforce/src/unified_enforce/signing.py
+  s_b24ad4c243d6fd::t_f830d00d5fe1b0 1-73
+packages/unified-enforce/src/unified_enforce/audit.py
+  s_b24ad4c243d6fd::t_461f34d0be50d1 1-177
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "c1c421fc767ee770e37861053115e79210c32fcd",
+  "prompts": {},
+  "sessions": {
+    "s_b24ad4c243d6fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "18a252bb-92e9-41e0-8235-2461e06281b3",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

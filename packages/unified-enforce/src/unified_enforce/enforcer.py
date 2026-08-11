@@ -27,7 +27,17 @@ class Enforcer:
         self._telemetry = telemetry or Telemetry.disabled()
 
     def enforce(self, action: Action) -> Decision:
-        decision = self._engine.decide(action)
+        return self.record(action, self._engine.decide(action))
+
+    def record(self, action: Action, decision: Decision) -> Decision:
+        """Chain and trace a decision that did NOT come from the policy engine.
+
+        Some verdicts are structural rather than rule-driven — the gateway
+        denying a request whose body it could not read, for instance. Those
+        must land in the audit chain and the trace exactly like policy verdicts,
+        or the evidence would show only the decisions the engine happened to
+        make. `Decision.source` is what distinguishes them to a reader.
+        """
         audit_error: Exception | None = None
         if self._chain is not None:
             try:

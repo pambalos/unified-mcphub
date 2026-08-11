@@ -1,9 +1,10 @@
-"""End-to-end: real Envoy enforcing our ext_authz verdicts. E3, spec §1/§4.
+"""End-to-end: real Envoy enforcing our ext_authz verdicts. E3, spec §1/§4/§8.
 
 This is the test that proves the vendored minimal protos are wire-compatible
 with Envoy — we no longer link Envoy's generated stubs, so nothing else does.
-It also proves the shipped templates parse against Envoy's schema and that
-`failure_mode_allow: false` really denies when the engine dies.
+It also proves the shipped templates parse against Envoy's schema, that
+`failure_mode_allow: false` really denies when the engine dies, and that the
+mTLS listener actually interoperates with Envoy's TLS client.
 
 Requires Docker (skipped otherwise) and pulls envoyproxy/envoy on first run:
 
@@ -25,8 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from unified_enforce import Enforcer, ExtAuthzCore, PolicyEngine
-from unified_enforce.extauthz_grpc import create_grpc_server
+from unified_enforce import BodyInspection, Enforcer, ExtAuthzCore, PolicyEngine
+from unified_enforce.extauthz_grpc import ServerTLS, create_grpc_server
 
 pytestmark = pytest.mark.integration
 
@@ -38,6 +39,10 @@ version: 1
 rules:
   - id: api-reads-ok
     match: {principal: "agent:crew-*", tool: "http://*/v1/users**", verb: get}
+    effect: allow
+  - id: small-refunds
+    match: {principal: "agent:crew-*", tool: "http://*/v1/refunds", verb: post}
+    when: 'double(params.amount) <= 5000.0'
     effect: allow
 """
 
@@ -72,8 +77,10 @@ def _wait_for(url: str, timeout: float = 60.0) -> None:
     raise TimeoutError(f"{url} never came up: {last}")
 
 
-def _get(url: str, headers: dict[str, str]) -> tuple[int, dict[str, str], str]:
-    req = urllib.request.Request(url, headers=headers)
+def _call(
+    url: str, headers: dict[str, str], data: bytes | None = None
+) -> tuple[int, dict[str, str], str]:
+    req = urllib.request.Request(url, headers=headers, data=data)
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return (
@@ -89,7 +96,7 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
     """Echoes the x-unified-* headers it received, so tests can assert what the
     engine injected into the *upstream request* on an allow."""
 
-    def do_GET(self):  # noqa: N802
+    def _respond(self):
         injected = {
             k.lower(): v for k, v in self.headers.items() if k.lower().startswith("x-unified-")
         }
@@ -99,6 +106,14 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    do_GET = _respond  # noqa: N815
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("content-length", 0))
+        if length:
+            self.rfile.read(length)
+        self._respond()
 
     def log_message(self, *args):  # silence
         pass
@@ -112,16 +127,55 @@ def upstream():
     server.shutdown()
 
 
+def _core() -> ExtAuthzCore:
+    return ExtAuthzCore(
+        Enforcer(PolicyEngine.from_yaml(POLICY)),
+        # Enabled so this suite exercises the body/raw_body/size field numbers
+        # against real Envoy — nothing else pins them to Envoy's wire format.
+        body_inspection=BodyInspection(max_bytes=4096),
+    )
+
+
 @pytest.fixture(scope="module")
 def engine_server():
-    core = ExtAuthzCore(Enforcer(PolicyEngine.from_yaml(POLICY)))
-    server = create_grpc_server(core, "0.0.0.0:0")  # container must reach it
+    server = create_grpc_server(_core(), "0.0.0.0:0")  # container must reach it
     server.start()
     yield server
     server.stop(None)
 
 
-def _envoy_config(grpc_port: int, upstream_port: int) -> str:
+# Envoy's default c-ares resolver ignores /etc/hosts, so --add-host's
+# host.docker.internal entry is invisible to it. getaddrinfo goes through libc
+# and sees it. Test-harness only: real sidecars address 127.0.0.1.
+_GETADDRINFO = """
+      typed_dns_resolver_config:
+        name: envoy.network.dns_resolver.getaddrinfo
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.getaddrinfo.v3.GetAddrInfoDnsResolverConfig
+"""
+
+
+def _envoy_config(grpc_port: int, upstream_port: int, *, tls: bool = False) -> str:
+    transport_socket = (
+        """
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: unified-enforce
+          common_tls_context:
+            tls_certificates:
+              - certificate_chain: { filename: /tls/envoy.crt }
+                private_key: { filename: /tls/envoy.key }
+            validation_context:
+              trusted_ca: { filename: /tls/ca.crt }
+              match_typed_subject_alt_names:
+                - san_type: DNS
+                  matcher: { exact: "unified-enforce" }
+"""
+        if tls
+        else ""
+    )
     return f"""
 static_resources:
   listeners:
@@ -147,6 +201,10 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
                       transport_api_version: V3
                       failure_mode_allow: false
+                      with_request_body:
+                        max_request_bytes: 4096
+                        allow_partial_message: false
+                        pack_as_bytes: true
                       grpc_service:
                         envoy_grpc: {{ cluster_name: unified_enforce }}
                         timeout: 2s
@@ -157,13 +215,7 @@ static_resources:
     - name: unified_enforce
       type: STRICT_DNS
       connect_timeout: 2s
-      # Envoy's default c-ares resolver ignores /etc/hosts, so --add-host's
-      # host.docker.internal entry is invisible to it. getaddrinfo goes through
-      # libc and sees it. Test-harness only: real sidecars use 127.0.0.1.
-      typed_dns_resolver_config:
-        name: envoy.network.dns_resolver.getaddrinfo
-        typed_config:
-          "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.getaddrinfo.v3.GetAddrInfoDnsResolverConfig
+{_GETADDRINFO}{transport_socket}
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -178,13 +230,7 @@ static_resources:
     - name: upstream
       type: STRICT_DNS
       connect_timeout: 2s
-      # Envoy's default c-ares resolver ignores /etc/hosts, so --add-host's
-      # host.docker.internal entry is invisible to it. getaddrinfo goes through
-      # libc and sees it. Test-harness only: real sidecars use 127.0.0.1.
-      typed_dns_resolver_config:
-        name: envoy.network.dns_resolver.getaddrinfo
-        typed_config:
-          "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.getaddrinfo.v3.GetAddrInfoDnsResolverConfig
+{_GETADDRINFO}
       load_assignment:
         cluster_name: upstream
         endpoints:
@@ -195,36 +241,29 @@ static_resources:
 """
 
 
+def _run_envoy(cfg_dir: Path, extra_mounts: dict[Path, str] | None = None):
+    """Start Envoy in a container; yields the published listener port."""
+    port = _free_port()
+    name = f"unified-envoy-test-{port}"
+    mounts: list[str] = ["-v", f"{cfg_dir}:/cfg:ro"]
+    for host_path, container_path in (extra_mounts or {}).items():
+        mounts += ["-v", f"{host_path}:{container_path}:ro"]
+    proc = subprocess.run(
+        ["docker", "run", "-d", "--rm", "--name", name,
+         "--add-host=host.docker.internal:host-gateway", "-p", f"{port}:10000",
+         *mounts, ENVOY_IMAGE, "envoy", "-c", "/cfg/envoy.yaml"],
+        capture_output=True, text=True, timeout=600,
+    )  # fmt: skip
+    if proc.returncode != 0:
+        pytest.fail(f"docker run failed: {proc.stderr}")
+    return port, name
+
+
 @pytest.fixture(scope="module")
 def envoy(tmp_path_factory, engine_server, upstream):
     cfg_dir = tmp_path_factory.mktemp("envoy")
     (cfg_dir / "envoy.yaml").write_text(_envoy_config(engine_server.bound_port, upstream))
-    port = _free_port()
-    name = f"unified-envoy-test-{port}"
-    proc = subprocess.run(
-        [
-            "docker",
-            "run",
-            "-d",
-            "--rm",
-            "--name",
-            name,
-            "--add-host=host.docker.internal:host-gateway",
-            "-p",
-            f"{port}:10000",
-            "-v",
-            f"{cfg_dir}:/cfg:ro",
-            ENVOY_IMAGE,
-            "envoy",
-            "-c",
-            "/cfg/envoy.yaml",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=600,
-    )
-    if proc.returncode != 0:
-        pytest.fail(f"docker run failed: {proc.stderr}")
+    port, name = _run_envoy(cfg_dir)
     try:
         _wait_for(f"http://127.0.0.1:{port}/v1/users")
         yield port
@@ -234,37 +273,50 @@ def envoy(tmp_path_factory, engine_server, upstream):
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
 
+@pytest.fixture(scope="module")
+def tls_dir(tmp_path_factory, pki) -> Path:
+    """PEM material laid out the way the shipped mTLS template expects."""
+    d = tmp_path_factory.mktemp("tls")
+    (d / "ca.crt").write_bytes(pki["ca"])
+    (d / "server.key").write_bytes(pki["server"][0])
+    (d / "server.crt").write_bytes(pki["server"][1])
+    (d / "envoy.key").write_bytes(pki["client"][0])
+    (d / "envoy.crt").write_bytes(pki["client"][1])
+    return d
+
+
 # --- the tests ---
 
 
 @requires_docker
-def test_shipped_templates_pass_envoy_validation():
+@pytest.mark.parametrize("template", ["ext_authz-grpc.yaml", "ext_authz-http.yaml"])
+def test_shipped_templates_pass_envoy_validation(template):
     """The templates we ship must parse against Envoy's real schema."""
-    for template in ["ext_authz-grpc.yaml", "ext_authz-http.yaml"]:
-        proc = subprocess.run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "-v",
-                f"{DEPLOY / 'envoy'}:/cfg:ro",
-                ENVOY_IMAGE,
-                "envoy",
-                "--mode",
-                "validate",
-                "-c",
-                f"/cfg/{template}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        assert proc.returncode == 0, f"{template} failed validation:\n{proc.stderr}"
+    proc = subprocess.run(
+        ["docker", "run", "--rm", "-v", f"{DEPLOY / 'envoy'}:/cfg:ro",
+         ENVOY_IMAGE, "envoy", "--mode", "validate", "-c", f"/cfg/{template}"],
+        capture_output=True, text=True, timeout=600,
+    )  # fmt: skip
+    assert proc.returncode == 0, f"{template} failed validation:\n{proc.stderr}"
+
+
+@requires_docker
+def test_mtls_template_passes_envoy_validation(tls_dir):
+    """The mTLS template names certificate paths, and Envoy reads them at load
+    time — so validating it without real files would only prove the YAML parses.
+    Mounting a live chain at the documented path checks both together."""
+    proc = subprocess.run(
+        ["docker", "run", "--rm",
+         "-v", f"{DEPLOY / 'envoy'}:/cfg:ro", "-v", f"{tls_dir}:/etc/unified/tls:ro",
+         ENVOY_IMAGE, "envoy", "--mode", "validate", "-c", "/cfg/ext_authz-grpc-mtls.yaml"],
+        capture_output=True, text=True, timeout=600,
+    )  # fmt: skip
+    assert proc.returncode == 0, f"mTLS template failed validation:\n{proc.stderr}"
 
 
 @requires_docker
 def test_allowed_request_reaches_upstream(envoy):
-    status, _, body = _get(
+    status, _, body = _call(
         f"http://127.0.0.1:{envoy}/v1/users",
         {"x-unified-principal": "agent:crew-1"},
     )
@@ -280,7 +332,7 @@ def test_allowed_request_reaches_upstream(envoy):
 
 @requires_docker
 def test_denied_request_is_blocked_by_envoy(envoy):
-    status, headers, _ = _get(
+    status, headers, _ = _call(
         f"http://127.0.0.1:{envoy}/admin/secrets",
         {"x-unified-principal": "agent:crew-1"},
     )
@@ -291,8 +343,80 @@ def test_denied_request_is_blocked_by_envoy(envoy):
 
 @requires_docker
 def test_unknown_principal_is_denied(envoy):
-    status, _, _ = _get(f"http://127.0.0.1:{envoy}/v1/users", {})
+    status, _, _ = _call(f"http://127.0.0.1:{envoy}/v1/users", {})
     assert status == 403
+
+
+# --- body inspection against real Envoy (spec §8) ---
+
+
+@requires_docker
+def test_body_value_decides_the_verdict(envoy):
+    """The whole point of body inspection: same method, same path, same
+    principal — only the amount inside the payload differs.
+
+    This is also what pins the vendored proto's raw_body/size field numbers to
+    Envoy's, since Envoy is the only thing that fills them.
+    """
+    headers = {"x-unified-principal": "agent:crew-1", "content-type": "application/json"}
+    url = f"http://127.0.0.1:{envoy}/v1/refunds"
+
+    small, _, _ = _call(url, headers, data=json.dumps({"amount": 100}).encode())
+    assert small == 200, "a small refund should be allowed"
+
+    large, hdrs, _ = _call(url, headers, data=json.dumps({"amount": 9000}).encode())
+    assert large == 403, "a refund over the limit should be denied"
+    assert hdrs.get("x-unified-verdict") == "deny"
+
+
+@requires_docker
+def test_unreadable_body_is_denied_through_envoy(envoy):
+    status, headers, _ = _call(
+        f"http://127.0.0.1:{envoy}/v1/refunds",
+        {"x-unified-principal": "agent:crew-1", "content-type": "application/json"},
+        data=b"{not json",
+    )
+    assert status == 403
+    assert headers.get("x-unified-source") == "body_unreadable"
+
+
+# --- mTLS between Envoy and the engine (spec §8) ---
+
+
+@requires_docker
+def test_envoy_reaches_the_engine_over_mtls(tmp_path_factory, tls_dir, pki, upstream):
+    """Envoy's TLS client against ServerTLS — the interop that unit tests can't
+    cover, since they use grpc's own client on both ends."""
+    server_key, server_cert = pki["server"]
+    server = create_grpc_server(
+        _core(),
+        "0.0.0.0:0",
+        tls=ServerTLS(
+            certificate_chain=server_cert,
+            private_key=server_key,
+            client_ca=pki["ca"],
+            require_client_auth=True,
+        ),
+    )
+    server.start()
+    cfg_dir = tmp_path_factory.mktemp("envoy-mtls")
+    (cfg_dir / "envoy.yaml").write_text(_envoy_config(server.bound_port, upstream, tls=True))
+    port, name = _run_envoy(cfg_dir, extra_mounts={tls_dir: "/tls"})
+    try:
+        _wait_for(f"http://127.0.0.1:{port}/v1/users")
+        status, _, body = _call(
+            f"http://127.0.0.1:{port}/v1/users", {"x-unified-principal": "agent:crew-1"}
+        )
+        assert status == 200, "mTLS handshake should succeed and the verdict should pass through"
+        assert json.loads(body)["x-unified-verdict"] == "allow"
+    finally:
+        logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
+        print(logs.stderr[-2000:])
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        server.stop(None)
+
+
+# --- keep last: this fixture's engine stays stopped afterwards ---
 
 
 @requires_docker
@@ -300,12 +424,9 @@ def test_engine_down_fails_closed(envoy, engine_server):
     """failure_mode_allow: false — killing the engine must deny, never pass."""
     engine_server.stop(None)
     time.sleep(1)
-    try:
-        status, _, _ = _get(
-            f"http://127.0.0.1:{envoy}/v1/users",
-            {"x-unified-principal": "agent:crew-1"},
-        )
-        assert status != 200, "traffic passed with the engine down — NOT fail-closed"
-        assert status in (403, 500, 503), f"unexpected status {status}"
-    finally:
-        pass  # module-scoped server intentionally left stopped; last test in file
+    status, _, _ = _call(
+        f"http://127.0.0.1:{envoy}/v1/users",
+        {"x-unified-principal": "agent:crew-1"},
+    )
+    assert status != 200, "traffic passed with the engine down — NOT fail-closed"
+    assert status in (403, 500, 503), f"unexpected status {status}"

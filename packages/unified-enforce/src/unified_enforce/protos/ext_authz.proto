@@ -34,6 +34,14 @@ message HttpRequest {
   string path = 4;                  // includes query string
   string host = 5;
   string scheme = 6;
+
+  // Body, sent only when the ext_authz filter sets `with_request_body`.
+  // `size` is the full declared request size, or -1 when unknown (e.g. a
+  // chunked request) — comparing it against the received length is how
+  // truncation is detected when `allow_partial_message: true`.
+  int64 size = 9;
+  string body = 11;     // set unless the filter sets pack_as_bytes
+  bytes raw_body = 12;  // set when the filter sets pack_as_bytes: true
 }
 
 message Request {

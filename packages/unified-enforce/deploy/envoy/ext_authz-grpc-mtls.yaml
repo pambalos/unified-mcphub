@@ -1,8 +1,25 @@
-# Envoy sidecar template — unified-enforce ext_authz (gRPC transport). E3.
+# Envoy sidecar template — unified-enforce ext_authz over **mutual TLS**. E3 §8.
 #
-# The locked data-plane target: Envoy consults the engine's
-# envoy.service.auth.v3.Authorization servicer (unified_enforce.extauthz_grpc)
-# on every request and enforces the verdict.
+# Use this instead of ext_authz-grpc.yaml whenever Envoy and the engine are not
+# the same trust domain: a shared host, a multi-tenant gateway, or any hop that
+# leaves the loopback interface.
+#
+# The threat it closes is not eavesdropping — it is impersonation in both
+# directions. Without it, any local process can call the engine directly to map
+# the policy by probing verdicts, and (the worse direction) any local process
+# that wins the port can pose AS the engine and answer ALLOW to everything.
+# Envoy cannot tell the difference; `failure_mode_allow: false` does not help,
+# because a rogue engine is not a failure.
+#
+# Certificates are supplied by the operator; the engine reads its own with
+# ServerTLS.from_files(...). SPIFFE/SDS users should replace the file-based
+# tls_certificates below with an SDS config — the validation logic is the same.
+#
+#   engine side:
+#     tls = ServerTLS.from_files("/etc/unified/tls/server.crt",
+#                                "/etc/unified/tls/server.key",
+#                                client_ca="/etc/unified/tls/ca.crt")
+#     create_grpc_server(core, "0.0.0.0:9001", tls=tls).start()
 #
 # Pair with an egress policy from deploy/egress/ — Envoy is only the lock if
 # the agent has no route around it.
@@ -10,7 +27,7 @@
 # Validated against Envoy's real schema by
 # tests/integration/test_envoy_ext_authz.py (needs Docker). Manually:
 #   docker run --rm -v "$PWD:/cfg" envoyproxy/envoy:v1.31-latest \
-#     envoy --mode validate -c /cfg/ext_authz-grpc.yaml
+#     envoy --mode validate -c /cfg/ext_authz-grpc-mtls.yaml
 
 static_resources:
   listeners:
@@ -80,6 +97,27 @@ static_resources:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
           explicit_http_config:
             http2_protocol_options: {}   # gRPC requires HTTP/2
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: unified-enforce
+          common_tls_context:
+            # Envoy's own identity, presented to the engine. The engine is
+            # configured with require_client_auth=True, so omitting this makes
+            # every Check fail the handshake — which, with failure_mode_allow
+            # false, denies all traffic rather than passing it.
+            tls_certificates:
+              - certificate_chain: { filename: /etc/unified/tls/envoy.crt }
+                private_key: { filename: /etc/unified/tls/envoy.key }
+            validation_context:
+              trusted_ca: { filename: /etc/unified/tls/ca.crt }
+              # Verify WHICH engine answered, not merely that the cert chains to
+              # a CA we trust. Without this, any certificate the CA ever issued
+              # — including one held by a compromised neighbour — is accepted.
+              match_typed_subject_alt_names:
+                - san_type: DNS
+                  matcher: { exact: "unified-enforce" }
       load_assignment:
         cluster_name: unified_enforce
         endpoints:

@@ -14,6 +14,8 @@ from .audit import AuditChain, HashChainWriter, VerifyResult
 from .canonical import CanonicalizationError, GENESIS_HASH, canonical_bytes, digest, sha256_hex
 from .enforcer import Enforcer
 from .extauthz import (
+    CORRELATION_HEADER,
+    PRINCIPAL_HEADER,
     BodyInspection,
     CheckInput,
     CheckResult,
@@ -27,6 +29,8 @@ from .signing import SignedAction, Signer
 from .telemetry import Telemetry
 
 __all__ = [
+    "CORRELATION_HEADER",
+    "PRINCIPAL_HEADER",
     "SCHEMA_VERSION",
     "GENESIS_HASH",
     "Action",

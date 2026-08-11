@@ -29,7 +29,11 @@ from .enforcer import Enforcer
 from .policy import Decision, Verdict
 
 PRINCIPAL_HEADER = "x-unified-principal"
+#: Set by the E4 SDK to the digest of the semantic Action it already decided,
+#: so both observations of one operation can be joined in the audit chain.
+CORRELATION_HEADER = "x-unified-action"
 _TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$")
+_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True)
@@ -174,6 +178,15 @@ class ExtAuthzCore:
             # were unavailable rather than merely absent — an auditor can tell
             # "no rule matched" from "we never saw what this request carried".
             extra["body"] = problem
+        # SDK correlation (E4). Recorded as a CLAIM and deliberately not
+        # trusted: anything inside the trust boundary can set this header, so a
+        # hostile agent could point it at an unrelated action's digest. It never
+        # affects the verdict — the gateway decides on what it observed either
+        # way — and only the SDK's own chained entry is authoritative. Its value
+        # is that an honest client makes the two records joinable.
+        claimed = req.headers.get(CORRELATION_HEADER)
+        if claimed and _DIGEST.match(claimed):
+            extra["sdk_action_claimed"] = claimed
         action = Action.build(
             principal=Principal(id=req.principal_id),
             tool=f"{req.scheme}://{req.host}{req.path}",

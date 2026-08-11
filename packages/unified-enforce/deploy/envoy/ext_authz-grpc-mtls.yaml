@@ -42,10 +42,14 @@ static_resources:
                 stat_prefix: agent_egress
                 route_config:
                   name: all
-                  # An agent must not be able to name its own principal: strip the
-                  # header on ingress so only trusted infrastructure (or the mTLS
-                  # SAN, or the sidecar's configured default_principal) sets it.
-                  request_headers_to_remove: ["x-unified-principal"]
+                  # Keep internal headers off the wire to third parties. Route-level
+                  # removal happens when the request is FORWARDED — i.e. after
+                  # ext_authz has already run — so this protects the upstream, and
+                  # is NOT what stops an agent from naming its own principal. That
+                  # is the header_mutation filter below.
+                  request_headers_to_remove:
+                    - "x-unified-principal"
+                    - "x-unified-action"
                   virtual_hosts:
                     - name: upstream
                       domains: ["*"]
@@ -53,6 +57,17 @@ static_resources:
                         - match: { prefix: "/" }
                           route: { cluster: dynamic_forward }
                 http_filters:
+                  # MUST precede ext_authz — deletes the header before the engine
+                  # sees it, so identity can only come from the mTLS SAN or the
+                  # configured default_principal. Multi-tenant gateway deployments
+                  # that convey identity via this header must remove this filter
+                  # and strip the header at their own trust boundary instead.
+                  - name: envoy.filters.http.header_mutation
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+                      mutations:
+                        request_mutations:
+                          - remove: "x-unified-principal"
                   - name: envoy.filters.http.ext_authz
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-sdk"
+version = "0.0.1"
+description = "Annotate agent actions with business semantics — the label half of the enforcement plane"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Bradley Justice", email = "bradleyjusticeca@gmail.com"},
+]
+keywords = ["ai", "agents", "authorization", "policy", "audit", "enforcement", "sdk"]
+
+# Intentionally tiny. The SDK is an ergonomics layer over the engine's Action
+# model — it must be cheap enough to drop into an application that already has
+# its own opinions about HTTP clients, frameworks, and async.
+dependencies = [
+    "unified-enforce",
+]
+
+[tool.uv.sources]
+unified-enforce = { workspace = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: needs external services (Docker/Envoy); excluded from the default run",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

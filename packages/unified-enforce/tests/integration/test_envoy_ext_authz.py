@@ -155,7 +155,22 @@ _GETADDRINFO = """
 """
 
 
-def _envoy_config(grpc_port: int, upstream_port: int, *, tls: bool = False) -> str:
+def _envoy_config(
+    grpc_port: int, upstream_port: int, *, tls: bool = False, strip_principal: bool = False
+) -> str:
+    # Exactly what the shipped sidecar templates place ahead of ext_authz.
+    mutation = (
+        """
+                  - name: envoy.filters.http.header_mutation
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+                      mutations:
+                        request_mutations:
+                          - remove: "x-unified-principal"
+"""
+        if strip_principal
+        else ""
+    )
     transport_socket = (
         """
       transport_socket:
@@ -195,7 +210,7 @@ static_resources:
                       routes:
                         - match: {{ prefix: "/" }}
                           route: {{ cluster: upstream }}
-                http_filters:
+                http_filters:{mutation}
                   - name: envoy.filters.http.ext_authz
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
@@ -378,6 +393,48 @@ def test_unreadable_body_is_denied_through_envoy(envoy):
     )
     assert status == 403
     assert headers.get("x-unified-source") == "body_unreadable"
+
+
+# --- principal spoofing (spec §4) ---
+
+
+@requires_docker
+def test_route_level_removal_does_not_protect_the_engine(envoy):
+    """Documents the ordering that made the original template's comment wrong.
+
+    `route_config.request_headers_to_remove` runs when the request is
+    FORWARDED — after ext_authz has already decided. So it keeps internal
+    headers off the wire to third parties, but it does NOT stop an agent from
+    naming its own principal. This fixture has no header_mutation filter, and
+    the client-supplied principal reaches the engine and matches a rule.
+    """
+    status, _, _ = _call(
+        f"http://127.0.0.1:{envoy}/v1/users", {"x-unified-principal": "agent:crew-1"}
+    )
+    assert status == 200, "without header_mutation, a client-set principal is honoured"
+
+
+@requires_docker
+def test_header_mutation_stops_an_agent_naming_its_own_principal(
+    tmp_path_factory, engine_server, upstream
+):
+    """The actual protection, as now shipped in the templates: a filter ordered
+    ahead of ext_authz deletes the header before the engine ever sees it, so
+    identity falls back to the sidecar's configured default."""
+    cfg_dir = tmp_path_factory.mktemp("envoy-strip")
+    (cfg_dir / "envoy.yaml").write_text(
+        _envoy_config(engine_server.bound_port, upstream, strip_principal=True)
+    )
+    port, name = _run_envoy(cfg_dir)
+    try:
+        _wait_for(f"http://127.0.0.1:{port}/v1/users")
+        status, headers, _ = _call(
+            f"http://127.0.0.1:{port}/v1/users", {"x-unified-principal": "agent:crew-1"}
+        )
+        assert status == 403, "a spoofed principal must not reach the engine"
+        assert headers.get("x-unified-verdict") == "deny"
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
 
 # --- mTLS between Envoy and the engine (spec §8) ---

@@ -13,6 +13,7 @@ members = [
     "unified-mcp-client",
     "unified-mcp-servers",
     "unified-mcphub",
+    "unified-sdk",
 ]
 
 [manifest.dependency-groups]
@@ -1881,6 +1882,17 @@ requires-dist = [
     { name = "watchfiles", specifier = ">=0.21.0" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "unified-sdk"
+version = "0.0.1"
+source = { editable = "packages/unified-sdk" }
+dependencies = [
+    { name = "unified-enforce" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "unified-enforce", editable = "packages/unified-enforce" }]
 
 [[package]]
 name = "urllib3"

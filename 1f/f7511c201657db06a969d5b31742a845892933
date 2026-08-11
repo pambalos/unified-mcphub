@@ -1,0 +1,21 @@
+technologies.md
+  s_b24ad4c243d6fd::t_dfefd89e2fc2d8 1-92
+product.md
+  s_b24ad4c243d6fd::t_3c0aff9b1c1f79 1-82
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "1ff7511c201657db06a969d5b31742a845892933",
+  "prompts": {},
+  "sessions": {
+    "s_b24ad4c243d6fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "18a252bb-92e9-41e0-8235-2461e06281b3",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

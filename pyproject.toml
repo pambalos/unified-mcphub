@@ -16,6 +16,10 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
     "ruff>=0.3.0",
+    # unified-enforce[otel] equivalents so the telemetry tests run in the
+    # workspace venv (the extra itself stays optional for consumers).
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
 ]
 
 # Shared test/lint config so a workspace-wide run behaves identically to the

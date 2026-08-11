@@ -99,16 +99,23 @@ class AuditChain:
         return entry
 
     def append_decision(self, action: Action, decision: Decision) -> dict[str, Any]:
-        """The standard record: what was attempted, what was decided, and why."""
+        """The standard record: what was attempted, what was decided, and why.
+
+        The digest always covers the full action; the stored copy is shaped by
+        the rule's audit_level (see redaction.py)."""
+        from .redaction import capture_action
+
+        stored, redacted = capture_action(action.model_dump(mode="json"), decision.audit_level)
         return self.append(
             "decision",
             {
                 "action_digest": action.digest(),
-                "action": action.model_dump(mode="json"),
+                "action": stored,
                 "verdict": decision.verdict.value,
                 "rule_id": decision.rule_id,
                 "source": decision.source,
                 "audit_level": decision.audit_level,
+                "redacted": redacted,
                 "reason": decision.reason,
                 "elapsed_us": int(decision.elapsed_ms * 1000),
             },

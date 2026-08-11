@@ -12,8 +12,12 @@ Canonicalize → decide → record:
 from .action import Action, ActionContext, Principal, SCHEMA_VERSION
 from .audit import AuditChain, VerifyResult
 from .canonical import CanonicalizationError, GENESIS_HASH, canonical_bytes, digest, sha256_hex
+from .enforcer import Enforcer
+from .index import AuditIndex
 from .policy import Decision, Match, PolicyDoc, PolicyEngine, PolicyError, Rule, Verdict
+from .replay import Divergence, ReplayReport, replay
 from .signing import SignedAction, Signer
+from .telemetry import Telemetry
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -21,8 +25,14 @@ __all__ = [
     "Action",
     "ActionContext",
     "AuditChain",
+    "AuditIndex",
     "CanonicalizationError",
     "Decision",
+    "Divergence",
+    "Enforcer",
+    "ReplayReport",
+    "Telemetry",
+    "replay",
     "Match",
     "PolicyDoc",
     "PolicyEngine",

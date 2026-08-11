@@ -78,7 +78,7 @@ divergence), serving a SPA from the hub process (couples OSS engine to commercia
 | Control-plane state | Postgres | |
 | API surfaces | FastAPI + uvicorn (HTTP), grpcio (ext_authz only) | Unix socket + TCP, as today |
 | Approvals | one approval contract (control API) | TUI, web queue, Discord/OpenClaw bridge, OS notifications are all thin clients — per M0.8 |
-| Telemetry | OpenTelemetry → embedded Tempo | per M0.5 Observability; `otel.enabled` off by default |
+| Telemetry | OpenTelemetry → embedded Tempo | per M0.5 Observability; `otel.enabled` off by default. Backend is pluggable via standard OTLP endpoint config — Tempo is only the embedded default; Langfuse (self-hosted or cloud, `/api/public/otel`) and any OTLP collector work unchanged |
 | Secrets | OS keyring + `secrets.enc`; OAuth (Auth Code + PKCE) hub-side | as today |
 | CI | GitHub Actions | lint + type + test + clean-clone/no-secrets gate (Public Release milestone) |
 | Containers | Docker images pinned by digest, Sigstore-signed | per M0.5 Security Hardening supply-chain work |

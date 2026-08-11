@@ -24,6 +24,14 @@ dependencies = [
     "python-ulid>=2.0.0",    # action ids
 ]
 
+# Telemetry is opt-in (technologies.md: `otel.enabled` off by default); the core
+# package must stay import-light for the in-process decision path.
+[project.optional-dependencies]
+otel = [
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

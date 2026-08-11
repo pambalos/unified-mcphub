@@ -213,7 +213,8 @@ class Hub:
             params=args,
             context=ActionContext(origin="mcp", trace_id=trace_id, span_id=span_id),
         )
-        decision = self.authz.resolve(tool_uri, args, caller_id)
+        # The same canonical Action is decided on and audited (digest below).
+        decision = self.authz.resolve(tool_uri, args, caller_id, action=action)
 
         authz_decision = decision.effect.value
         prompt_ms: float | None = None

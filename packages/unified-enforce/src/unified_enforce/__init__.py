@@ -15,7 +15,7 @@ from .canonical import CanonicalizationError, GENESIS_HASH, canonical_bytes, dig
 from .enforcer import Enforcer
 from .extauthz import CheckInput, CheckResult, ExtAuthzCore, create_http_service
 from .index import AuditIndex
-from .policy import Decision, Match, PolicyDoc, PolicyEngine, PolicyError, Rule, Verdict
+from .policy import Decision, Floor, Match, PolicyDoc, PolicyEngine, PolicyError, Rule, Verdict
 from .replay import Divergence, ReplayReport, replay
 from .signing import SignedAction, Signer
 from .telemetry import Telemetry
@@ -34,6 +34,7 @@ __all__ = [
     "Divergence",
     "ExtAuthzCore",
     "Enforcer",
+    "Floor",
     "HashChainWriter",
     "ReplayReport",
     "Telemetry",

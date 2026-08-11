@@ -1,12 +1,28 @@
-"""Authorization policy resolver — spec §4, ADR-0006.
+"""Authorization policy resolver — spec §4, ADR-0006; engine-backed per policy.v2.md.
 
-Three states per tool: allow / deny / prompt.
+Since the unified-enforce migration this module no longer owns the decision
+logic: it mechanically translates the hub's workspace rules and
+dangerous-commands floor into an engine `PolicyDoc` (policy v0.2 absorbed the
+hub's constructs verbatim — args operator maps, caller lists, the floor tier)
+and delegates to `PolicyEngine.decide()`. Semantics are unchanged and pinned by
+tests/unit/test_authz_parity.py against a frozen copy of the legacy resolver.
+
+Three states per tool: allow / deny / prompt (engine DEFER ⇄ hub PROMPT).
 
 Precedence (highest to lowest):
   1. explicit exact-tool rule in the active workspace (no wildcard, matches URI)
-  2. dangerous-commands.yaml floor match  -> prompt
+  2. dangerous-commands.yaml floor match  -> prompt   (engine `floors` tier)
   3. workspace wildcard rules (first-match-wins)
   4. implicit default-deny (NOT configurable)
+
+Translation notes (policy.v2.md):
+- `callers` -> principal list `agent:<caller>`; rules with `callers: []` never
+  matched in the hub (dead) and are dropped.
+- rules with unknown args operators never matched in the hub (fail-closed
+  operator) and are dropped; the engine would reject them at load.
+- `**` runs collapse to `*` (hub globs never cross `/`); a bare `*` tool
+  pattern never matched a URI in the hub (dead) and is dropped, because the
+  engine reads bare `*` as match-all.
 
 Tool URIs: mcp://<server>/<tool>, mcp://built-in/<tool>, sdk://..., agent://...
 """
@@ -17,6 +33,12 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+from unified_enforce import Action, Principal
+from unified_enforce.policy import Floor as EngineFloor
+from unified_enforce.policy import Match as EngineMatch
+from unified_enforce.policy import PolicyDoc, PolicyEngine, Verdict
+from unified_enforce.policy import Rule as EngineRule
 
 from .config import DangerousCommands, Rule, Workspace
 
@@ -35,98 +57,96 @@ class Decision:
     source: str = "default"  # exact | danger_floor | wildcard | default
 
 
-def _glob_to_regex(pattern: str) -> re.Pattern[str]:
-    """`*` matches any run of chars except `/` (URIs are server/tool, 2-segment)."""
-    out = []
-    for ch in pattern:
-        out.append("[^/]*" if ch == "*" else re.escape(ch))
-    return re.compile("^" + "".join(out) + "$")
+_VERDICT_TO_EFFECT = {
+    Verdict.ALLOW: Effect.ALLOW,
+    Verdict.DENY: Effect.DENY,
+    Verdict.DEFER: Effect.PROMPT,
+}
+_KNOWN_OPERATORS = {"equals", "starts_with", "matches"}
 
 
-def _uri_matches(pattern: str, uri: str) -> bool:
-    return _glob_to_regex(pattern).fullmatch(uri) is not None
+def _collapse_stars(pattern: str) -> str:
+    """Hub globs never cross `/`; engine `**` does. `**` ≡ `*` under hub rules."""
+    return re.sub(r"\*{2,}", "*", pattern)
 
 
-def _has_wildcard(pattern: str) -> bool:
-    return "*" in pattern
-
-
-def _operator_matches(op: str, values: list[str], actual: str) -> bool:
-    """One operator clause against a stringified arg value (ADR-0006).
-
-    Value list is OR'd. Unknown operator → False (fail closed, never an accidental allow).
-    """
-    if op == "equals":  # case-insensitive (JSON true / "true" both match)
-        return actual.lower() in {v.lower() for v in values}
-    if op == "starts_with":  # case-sensitive prefix
-        return any(actual.startswith(v) for v in values)
-    if op == "matches":  # regex search ((?i) for case-insensitivity)
-        return any(re.search(v, actual) for v in values)
+def _rule_is_dead(rule: Rule) -> bool:
+    """Rules that could never match in the hub (see module docstring)."""
+    if rule.tool == "*":
+        return True  # bare `*` never matches a URI (URIs contain `/`)
+    if rule.callers is not None and not rule.callers:
+        return True  # empty caller list: membership test always False
+    if rule.args_filter:
+        for operators in rule.args_filter.values():
+            if any(op not in _KNOWN_OPERATORS for op in operators):
+                return True  # unknown operator evaluated False in the hub
     return False
 
 
-def _args_filter_matches(
-    args_filter: dict[str, dict[str, list[str]]], args: dict[str, Any]
-) -> bool:
-    """Per-argument operator map (ADR-0006). Arg names AND'd; operators per arg AND'd.
-
-    A missing argument compares as "" (so it won't match a non-empty target).
-    """
-    for arg_name, operators in args_filter.items():
-        actual = str(args.get(arg_name, ""))
-        for op, values in operators.items():
-            if not _operator_matches(op, values, actual):
-                return False
-    return True
-
-
-def _rule_matches(rule: Rule, uri: str, args: dict[str, Any], caller: str) -> bool:
-    if not _uri_matches(rule.tool, uri):
-        return False
-    if rule.callers is not None and caller not in rule.callers:
-        return False
-    if rule.args_filter and not _args_filter_matches(rule.args_filter, args):
-        return False
-    return True
-
-
-def _danger_matches(pattern: str, uri: str, args: dict[str, Any]) -> bool:
-    """Floor patterns are `mcp://srv/tool` or `mcp://srv/tool:<command-prefix>*`.
-
-    Split on the `:` that follows the scheme's `://`, never the scheme colon.
-    """
+def _floor_from_pattern(pattern: str, index: int) -> EngineFloor | None:
+    """Danger patterns: `mcp://srv/tool` or `mcp://srv/tool:<command-prefix>*`,
+    or a scheme-less whole-URI glob. Mirrors the legacy _danger_matches split
+    (partition on the `:` after `://`, never the scheme colon)."""
     scheme, sep_scheme, rest = pattern.partition("://")
     if not sep_scheme:
-        return _uri_matches(pattern, uri)  # not a scheme URI; treat whole pattern as a glob
+        if pattern == "*":
+            return None  # dead in the hub; would be match-all in the engine
+        return EngineFloor(id=f"floor-{index}", match=EngineMatch(tool=_collapse_stars(pattern)))
     uri_tail, sep_arg, arg_part = rest.partition(":")
-    uri_pattern = f"{scheme}://{uri_tail}"
-    if not _uri_matches(uri_pattern, uri):
-        return False
-    if not sep_arg:
-        return True
-    return str(args.get("command", "")).startswith(arg_part.rstrip("*"))
+    match_kwargs: dict[str, Any] = {"tool": _collapse_stars(f"{scheme}://{uri_tail}")}
+    if sep_arg:
+        match_kwargs["args"] = {"command": {"starts_with": [arg_part.rstrip("*")]}}
+    return EngineFloor(id=f"floor-{index}", match=EngineMatch(**match_kwargs))
 
 
 class AuthzResolver:
     def __init__(self, workspace: Workspace, dangerous: DangerousCommands) -> None:
-        self._rules = workspace.authz.rules
-        self._danger = dangerous.require_approval
+        rules: list[EngineRule] = []
+        names: dict[str, str] = {}  # engine rule id -> hub tool pattern (audit `authz_rule`)
+        for i, rule in enumerate(workspace.authz.rules):
+            if _rule_is_dead(rule):
+                continue
+            rid = f"rule-{i}"
+            names[rid] = rule.tool
+            principal: str | list[str] = "*"
+            if rule.callers is not None:
+                principal = [f"agent:{c}" for c in rule.callers]
+            rules.append(
+                EngineRule(
+                    id=rid,
+                    match=EngineMatch(
+                        principal=principal,
+                        tool=_collapse_stars(rule.tool),
+                        args=rule.args_filter or None,
+                    ),
+                    effect="defer" if rule.effect == "prompt" else rule.effect,
+                    audit_level=rule.audit_level,
+                )
+            )
+        floors: list[EngineFloor] = []
+        for i, pattern in enumerate(dangerous.require_approval):
+            floor = _floor_from_pattern(pattern, i)
+            if floor is not None:
+                names[floor.id] = pattern
+                floors.append(floor)
+        self._engine = PolicyEngine(PolicyDoc(version=1, rules=rules, floors=floors))
+        self._names = names
 
-    def resolve(self, tool_uri: str, args: dict[str, Any], caller: str) -> Decision:
-        # 1. explicit exact-tool rule (no wildcard) — wins, overrides the floor.
-        for rule in self._rules:
-            if not _has_wildcard(rule.tool) and _rule_matches(rule, tool_uri, args, caller):
-                return Decision(Effect(rule.effect), rule.tool, rule.audit_level, "exact")
-
-        # 2. dangerous-commands floor -> prompt.
-        for pattern in self._danger:
-            if _danger_matches(pattern, tool_uri, args):
-                return Decision(Effect.PROMPT, pattern, "standard", "danger_floor")
-
-        # 3. workspace wildcard rules (first match wins).
-        for rule in self._rules:
-            if _has_wildcard(rule.tool) and _rule_matches(rule, tool_uri, args, caller):
-                return Decision(Effect(rule.effect), rule.tool, rule.audit_level, "wildcard")
-
-        # 4. implicit default-deny.
-        return Decision(Effect.DENY, None, "standard", "default")
+    def resolve(
+        self, tool_uri: str, args: dict[str, Any], caller: str, action: Action | None = None
+    ) -> Decision:
+        if action is None:
+            action = Action.build(
+                principal=Principal(id=f"agent:{caller}"),
+                tool=tool_uri,
+                verb="call",
+                resource="*",
+                params=args,
+            )
+        d = self._engine.decide(action)
+        return Decision(
+            effect=_VERDICT_TO_EFFECT[d.verdict],
+            rule=self._names.get(d.rule_id) if d.rule_id else None,
+            audit_level=d.audit_level,
+            source="danger_floor" if d.source == "floor" else d.source,
+        )

@@ -1,0 +1,75 @@
+packages/unified-mcphub/tests/unit/test_approval.py
+  s_b24ad4c243d6fd::t_ee0bc5779efff1 80-86,88,91
+  s_b24ad4c243d6fd::t_4af74c0c168522 163-164,167-186
+specs/enforce/approval.v1.md
+  s_b24ad4c243d6fd::t_98eee74dd05d13 1-105
+packages/unified-sdk/tests/unit/test_sdk_client.py
+  s_b24ad4c243d6fd::t_e7a664f04d7eb9 310-311
+packages/unified-enforce/src/unified_enforce/__init__.py
+  s_b24ad4c243d6fd::t_f35203fd463863 13-21
+  s_b24ad4c243d6fd::t_1ccb4a20270cc1 47-52,56
+packages/unified-mcphub/src/unified_mcphub/hub.py
+  s_b24ad4c243d6fd::t_13a9b8ccd658db 112-113
+  s_b24ad4c243d6fd::t_9a076e0a1395c0 81-91,93,97-106
+  s_b24ad4c243d6fd::t_958d81c4e707ba 25
+  s_b24ad4c243d6fd::t_e4d85d3979abd4 37
+  s_b24ad4c243d6fd::t_ffcdf2a4bdd722 92,94-96
+packages/unified-enforce/tests/unit/test_enforce_approval.py
+  s_b24ad4c243d6fd::t_e87f61e507ab15 1-264
+packages/unified-mcphub/src/unified_mcphub/authz.py
+  s_b24ad4c243d6fd::t_4fee91c655a46e 37
+  s_b24ad4c243d6fd::t_c28bba1d37d4ef 139-143,156
+  s_b24ad4c243d6fd::t_6b668842e6b4f6 103-108
+specs/enforce/e4.v1.md
+  s_b24ad4c243d6fd::t_baa254e3214e66 139-146
+specs/enforce/observability.v1.md
+  s_b24ad4c243d6fd::t_2ebea065ea7a95 37-63,68
+specs/enforce/e3.v1.md
+  s_b24ad4c243d6fd::t_d8b2985ce8a17e 253-257
+packages/unified-sdk/src/unified_sdk/client.py
+  s_b24ad4c243d6fd::t_b17727f870c9ce 40
+  s_b24ad4c243d6fd::t_697f0b0c43079a 172
+  s_b24ad4c243d6fd::t_7e65d39ae2afd1 310
+  s_b24ad4c243d6fd::t_404af53a091770 249-274
+  s_b24ad4c243d6fd::t_8abf8542bcb106 186
+  s_b24ad4c243d6fd::t_b0d6f81d957f52 222-232,234
+  s_b24ad4c243d6fd::t_8b2c2056b5d56a 334,345-351,357-360,363-365,372-373
+packages/unified-enforce/src/unified_enforce/enforcer.py
+  s_b24ad4c243d6fd::t_4ffed26eb6037e 8-12,18,20,30,35,59-105
+packages/unified-mcphub/src/unified_mcphub/approval.py
+  s_b24ad4c243d6fd::t_8f8759b1fad248 7-19,32-42
+  s_b24ad4c243d6fd::t_a88d6d24b10a8b 206-246,254-256,260-267,269-288,298,300-310,312-317,321-327,329-335
+packages/unified-enforce/tests/unit/test_enforce_telemetry.py
+  s_b24ad4c243d6fd::t_41860cf3f1a7dd 95-114
+packages/unified-mcphub/src/unified_mcphub/config.py
+  s_b24ad4c243d6fd::t_fb8ca00b393bfe 108-111,116,118-119
+  s_b24ad4c243d6fd::t_4b266aced560dc 98-107,112-115,117,120-123
+  s_b24ad4c243d6fd::t_89dd3cc4349ee0 128
+packages/unified-enforce/src/unified_enforce/audit.py
+  s_b24ad4c243d6fd::t_f06793c4df9357 255-266
+  s_b24ad4c243d6fd::t_fe942818e8abb7 25
+packages/unified-mcphub/tests/unit/test_hub_telemetry.py
+  s_b24ad4c243d6fd::t_4ac52fc911abae 110-111,113-120
+  s_b24ad4c243d6fd::t_f8b589eb0cdd6b 1-109,112
+packages/unified-enforce/src/unified_enforce/telemetry.py
+  s_b24ad4c243d6fd::t_1d0ce4fffc7f0b 137-145
+packages/unified-enforce/src/unified_enforce/approval.py
+  s_b24ad4c243d6fd::t_5dac4f9a7746b8 1-260,265-276,278-279
+  s_b24ad4c243d6fd::t_9ff56d770d1218 261-264,277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "24d76197949236545cd11021700c7536d72b79f6",
+  "prompts": {},
+  "sessions": {
+    "s_b24ad4c243d6fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "18a252bb-92e9-41e0-8235-2461e06281b3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

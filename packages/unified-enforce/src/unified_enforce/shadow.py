@@ -30,6 +30,7 @@ the detail in the customer's own chain.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -77,7 +78,16 @@ class ShadowEvaluator:
     a proposal to cost latency.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_divergence: Callable[[Divergence], None] | None = None) -> None:
+        #: Where a divergence goes the moment it is found. Without one, findings
+        #: accumulate in memory and die with the process -- which is how a
+        #: feature ends up built, correct, and useless to the person it was
+        #: built for.
+        #:
+        #: Called inline but guarded: a shipper that raises must not turn a
+        #: proposal into a failed enforcement, which is the invariant this whole
+        #: module rests on.
+        self._on_divergence = on_divergence
         self._engine: PolicyEngine | None = None
         self._version: int | None = None
         self.divergences: list[Divergence] = []
@@ -158,6 +168,11 @@ class ShadowEvaluator:
             shadow_version=self._version,
         )
         self.divergences.append(divergence)
+        if self._on_divergence is not None:
+            try:
+                self._on_divergence(divergence)
+            except Exception:
+                log.exception("could not report a divergence; enforcement is unaffected")
         return divergence
 
     def summary(self) -> dict[str, Any]:

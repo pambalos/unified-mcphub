@@ -213,6 +213,21 @@ class EvidenceShipper:
 
     # --- the decision path's only entry point --------------------------------
 
+    def submit(self, record: dict[str, Any]) -> None:
+        """Queue an already-shaped record. Cannot raise.
+
+        The generic form. `record()` builds a decision summary and calls this;
+        shadow divergences arrive here directly, through a shipper of their own
+        pointed at a different endpoint. Two shippers rather than one mixed
+        spool: the receiver validates each kind separately, and a batch
+        containing both shapes would be refused wholesale — one divergence
+        would then block every decision behind it.
+        """
+        try:
+            self.spool.add(record)
+        except Exception:
+            log.exception("could not queue evidence; the decision is unaffected")
+
     def record(
         self, action: Action, decision: Decision, *, entry: dict[str, Any] | None = None
     ) -> None:
@@ -225,9 +240,9 @@ class EvidenceShipper:
         outage.
         """
         try:
-            self.spool.add(summarise(action, decision, entry=entry))
+            self.submit(summarise(action, decision, entry=entry))
         except Exception:
-            log.exception("could not queue evidence; the decision is unaffected")
+            log.exception("could not summarise evidence; the decision is unaffected")
 
     # --- shipping -------------------------------------------------------------
 
@@ -355,10 +370,15 @@ class HttpSink:
         *,
         timeout_seconds: float = 10.0,
         path: str = "/api/v1/evidence",
+        field: str = "decisions",
     ) -> None:
         self._url = base_url.rstrip("/") + path
         self._credential = credential
         self._timeout = timeout_seconds
+        #: The key the receiver expects. Divergences go to a different endpoint
+        #: under a different name; everything else about shipping them is the
+        #: same, which is why this is a parameter and not a second class.
+        self._field = field
 
     def send(self, batch: list[dict[str, Any]]) -> None:
         import json as _json
@@ -367,7 +387,7 @@ class HttpSink:
 
         request = urllib.request.Request(
             self._url,
-            data=_json.dumps({"decisions": batch}).encode(),
+            data=_json.dumps({self._field: batch}).encode(),
             headers={
                 "content-type": "application/json",
                 "authorization": f"Bearer {self._credential}",

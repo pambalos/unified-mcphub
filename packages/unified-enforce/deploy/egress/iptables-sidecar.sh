@@ -38,6 +38,16 @@ iptables -C OUTPUT -j UNIFIED_EGRESS 2>/dev/null \
   || iptables -A OUTPUT -j UNIFIED_EGRESS
 
 iptables -A UNIFIED_EGRESS -o lo -j RETURN
+# The redirected traffic has to survive this chain, and `-o lo` does not catch
+# it: REDIRECT rewrites the destination to 127.0.0.1, but the packet arrives
+# here still carrying its ORIGINAL output interface, so the rule above matches
+# nothing and the catch-all DROP at the bottom eats every redirected
+# connection. The agent could then reach neither the upstream nor its own
+# sidecar — fail-closed, but completely non-functional. Match on the
+# destination instead, which is what the REDIRECT actually changed. This grants
+# nothing new: loopback-destined traffic cannot leave the host, which is
+# exactly what `-o lo` above already intends to allow.
+iptables -A UNIFIED_EGRESS -d 127.0.0.0/8 -j RETURN
 iptables -A UNIFIED_EGRESS -m owner --uid-owner "$PROXY_UID" -j RETURN
 if [ -n "$DNS_SERVER" ]; then
   iptables -A UNIFIED_EGRESS -m owner --uid-owner "$AGENT_UID" \

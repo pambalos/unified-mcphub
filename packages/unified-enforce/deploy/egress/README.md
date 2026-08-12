@@ -32,6 +32,36 @@ The rule in every deployment mode is the same:
 Step 1 is the one people skip. It is the only step that actually tests the
 no-bypass property; the rest test enforcement.
 
+## What is automated
+
+`iptables-sidecar.sh` is **executed** by
+`tests/integration/test_egress_no_bypass.py`, which builds a two-container lab
+(an agent host with the real script installed, and an "upstream" standing in
+for a third-party tool) and asserts the guarantee end to end: the agent's TCP
+lands on the sidecar instead of the upstream, QUIC and stray UDP are blocked,
+DNS still resolves, the proxy uid is exempt, and a dead sidecar fails closed
+rather than falling back to a direct connection.
+
+The suite opens with a **negative control** — before the lock is installed the
+agent *must* reach the upstream. Without it, a lab with no route to the
+upstream would pass every subsequent assertion for the wrong reason.
+
+That test immediately found a real defect in this script: `REDIRECT` rewrites
+the destination to 127.0.0.1, but the packet reaches the filter chain still
+carrying its original output interface, so the `-o lo` RETURN matched nothing
+and the catch-all DROP ate every redirected connection. Fail-closed, but the
+agent could reach neither the upstream nor its own sidecar. Fixed by matching
+on the loopback *destination*; pinned by a test that asserts the DROP counter
+does not move.
+
+The other two artifacts are **structurally** checked only
+(`test_egress_manifests.py`): the NetworkPolicy really declares `Egress` in
+`policyTypes` (omitting it silently restricts nothing) and permits DNS, and the
+Terraform passes `terraform validate`. Neither is proof of enforcement — a
+NetworkPolicy is inert without a CNI that enforces it, and `kubectl apply`
+against a non-enforcing CNI accepts it and ignores it. Real proof needs kind +
+Calico and a live AWS account, and belongs with design-partner deployment (G2).
+
 ## Air-gapped note
 
 In zero-egress deployments the "allow sidecar" rule is the only egress rule at

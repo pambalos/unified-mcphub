@@ -25,6 +25,11 @@ dependencies = [
 # Adapters import their framework lazily, so the base install stays tiny and
 # `unified_sdk.adapters` is safe to import with none of these present.
 langchain = ["langchain-core>=0.3.0"]
+llamaindex = ["llama-index-core>=0.11.0"]
+crewai = ["crewai>=0.80.0"]
+# Provider normalizers (openai / openrouter / anthropic / bedrock) need no
+# dependency at all: they read the wire shapes structurally, so the provider
+# SDK stays the application's choice.
 
 [tool.uv.sources]
 unified-enforce = { workspace = true }

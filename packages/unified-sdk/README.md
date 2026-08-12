@@ -96,6 +96,54 @@ It is recorded as a **claim** and never trusted: a forged value cannot change a
 verdict, and the sidecar strips the header before the request reaches the
 upstream. Omitting it costs nothing but the link.
 
+## Framework adapters
+
+Already using a framework? Hand it enforced tools instead of annotating by
+hand. Every adapter returns *replacements*, so the guarded callable is the only
+one the agent can reach.
+
+```python
+from unified_sdk.adapters.langchain import guard_tools, langchain_guard
+
+agent = create_agent(llm, tools=guard_tools(my_tools, langchain_guard(ua)))
+```
+
+`unified_sdk.adapters.{langchain,llamaindex,crewai,mcp,toolloop}` — each imports
+its framework lazily, so installing none of them is fine. Extras:
+`unified-sdk[langchain]`, `[llamaindex]`, `[crewai]`.
+
+Tools are identified framework-agnostically (`tool://send_email`, with the
+framework in `context.origin`), so one policy covers every framework and a team
+migrating between them does not invalidate your rules. MCP keeps its own
+namespace (`mcp://server/tool`) because there the server really is part of the
+tool's identity.
+
+## No framework? Providers are covered too
+
+If you dispatch tool calls yourself against OpenAI, OpenRouter, Bedrock, or
+Anthropic, there is nothing to adapt — but the four spell a tool call
+differently, so `adapters.providers` normalizes them:
+
+```python
+from unified_sdk.adapters.providers import tool_calls, denial_message
+from unified_sdk.adapters.toolloop import Toolbox, toolloop_guard
+
+box = Toolbox(toolloop_guard(ua))
+box.register("issue_refund", issue_refund)
+
+for call in tool_calls(response, provider="openai"):
+    try:
+        results.append(box.dispatch(call.name, call.args))
+    except EnforcementError as exc:
+        results.append(denial_message(exc, call, provider="openai"))
+```
+
+Worth knowing: **OpenAI ships tool arguments as a JSON string** while the
+others ship a dict. A loop written against Anthropic and pointed at OpenAI
+hands policy no params at all, and every value-based rule silently stops
+matching. That is the trap this module exists to remove. No provider SDK is
+required — the payloads are read structurally.
+
 ## Install
 
 ```bash

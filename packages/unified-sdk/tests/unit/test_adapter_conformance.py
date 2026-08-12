@@ -16,6 +16,9 @@ policy file, every adapter, identical verdicts.
 from __future__ import annotations
 
 import json
+import sys
+import types
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -165,20 +168,118 @@ async def _langchain_invoke_async(client, tool, args, on_call):
     return await guard_tool(original, langchain_guard(client)).ainvoke(args)
 
 
-try:  # the langchain adapter is optional; its driver skips without the extra
-    import langchain_core  # noqa: F401
+def _installed(module: str) -> bool:
+    try:
+        __import__(module)
+    except ImportError:  # pragma: no cover - depends on which extras are present
+        return False
+    return True
 
-    _HAS_LANGCHAIN = True
-except ImportError:  # pragma: no cover
-    _HAS_LANGCHAIN = False
 
-needs_langchain = pytest.mark.skipif(not _HAS_LANGCHAIN, reason="langchain-core not installed")
+needs_langchain = pytest.mark.skipif(
+    not _installed("langchain_core"), reason="langchain-core not installed"
+)
+needs_llamaindex = pytest.mark.skipif(
+    not _installed("llama_index.core"), reason="llama-index-core not installed"
+)
+# crewai depends on lancedb, which publishes no wheel for macOS x86_64, so the
+# real package cannot be installed on this machine. `_crewai_invoke` runs
+# against a stub mirroring BaseTool's contract instead; see adapters/crewai.py.
+needs_crewai = pytest.mark.skipif(not _installed("crewai"), reason="crewai not installed")
+
+
+@contextmanager
+def _fake_crewai():
+    """A stand-in for `crewai.tools`, mirroring the contract we depend on.
+
+    `crewai` cannot be installed on this machine — it requires `lancedb`, which
+    publishes no wheel for macOS x86_64 — so the real runtime is unverified
+    here. What this *does* verify is the part we own: that `guard_tool` builds
+    a working Pydantic subclass, keeps the name/description/schema, and blocks
+    before `_run` delegates. Run the suite on Linux or arm64 to close the rest.
+    """
+    from pydantic import BaseModel
+
+    crewai = types.ModuleType("crewai")
+    tools = types.ModuleType("crewai.tools")
+
+    class BaseTool(BaseModel):
+        name: str = ""
+        description: str = ""
+        args_schema: Any = None
+
+        def _run(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - overridden
+            raise NotImplementedError
+
+    tools.BaseTool = BaseTool
+    crewai.tools = tools
+    saved = {k: sys.modules.get(k) for k in ("crewai", "crewai.tools")}
+    sys.modules["crewai"], sys.modules["crewai.tools"] = crewai, tools
+    try:
+        yield BaseTool
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                sys.modules.pop(key, None)
+            else:  # pragma: no cover - only if crewai becomes installable
+                sys.modules[key] = value
+
+
+def _crewai_invoke(client, tool, args, on_call):
+    with _fake_crewai() as BaseTool:
+        from unified_sdk.adapters.crewai import crewai_guard, guard_tool
+
+        class Original(BaseTool):
+            name: str = tool
+            description: str = tool
+            args_schema: Any = _lc_schema(tool, args)
+
+            def _run(self, **kwargs: Any) -> Any:
+                on_call(kwargs)
+                return "ok"
+
+        guarded = guard_tool(Original(), crewai_guard(client))
+        assert guarded.name == tool, "the replacement must keep the tool's identity"
+        return guarded._run(**args)
+
+
+def _llamaindex_invoke(client, tool, args, on_call):
+    from llama_index.core.tools import FunctionTool
+
+    from unified_sdk.adapters.llamaindex import guard_tool, llamaindex_guard
+
+    def fn(**kwargs):
+        on_call(kwargs)
+        return "ok"
+
+    original = FunctionTool.from_defaults(
+        fn=fn, name=tool, description=tool, fn_schema=_lc_schema(tool, args)
+    )
+    return str(guard_tool(original, llamaindex_guard(client)).call(**args))
+
+
+async def _llamaindex_invoke_async(client, tool, args, on_call):
+    from llama_index.core.tools import FunctionTool
+
+    from unified_sdk.adapters.llamaindex import guard_tool, llamaindex_guard
+
+    async def afn(**kwargs):
+        on_call(kwargs)
+        return "ok"
+
+    original = FunctionTool.from_defaults(
+        async_fn=afn, name=tool, description=tool, fn_schema=_lc_schema(tool, args)
+    )
+    return str(await guard_tool(original, llamaindex_guard(client)).acall(**args))
 
 
 SYNC_DRIVERS = [
     Driver("guard.wrap", _guard_wrap_invoke),
     Driver("toolloop", _toolloop_invoke),
     pytest.param(Driver("langchain", _langchain_invoke), marks=needs_langchain, id="langchain"),
+    pytest.param(Driver("llamaindex", _llamaindex_invoke), marks=needs_llamaindex, id="llamaindex"),
+    # Structural only — see _fake_crewai.
+    Driver("crewai(stub)", _crewai_invoke),
 ]
 
 ASYNC_DRIVERS = [
@@ -189,6 +290,11 @@ ASYNC_DRIVERS = [
         Driver("langchain", _langchain_invoke_async, is_async=True),
         marks=needs_langchain,
         id="langchain",
+    ),
+    pytest.param(
+        Driver("llamaindex", _llamaindex_invoke_async, is_async=True),
+        marks=needs_llamaindex,
+        id="llamaindex",
     ),
 ]
 

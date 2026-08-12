@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import socket
 import subprocess
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -156,9 +158,44 @@ def test_a_real_collector_accepts_our_spans(collector):
 # --- Tier 3: a real self-hosted Langfuse ---
 
 
-def _compose(*args: str, timeout: int = 900) -> subprocess.CompletedProcess:
+@dataclass(frozen=True)
+class LangfuseVersion:
+    """What differs between Langfuse majors, from our side of the wire.
+
+    Self-hosters lag, so a partner is as likely to be on v3 as v4. The read API
+    is *inverted* between them — each version 404s or blanks the other's
+    endpoint — which is precisely the kind of thing a single-version suite
+    would miss until someone reported that observability "doesn't work".
+    """
+
+    tag: str
+    observations_path: str
+    #: v4 requires an explicit time window and field groups; v3 requires neither
+    needs_query_params: bool
+
+    @property
+    def project(self) -> str:
+        return f"{COMPOSE_PROJECT}-v{self.tag}"
+
+
+# v2 is absent on purpose: it has no OTLP endpoint at all (see the support-floor
+# test below), so there is nothing for this integration to talk to.
+LANGFUSE_VERSIONS = [
+    LangfuseVersion(
+        tag="3", observations_path="/api/public/observations", needs_query_params=False
+    ),
+    LangfuseVersion(
+        tag="4", observations_path="/api/public/v2/observations", needs_query_params=True
+    ),
+]
+
+
+def _compose(
+    version: LangfuseVersion, *args: str, timeout: int = 900
+) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["docker", "compose", "-p", COMPOSE_PROJECT, "-f", str(HERE / "langfuse-compose.yaml"), *args],
+        ["docker", "compose", "-p", version.project,
+         "-f", str(HERE / "langfuse-compose.yaml"), *args],
         capture_output=True, text=True, timeout=timeout,
     )  # fmt: skip
 
@@ -172,56 +209,92 @@ def _langfuse_get(port: int, path: str) -> dict:
         return json.loads(response.read())
 
 
-def _observations(port: int) -> list[dict]:
-    """Read back what Langfuse ingested.
+def _observations(port: int, version: LangfuseVersion) -> list[dict]:
+    """Read back what Langfuse ingested, on whichever major is running.
 
-    Must be the **v2** endpoint. Langfuse v4 runs in `events_only` mode, where
-    `/api/public/traces` and `/api/public/observations` return a deprecation
-    notice with no data instead of an error — a query against them looks like
-    "nothing was ingested", which is how the first version of this test failed
-    while the export was working perfectly.
+    Three details, each of which produced a wrong conclusion before it was
+    understood — and all three are silent, which is what makes them dangerous:
 
-    Timestamps are formatted with a literal `Z`: an offset written `+00:00`
-    reaches the server as a space, because `+` means space in a query string.
+    1. **The read endpoint is inverted between majors.** v4 disables the v1
+       paths (200 with a deprecation notice and no data — indistinguishable
+       from "nothing was ingested"), and v3 404s the v2 path. The first version
+       of this test queried v1 against v4 and reported an ingestion failure
+       while the export was working perfectly.
+    2. **`fields` selects exclusive groups, and an unrecognised value falls
+       back to the default rather than erroring.** The default omits metadata,
+       so `fields=all` — not a real group — made the second version of this
+       test conclude that v4 drops custom attributes. It does not.
+    3. **Timestamps need a literal `Z`.** An offset written `+00:00` arrives as
+       a space, because `+` means space in a query string.
     """
-    now = datetime.now(UTC)
-    window = timedelta(hours=1)
-    fmt = "%Y-%m-%dT%H:%M:%SZ"
-    query = (
-        f"?fromStartTime={(now - window).strftime(fmt)}"
-        f"&toStartTime={(now + window).strftime(fmt)}&limit=50"
-    )
-    return _langfuse_get(port, "/api/public/v2/observations" + query).get("data", [])
+    query = ""
+    if version.needs_query_params:
+        now = datetime.now(UTC)
+        window = timedelta(hours=1)
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        query = (
+            f"?fromStartTime={(now - window).strftime(fmt)}"
+            f"&toStartTime={(now + window).strftime(fmt)}&limit=50&fields=basic,metadata"
+        )
+    else:
+        query = "?limit=50"
+    return _langfuse_get(port, version.observations_path + query).get("data", [])
 
 
-def _find(port: int, name: str):
+def _find(port: int, version: LangfuseVersion, name: str):
     """The most recent observation with this name.
 
     Newest-first because a name is not unique: each test emits its own span,
     and picking an arbitrary match would let one test assert against another's
     observation.
     """
-    matches = [o for o in _observations(port) if o.get("name") == name]
+    matches = [o for o in _observations(port, version) if o.get("name") == name]
     return max(matches, key=lambda o: o["startTime"]) if matches else None
 
 
-@pytest.fixture(scope="module")
-def langfuse():
+def _attributes(observation: dict) -> dict[str, str]:
+    """The span's attributes, however this major happens to shape them.
+
+    v3 nests them (`metadata.attributes.<name>`); v4 flattens them into dotted
+    keys on metadata itself (`metadata["attributes.<name>"]`). Same data, and
+    callers should not have to care which is running.
+    """
+    metadata = observation.get("metadata") or {}
+    nested = metadata.get("attributes")
+    if isinstance(nested, dict):
+        return dict(nested)
+    return {
+        key.removeprefix("attributes."): value
+        for key, value in metadata.items()
+        if key.startswith("attributes.")
+    }
+
+
+@pytest.fixture(scope="module", params=LANGFUSE_VERSIONS, ids=lambda v: f"langfuse-v{v.tag}")
+def langfuse(request):
+    """A running Langfuse of each supported major.
+
+    Module-scoped and parametrized: the stack costs minutes to start, so every
+    test for a version runs against one instance rather than one each.
+    """
+    version: LangfuseVersion = request.param
     port = _free_port()
-    env_line = f"LANGFUSE_PORT={port}"
-    (HERE / ".env").write_text(env_line + "\n")
-    up = _compose("up", "-d", "--wait")
+    (HERE / f".env.v{version.tag}").write_text(
+        f"LANGFUSE_PORT={port}\nLANGFUSE_VERSION={version.tag}\n"
+    )
+    env_file = ["--env-file", str(HERE / f".env.v{version.tag}")]
+    up = _compose(version, *env_file, "up", "-d", "--wait")
     if up.returncode != 0:
-        _compose("down", "-v")
-        (HERE / ".env").unlink(missing_ok=True)
-        pytest.fail(f"langfuse stack failed to start:\n{up.stderr[-3000:]}")
+        _compose(version, *env_file, "down", "-v")
+        (HERE / f".env.v{version.tag}").unlink(missing_ok=True)
+        pytest.fail(f"langfuse v{version.tag} failed to start:\n{up.stderr[-3000:]}")
     try:
         # Health first, then the seeded key: headless init runs after the web
         # process is already answering, so a 200 on /health is not enough.
         _wait_until(
             lambda: _langfuse_get(port, "/api/public/health") is not None,
             300,
-            "langfuse never became healthy",
+            f"langfuse v{version.tag} never became healthy",
             interval=3,
         )
         _wait_until(
@@ -230,70 +303,155 @@ def langfuse():
             "the seeded API key never became valid (headless init did not complete)",
             interval=3,
         )
-        yield port
+        yield port, version
     finally:
-        logs = _compose("logs", "--tail", "40", "langfuse-web", timeout=120)
+        logs = _compose(version, *env_file, "logs", "--tail", "40", "langfuse-web", timeout=120)
         print(logs.stdout[-3000:])
-        _compose("down", "-v", timeout=300)
-        (HERE / ".env").unlink(missing_ok=True)
+        _compose(version, *env_file, "down", "-v", timeout=300)
+        (HERE / f".env.v{version.tag}").unlink(missing_ok=True)
 
 
 @requires_docker
 def test_langfuse_ingests_a_deferred_decision_as_a_warning(langfuse):
     """The claim in technologies.md, actually exercised: point the engine at a
     real Langfuse and have the decision arrive, readable, through its API."""
+    port, version = langfuse
     emit(
-        Telemetry.for_langfuse(f"http://127.0.0.1:{langfuse}", PUBLIC_KEY, SECRET_KEY),
+        Telemetry.for_langfuse(f"http://127.0.0.1:{port}", PUBLIC_KEY, SECRET_KEY),
         "mcp://bank/payout",
         verb="call",
     )
     name = "enforce.decide mcp://bank/payout"
     observation = _wait_until(
-        lambda: _find(langfuse, name), 180, "the decision never appeared in Langfuse", interval=3
+        lambda: _find(port, version, name), 180, "the decision never appeared", interval=3
     )
 
-    assert observation["type"] == "SPAN"
     # Only a real Langfuse can confirm the attribute mapping: a deferred action
     # has to read as a warning rather than routine traffic.
     assert observation["level"] == "WARNING"
-    # ...and the verdict itself has to be legible. Langfuse v4 projects
-    # observations to a fixed field set and returns no custom attributes, so
-    # status_message is the channel that survives (see telemetry.py).
+    # ...and the verdict has to be legible at a glance, without asking for
+    # metadata (see telemetry.py).
     assert observation["statusMessage"] == "defer (payouts-need-a-human)"
+
+
+@requires_docker
+def test_every_decision_attribute_is_retrievable_from_langfuse(langfuse):
+    """The whole enforcement record survives into Langfuse and can be queried.
+
+    This is the test that answers "is any of this actually observable?" — an
+    operator must be able to reconstruct who did what and which rule fired,
+    not merely see that something happened.
+    """
+    port, version = langfuse
+    emit(
+        Telemetry.for_langfuse(f"http://127.0.0.1:{port}", PUBLIC_KEY, SECRET_KEY),
+        "mcp://bank/payout",
+        verb="call",
+    )
+    name = "enforce.decide mcp://bank/payout"
+    observation = _wait_until(lambda: _find(port, version, name), 180, "never appeared", interval=3)
+    attributes = _attributes(observation)
+    assert attributes["unified.verdict"] == "defer"
+    assert attributes["unified.rule_id"] == "payouts-need-a-human"
+    assert attributes["unified.principal.id"] == "agent:crew-1"
+    assert attributes["unified.tool"] == "mcp://bank/payout"
+    assert attributes["unified.decision.source"] == "exact"
+    assert attributes["unified.policy.audit_level"] == "standard"
+    # The digest is the join back to the audit chain entry for this action.
+    assert len(attributes["unified.action.digest"]) == 64
 
 
 @requires_docker
 def test_an_allow_is_not_flagged_as_a_warning(langfuse):
     """The counterpart: routine traffic must not drown the signal."""
+    port, version = langfuse
     emit(
-        Telemetry.for_langfuse(f"http://127.0.0.1:{langfuse}", PUBLIC_KEY, SECRET_KEY),
+        Telemetry.for_langfuse(f"http://127.0.0.1:{port}", PUBLIC_KEY, SECRET_KEY),
         "mcp://github/list_prs",
     )
     name = "enforce.decide mcp://github/list_prs"
     observation = _wait_until(
-        lambda: _find(langfuse, name), 180, "the allow never appeared", interval=3
+        lambda: _find(port, version, name), 180, "the allow never appeared", interval=3
     )
     assert observation["level"] == "DEFAULT"
     assert observation["statusMessage"] == "allow (reads-ok)"
 
 
 @requires_docker
-def test_the_v1_endpoints_are_gone_so_the_test_cannot_silently_pass(langfuse):
+def test_each_major_refuses_the_other_majors_read_path(langfuse):
     """Guards the mistake this suite already made once.
 
-    In v4 `events_only` mode the v1 read endpoints answer 200 with a
-    deprecation notice and no data. A test querying them sees an empty list and
-    reports "nothing ingested" while ingestion is in fact working. Pinning the
-    behaviour means a future move back to v1 paths fails loudly here rather
-    than turning the whole suite into a no-op.
+    The read API is inverted between majors, and each failure is *silent* in
+    its own way: v4 answers the v1 path with 200, a deprecation notice and no
+    data — indistinguishable from "nothing was ingested" — while v3 simply 404s
+    the v2 path. Pinning both directions means a future single-endpoint
+    simplification fails loudly here instead of quietly asserting nothing.
     """
+    port, version = langfuse
+    wrong_path = (
+        "/api/public/observations?limit=10"
+        if version.tag == "4"
+        else "/api/public/v2/observations?limit=10"
+    )
     try:
-        body = _langfuse_get(langfuse, "/api/public/observations?limit=10")
+        body = _langfuse_get(port, wrong_path)
     except urllib.error.HTTPError as exc:
-        body = json.loads(exc.read())
+        body = {"status": exc.code}
 
-    # Whether it answers 200-with-a-notice or an error status, the property
-    # that matters is the same: no usable data comes back, so a suite pointed
-    # here would be asserting against nothing.
-    assert not body.get("data"), "v1 returned data — the read path may have changed back"
-    assert "not available" in body.get("message", "").lower()
+    assert not body.get("data"), (
+        f"v{version.tag} returned data from {wrong_path} — the read path may have changed, "
+        "and this suite's endpoint selection needs revisiting"
+    )
+
+
+@requires_docker
+def test_langfuse_v2_has_no_otlp_endpoint_at_all():
+    """The support floor, verified rather than assumed.
+
+    v2 predates OTel ingestion entirely: `/api/public/otel/v1/traces` is a
+    **404, not a 405**, so there is nothing for this integration to talk to and
+    no configuration that would make it work. Worth pinning, because "Langfuse
+    is supported" otherwise reads as covering every version a self-hoster might
+    still be running.
+
+    A route that exists but rejects GET answers 405; one that does not exist
+    answers 404. That distinction is the whole assertion, and it needs a real
+    database underneath — v2 runs migrations before it serves, so a stub
+    connection string never gets far enough to answer anything.
+    """
+    port = _free_port()
+    project = f"{COMPOSE_PROJECT}-v2"
+    compose = ["docker", "compose", "-p", project,
+               "-f", str(HERE / "langfuse-v2-compose.yaml")]  # fmt: skip
+    env = {**os.environ, "LANGFUSE_V2_PORT": str(port)}
+    up = subprocess.run([*compose, "up", "-d"], capture_output=True, text=True,
+                        timeout=900, env=env)  # fmt: skip
+    if up.returncode != 0:
+        pytest.fail(f"langfuse v2 failed to start:\n{up.stderr[-2000:]}")
+    try:
+
+        def status_of(path: str):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5)
+            except urllib.error.HTTPError as exc:
+                return exc.code
+            except Exception:
+                return None
+            return 200
+
+        _wait_until(
+            lambda: status_of("/api/public/health") == 200,
+            300,
+            "langfuse v2 never started serving",
+            interval=3,
+        )
+        otlp = status_of("/api/public/otel/v1/traces")
+        assert otlp == 404, (
+            f"expected no OTLP route on v2, got {otlp} — if this is now 405 the route "
+            "exists and v2 belongs in LANGFUSE_VERSIONS"
+        )
+        # Sanity: a route that *does* exist answers something other than 404,
+        # so the assertion above is about this path and not a dead server.
+        assert status_of("/api/public/observations") != 404
+    finally:
+        subprocess.run([*compose, "down", "-v"], capture_output=True, timeout=300, env=env)

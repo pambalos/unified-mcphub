@@ -152,14 +152,12 @@ class Telemetry:
             "unified.decision.source": decision.source,
             "unified.policy.audit_level": decision.audit_level,
             "langfuse.observation.level": _langfuse_level(decision),
-            # Langfuse's v4 API projects observations down to a fixed field set
-            # and does not return custom attributes or metadata, so the
-            # `unified.*` attributes above are invisible to anyone querying it.
-            # status_message is one of the few fields that does round-trip, so
-            # the verdict and the rule that produced it ride there — otherwise
-            # a Langfuse user can see that a decision happened and how severe
-            # it was, but not what was decided. Verified against a real
-            # self-hosted instance in tests/integration/test_otlp_backends.py.
+            # A convenience, not a workaround: every `unified.*` attribute above
+            # is retrievable from Langfuse under metadata. But its default list
+            # projection omits metadata unless `fields=metadata` is requested,
+            # so putting the verdict here makes it legible in the observation
+            # list and in alerts without anyone having to know that. Verified
+            # against a real instance in tests/integration/test_otlp_backends.py.
             "langfuse.observation.status_message": (
                 f"{decision.verdict.value} ({decision.rule_id or decision.source})"
             ),

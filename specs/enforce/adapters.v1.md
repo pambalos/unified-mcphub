@@ -41,7 +41,38 @@ hub applies unchanged to a direct MCP client.
 | --- | --- | --- |
 | **MCP** | `GuardedSession(session, guard, server=…)` | Duck-typed proxy; forwards everything but `call_tool`. The hub already proves the shape server-side — this is the client-side counterpart. |
 | **LangChain** | `guard_tools(tools, guard)` | Returns *replacement* `StructuredTool`s with the same name, description and schema. The agent's prompt is unchanged. |
-| **Raw tool loop** | `Toolbox(guard)` + `denial_result()` | No framework at all — a team dispatching `tool_use` blocks on the Anthropic/OpenAI SDK directly, which is common in exactly the regulated environments this product targets. |
+| **LlamaIndex** | `guard_tools(tools, guard)` | The friendliest to wrap: `FunctionTool.from_defaults` takes both `fn` and `async_fn`, so the replacement is built from public constructor arguments alone. Both `call` and `acall` are guarded — an agent picks between them itself, and guarding one would leave a route through which nothing is enforced. |
+| **CrewAI** | `guard_tools(tools, guard)` | A Pydantic subclass built at call time, since `BaseTool` is a model. ⚠️ Structurally verified only — see §5. |
+| **Raw tool loop** | `Toolbox(guard)` + `denial_result()` | No framework at all — a team dispatching tool calls on a provider SDK directly, which is common in exactly the regulated environments this product targets. |
+
+### Providers are not frameworks
+
+OpenAI, OpenRouter, Bedrock and Anthropic are inference APIs: the model emits a
+tool call and *your* loop dispatches it. There is nothing to adapt, so
+`adapters/providers.py` supplies the smaller missing piece — the same tool call
+is spelled four ways, and a denial has to be spelled back in the matching
+dialect.
+
+`from_openai` / `from_anthropic` / `from_bedrock` (plus `tool_calls(response,
+provider=…)`) normalize to one `ProviderToolCall`; `denial_message(...,
+provider=…)` renders a refusal in that provider's tool-result shape. No
+provider SDK is required — the payloads are read structurally, so the SDK stays
+the application's choice.
+
+Three details that would otherwise bite quietly:
+
+- **OpenAI ships arguments as a JSON string**, the others as a dict. A loop
+  written against Anthropic and pointed at OpenAI hands policy `params={}`,
+  and every value-based rule silently stops matching. OpenRouter, Azure
+  OpenAI, Together and Groq are all this shape.
+- **A model can emit invalid JSON.** That is a model failure, not a policy
+  question, so it is flagged (`malformed`) rather than raised — but it must be
+  visible, because empty params mean params-based rules do not apply. Treat
+  `malformed` as a refusal unless the tool genuinely takes no arguments.
+- **The three denial dialects genuinely differ.** Anthropic wants a
+  `tool_result` block with `is_error`; OpenAI wants a `role: "tool"` message
+  with no error flag at all, so the text has to carry it; Bedrock wants a
+  `toolResult` with `status: "error"`.
 
 LangChain gets replacement tools rather than a patched original because
 `BaseTool` is a Pydantic model: assigning over `_run` is fragile across
@@ -125,26 +156,63 @@ keys). Two findings that only a real instance could produce:
    first version of this test failed. Reads must use
    `/api/public/v2/observations`. A test now pins this so a regression to the
    v1 paths fails loudly instead of turning the suite into a no-op.
-2. **v4 projects observations to a fixed field set and returns no custom
-   attributes or metadata.** Every `unified.*` attribute is invisible to
-   anyone querying the API — an operator could see that a decision happened and
-   how severe it was, but not *what was decided*. `status_message` is one of
-   the few fields that round-trips, so the verdict and its rule now ride there
-   (`"defer (payouts-need-a-human)"`). Verified against the live instance.
+2. **`fields` selects exclusive groups, and an unrecognised value silently
+   falls back to the default.** The default projection omits metadata, and
+   `fields=all` — which is not a real group — returns that default rather than
+   erroring. This produced a wrong conclusion the second time round: that v4
+   drops custom attributes entirely. **It does not.** Every `unified.*`
+   attribute is retrievable under `metadata`, keyed `attributes.<name>`, with
+   `fields=basic,metadata`. `basic` carries name/level/statusMessage.
+
+   The full enforcement record — verdict, rule, principal, tool, source, audit
+   level, and the action digest that joins back to the audit chain — is
+   queryable from Langfuse. An operator can reconstruct who did what and which
+   rule fired. `status_message` remains useful as a convenience, not a
+   workaround: it puts the verdict in the *default* projection, so it shows in
+   observation lists and alerts without anyone needing to know about field
+   groups.
 
 Also worth knowing: a batch exporter swallows HTTP failures. A wrong endpoint
 produces silence, not an error, which is why tier 1 asserts on a captured POST
-rather than on the absence of an exception.
+rather than on the absence of an exception. The same reflex applies to reads —
+an API that answers 200 with a projection you did not expect looks identical to
+an API with no data in it.
 
-## §7 Open
+## §7 Langfuse version matrix
 
-- **CrewAI, LlamaIndex, Pydantic AI, AutoGen** — mechanical now that the
-  contract exists; add a driver and the suite covers it. Deferred until a
-  design partner asks for a specific one.
-- **Version drift.** Adapters break when frameworks move. `langchain-core` is
-  pinned in the dev group and the driver skips when absent, but nothing yet
-  installs the latest on a schedule to report breakage early.
-- **Langfuse metadata.** Whether `langfuse.observation.metadata.*` reaches the
-  UI could not be determined from the API, since the v4 projection omits
-  metadata entirely. If richer detail than `status_message` is wanted, that
-  needs checking against the UI or a newer API.
+Self-hosters lag, so a partner is as likely to be on v3 as v4. The suite runs
+the full Langfuse tier against **both**, parametrized on one compose file.
+
+That immediately proved worth the container time, because **the read API is
+inverted between majors, and each failure is silent in its own way**:
+
+| | v3 | v4 |
+| --- | --- | --- |
+| OTLP ingest | `/api/public/otel/v1/traces` | same |
+| Read endpoint | `/api/public/observations` | `/api/public/v2/observations` |
+| The other's endpoint | v2 path → **404** | v1 path → **200, no data** |
+| Metadata by default | included | omitted unless `fields=metadata` |
+| Attribute shape | nested `metadata.attributes.<k>` | flat `metadata["attributes.<k>"]` |
+
+A single-version suite would have shipped an integration that silently returned
+nothing on the other major. `_attributes()` normalizes the two shapes so
+callers never have to care which is running.
+
+**v2 is the support floor, and it is a hard one:** `/api/public/otel/v1/traces`
+returns **404, not 405**, so OTel ingestion does not exist there at all and no
+configuration makes it work. A test pins that, because "Langfuse is supported"
+otherwise reads as covering every version a self-hoster might still run.
+
+## §8 Open
+
+- **Pydantic AI, AutoGen, smolagents** — mechanical now that the contract
+  exists; add a driver and the suite covers it. Deferred until asked for.
+- **CrewAI is structurally verified only.** `crewai` depends on `lancedb`,
+  which publishes no wheel for macOS x86_64, so it cannot be installed on the
+  current dev machine. The conformance driver runs against a stub mirroring
+  `BaseTool`'s contract — that covers the part we own (the subclass builds,
+  identity is preserved, `_run` is blocked before it delegates) but not
+  CrewAI's real runtime. Run the suite on Linux or an arm64 Mac to close it.
+- **Version drift.** Adapters break when frameworks move. The extras are
+  declared and drivers skip when absent, but nothing yet installs the latest
+  on a schedule to report breakage early.

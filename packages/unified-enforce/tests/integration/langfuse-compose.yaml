@@ -1,4 +1,6 @@
-# Self-hosted Langfuse, trimmed for automated testing. Used by
+# Self-hosted Langfuse, trimmed for automated testing, and version-parameterized
+# so the suite can cover the releases partners actually run rather than only
+# the newest (LANGFUSE_VERSION). Used by
 # tests/integration/test_otlp_backends.py (marked `integration`).
 #
 # Derived from Langfuse's official docker-compose. Four changes, all so this
@@ -19,7 +21,7 @@
 
 services:
   langfuse-worker:
-    image: docker.io/langfuse/langfuse-worker:4
+    image: docker.io/langfuse/langfuse-worker:${LANGFUSE_VERSION:-4}
     restart: always
     depends_on: &langfuse-depends-on
       postgres: { condition: service_healthy }
@@ -60,7 +62,7 @@ services:
       REDIS_TLS_ENABLED: "false"
 
   langfuse-web:
-    image: docker.io/langfuse/langfuse:4
+    image: docker.io/langfuse/langfuse:${LANGFUSE_VERSION:-4}
     restart: always
     depends_on: *langfuse-depends-on
     ports:
@@ -81,7 +83,7 @@ services:
       LANGFUSE_INIT_USER_PASSWORD: password123
 
   clickhouse:
-    image: docker.io/clickhouse/clickhouse-server:25.12
+    image: docker.io/clickhouse/clickhouse-server:${CLICKHOUSE_VERSION:-25.12}
     restart: always
     user: "101:101"
     environment:

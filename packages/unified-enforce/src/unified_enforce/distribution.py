@@ -63,7 +63,7 @@ from .attest import (
     unb64u,
     verify_files,
 )
-from .policy import Decision
+from .policy import Decision, Verdict
 
 log = logging.getLogger("unified_enforce.distribution")
 
@@ -482,7 +482,7 @@ class Distribution:
             # Denying at startup looks like an outage; allowing would hand an
             # unprotected agent to anyone able to block one fetch.
             return Decision(
-                verdict="deny",
+                verdict=Verdict.DENY,
                 rule_id=None,
                 source="distribution",
                 reason="no verified policy bundle; refusing every action",
@@ -492,7 +492,7 @@ class Distribution:
             # We cannot tell whether this agent is contained. Assuming it is
             # not is the fail-open a kill switch exists to prevent.
             return Decision(
-                verdict="defer",
+                verdict=Verdict.DEFER,
                 rule_id=None,
                 source="distribution",
                 reason=(
@@ -505,14 +505,14 @@ class Distribution:
         if self.snapshot.health is Health.STALE:
             if self._on_stale is StaleAction.DENY:
                 return Decision(
-                    verdict="deny",
+                    verdict=Verdict.DENY,
                     rule_id=None,
                     source="distribution",
                     reason="policy bundle expired and on_stale=deny",
                 )
             if self._on_stale is StaleAction.DEFER:
                 return Decision(
-                    verdict="defer",
+                    verdict=Verdict.DEFER,
                     rule_id=None,
                     source="distribution",
                     reason="policy bundle expired and on_stale=defer",
@@ -583,7 +583,7 @@ def _containment_decision(contained: Containment, action: Action) -> Decision | 
     """What a containment mode does to one action."""
     if contained.mode == "deny":
         return Decision(
-            verdict="deny",
+            verdict=Verdict.DENY,
             rule_id=None,
             source="containment",
             reason=f"{contained.principal_id} is contained (deny)",
@@ -592,14 +592,14 @@ def _containment_decision(contained: Containment, action: Action) -> Decision | 
         if _matches_any(action.tool, contained.allow):
             return None
         return Decision(
-            verdict="deny",
+            verdict=Verdict.DENY,
             rule_id=None,
             source="containment",
             reason=f"{contained.principal_id} is contained (deny_except)",
         )
     # defer
     return Decision(
-        verdict="defer",
+        verdict=Verdict.DEFER,
         rule_id=None,
         source="containment",
         reason=f"{contained.principal_id} is contained (defer)",

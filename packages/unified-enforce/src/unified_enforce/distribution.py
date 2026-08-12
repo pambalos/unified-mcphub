@@ -214,8 +214,24 @@ class Distribution:
         self._on_stale = on_stale
         self._required_kids = required_kids
         self.snapshot = Snapshot()
+        #: The keys from the last key set that verified. Retained so anything
+        #: else needing to check a control-plane signature -- the approval
+        #: channel, today -- uses the same rotating set rather than pinning a
+        #: key of its own at enrolment. A second pinning point would be a second
+        #: thing to rotate, which in practice means one that never is.
+        self._verification_keys: dict[str, VerificationKey] = {}
         if self._cache is not None:
             self._load_cache(now=now)
+
+    def verification_keys(self) -> Mapping[str, VerificationKey]:
+        """The currently trusted keys, by kid. Empty until a key set verifies.
+
+        A callable rather than an attribute because callers hold it across
+        refreshes: `RemoteApprovals(..., keys=distribution.verification_keys)`
+        picks up a rotation on the next poll, where a snapshot taken at
+        construction would pin the fleet to whatever was valid at start-up.
+        """
+        return self._verification_keys
 
     # --- refresh --------------------------------------------------------------
 
@@ -239,10 +255,17 @@ class Distribution:
 
         verdict, keys = load_key_set(keyset_doc, root_public_key=self._root_key, now_ms=now_ms)
         if not verdict:
+            # The previous keys are dropped, not kept. A key set that no longer
+            # verifies -- expired, or signed by something other than the pinned
+            # root -- is exactly when continuing to trust what it used to say is
+            # wrong, and the consequence is that approvals stop being honoured
+            # rather than being honoured on stale authority.
+            self._verification_keys = {}
             self._refuse(report, "keyset", verdict.reason, verdict.detail)
             self._reassess(now_ms)
             return report
 
+        self._verification_keys = dict(keys)
         self._apply_bundle(bundle_doc, keys, now_ms, report)
         self._apply_shadow(bundle_doc, keys, now_ms, report)
         self._apply_revocations(revocations_doc, keys, now_ms, report)

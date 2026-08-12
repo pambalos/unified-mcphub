@@ -1,12 +1,17 @@
-"""Two-phase append-only audit log — spec §6, ADR-0009.
+"""Two-phase append-only audit log — spec §6, ADR-0009; chained per E2.
 
-- File: audit/<UTC-date>.jsonl, opened O_APPEND|O_WRONLY|O_CREAT (0600).
-- fcntl exclusive lock on audit/.lock at startup (single writer).
-- Two entries per call paired by request_id: `received` (before forward) +
-  `completed` (on resolve). Denied calls write `received` only.
-- Sync os.write append into the page cache — immediately readable and
-  crash-surviving; fsync on daily rotation + shutdown. audit_level controls
-  payload capture (minimal/standard/detailed/full).
+The hub is integration #1 of the enforcement engine: since the unified-enforce
+migration, the file mechanics (single-writer fcntl lock, O_APPEND daily JSONL,
+0600/0700, fsync on rotation + shutdown) and the tamper-evident hash chain live
+in `unified_enforce.audit.HashChainWriter`. This module keeps the hub's entry
+shape and capture semantics exactly as before — flat `received`/`completed`
+entries paired by request_id — which now additionally carry `prev_hash`/`hash`
+(strict=False chaining: hub args/results are pre-existing free-form JSON).
+`unified-mcphub audit verify` replays the chain offline.
+
+Denied calls write `received` only. audit_level controls payload capture
+(minimal/standard/detailed/full); secret-shape scrubbing at `standard` comes
+from `unified_enforce.redaction` (same patterns the engine uses).
 
 Writes come only from the single asyncio event-loop thread (sync, no await in
 the write path), so no locking is needed.
@@ -14,38 +19,15 @@ the write path), so no locking is needed.
 
 from __future__ import annotations
 
-import fcntl
 import json
-import os
-import re
 import secrets
 from pathlib import Path
 from typing import Any
 
+from unified_enforce.audit import HashChainWriter
+from unified_enforce.redaction import scrub as _scrub
+
 from .util import utcnow
-
-# Secret-shape redaction for `standard` level (defense-in-depth, leaky by design).
-_SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9]{16,}"),
-    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT
-]
-_REDACTED = "«redacted»"
-
-
-def _scrub(value: Any) -> Any:
-    if isinstance(value, str):
-        out = value
-        for pat in _SECRET_PATTERNS:
-            out = pat.sub(_REDACTED, out)
-        return out
-    if isinstance(value, dict):
-        return {k: _scrub(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_scrub(v) for v in value]
-    return value
 
 
 def _capture(payload: Any, audit_level: str) -> Any:
@@ -66,35 +48,31 @@ def new_span_id() -> str:
 
 class AuditLog:
     def __init__(self, audit_dir: Path) -> None:
-        self._dir = audit_dir
-        self._fd: int | None = None
-        self._lock_fd: int | None = None
-        self._date: str | None = None
+        # utcnow resolved late so tests can monkeypatch this module's clock.
+        self._writer = HashChainWriter(audit_dir, strict=False, clock=lambda: utcnow())
         self._seq = 0
+
+    # The write-failure test injects errors by closing the raw fd directly.
+    @property
+    def _fd(self) -> int | None:
+        return self._writer._fd
+
+    @_fd.setter
+    def _fd(self, value: int | None) -> None:
+        self._writer._fd = value
 
     # --- lifecycle ---
 
     def start(self) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(self._dir, 0o700)
-        self._lock_fd = os.open(self._dir / ".lock", os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            # Another hub holds the single-writer lock — translate to a clear error.
-            os.close(self._lock_fd)
-            self._lock_fd = None
+            self._writer.start()
+        except RuntimeError as exc:
             raise RuntimeError(f"audit log is locked by another hub: {exc}") from exc
-        self._open_for_today()
+        last = self._writer.last_entry
+        self._seq = int(last.get("seq", 0)) if last else 0
 
     def stop(self) -> None:
-        if self._fd is not None:
-            os.fsync(self._fd)
-            os.close(self._fd)
-            self._fd = None
-        if self._lock_fd is not None:
-            os.close(self._lock_fd)
-            self._lock_fd = None
+        self._writer.stop()
 
     # --- writers ---
 
@@ -114,6 +92,7 @@ class AuditLog:
         audit_level: str,
         reason: str | None = None,
         decided_by: str | None = None,
+        action_digest: str | None = None,
     ) -> None:
         entry = {
             "phase": "received",
@@ -132,6 +111,8 @@ class AuditLog:
             "authz_rule": authz_rule,
             "audit_level": audit_level,
         }
+        if action_digest:
+            entry["action_digest"] = action_digest
         if reason:
             entry["reason"] = reason
         if decided_by:
@@ -171,20 +152,10 @@ class AuditLog:
         self._seq += 1
         return self._seq
 
-    def _open_for_today(self) -> None:
-        date = utcnow().date().isoformat()
-        path = self._dir / f"{date}.jsonl"
-        self._fd = os.open(path, os.O_APPEND | os.O_WRONLY | os.O_CREAT, 0o600)
-        self._date = date
-
     def _write(self, entry: dict[str, Any]) -> None:
-        line = (json.dumps(entry, default=str) + "\n").encode()
-        if self._date != utcnow().date().isoformat():
-            if self._fd is not None:
-                os.fsync(self._fd)  # flush at the day boundary
-                os.close(self._fd)
-            self._open_for_today()
         try:
-            os.write(self._fd, line)  # O_APPEND => atomic per write
-        except OSError as exc:
+            self._writer.append(entry)
+        except RuntimeError:
+            raise
+        except Exception as exc:  # canonicalization surprises must not kill the hub silently
             raise RuntimeError(f"audit_error: {exc}") from exc

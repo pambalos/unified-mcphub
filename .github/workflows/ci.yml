@@ -6,6 +6,11 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # The Langfuse version matrix stands up six containers twice over, which is
+  # too slow to sit in front of every PR but too important to run only by hand.
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
 
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:
@@ -25,8 +30,11 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      - name: Sync workspace (incl. dev tooling)
-        run: uv sync --frozen
+      # --group crewai: the real CrewAI adapter test only runs where the package
+      # installs, which is glibc Linux — not the macOS dev machine, and not the
+      # musl container used by scripts/ci-local.sh.
+      - name: Sync workspace (incl. dev tooling + crewai)
+        run: uv sync --frozen --group crewai
 
       - name: Check formatting
         run: uv run ruff format --check packages
@@ -34,8 +42,119 @@ jobs:
       - name: Lint
         run: uv run ruff check packages
 
+      # technologies.md lists mypy as a locked cross-cutting choice, but until
+      # UAI-135 it was configured only for the hub and never run by CI at all —
+      # so the two packages intended for public `pip install` had no type
+      # checking while the private one did.
+      - name: Type-check
+        run: uv run mypy
+
       - name: Tests
         run: uv run pytest packages
+
+  # UAI-78. The repo was public for ~10 weeks before anyone checked its history
+  # for credentials; a scan that only ever runs by hand is how that happens
+  # again. fetch-depth: 0 because the point is the whole history, not the tip.
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    # The action reads the PR's commit list to decide what to scan, and the
+    # default token could not: it 403'd with "Resource not accessible by
+    # integration". Granted narrowly rather than by widening the workflow's
+    # default permissions -- this job needs to read a PR, nothing more.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          # Required since gitleaks-action v2's breaking change. Without it the
+          # job errors out *before scanning anything* -- which is worse than a
+          # failure, because the check appears red for a configuration reason
+          # and a reader assumes the code was examined and found wanting. It
+          # was not examined at all. This is the hard gate for the public flip,
+          # so it has to actually run.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"
+
+  # Everything that needs a real Envoy, a real kernel firewall, or a real OTLP
+  # receiver. Before this job existed the whole `-m integration` suite ran only
+  # by hand on one developer laptop and gated nothing — a change breaking the
+  # vendored proto field numbers, the Envoy templates or the egress lock would
+  # have merged green (UAI-141).
+  #
+  # GitHub's ubuntu runners ship Docker, so no service container is needed. This
+  # is also the only place these tests run on **Linux**: the ext_authz protos,
+  # the iptables rules and the DNS-resolver workaround were all developed on
+  # macOS, which is the platform least like production.
+  integration:
+    name: integration (docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync workspace (incl. dev tooling)
+        run: uv sync --frozen
+
+      # Pull in advance so a slow registry shows up as a pull failure rather
+      # than a mysterious per-test timeout.
+      # test_terraform_modules.py validates every shipped .tf; without this it
+      # skips, which would look like coverage it does not have.
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Pre-pull images
+        run: |
+          docker pull envoyproxy/envoy:v1.31-latest
+          docker pull otel/opentelemetry-collector-contrib:latest
+
+      # The Langfuse matrix is excluded here and runs nightly instead; these are
+      # the checks worth blocking a merge on.
+      - name: Integration tests
+        run: uv run pytest packages -m integration -p no:cacheprovider
+             --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_langfuse_ingests_a_deferred_decision_as_a_warning
+             --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_every_decision_attribute_is_retrievable_from_langfuse
+             --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_an_allow_is_not_flagged_as_a_warning
+             --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_each_major_refuses_the_other_majors_read_path
+             --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_langfuse_v2_has_no_otlp_endpoint_at_all
+
+  # The full Langfuse tier: two complete self-hosted stacks (v3 and v4) plus the
+  # v2 support-floor probe. Minutes of container time, so nightly rather than
+  # per-PR — but it is the only thing standing between us and an integration
+  # that silently stops working when Langfuse changes its read API.
+  langfuse-matrix:
+    name: langfuse matrix (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync workspace (incl. dev tooling)
+        run: uv sync --frozen
+
+      - name: Langfuse version matrix
+        run: uv run pytest packages/unified-enforce/tests/integration/test_otlp_backends.py
+             -m integration -p no:cacheprovider
 
   # unified-mcp-graphify is EXCLUDED from the uv workspace (heavy graphify deps),
   # so the job above can't import it and skips it via the root pytest --ignore.

@@ -22,6 +22,8 @@ from mcp import types
 from ulid import ULID
 from watchfiles import awatch
 
+from unified_enforce import Action, ActionContext, Principal, Telemetry
+
 from . import audit as audit_mod
 from . import discovery
 from . import endpoints
@@ -32,6 +34,7 @@ from .authz import AuthzResolver, Effect
 from .config import (
     ApprovalConfig,
     Config,
+    OtelConfig,
     Rule,
     audit_dir,
     bootstrap,
@@ -75,12 +78,39 @@ def _result_dict(value) -> dict:
     return {"content": [{"type": "text", "text": text}], "isError": False}
 
 
+def _build_telemetry(cfg: OtelConfig) -> Telemetry:
+    """Decision spans, off unless configured (UAI-86).
+
+    A misconfigured collector must not stop the hub from serving tools —
+    enforcement does not depend on being observed — so a failure here degrades
+    to the no-op and logs. The usual cause is the `[otel]` extra not being
+    installed, which is a deployment choice rather than an error.
+    """
+    if not cfg.enabled:
+        return Telemetry.disabled()
+    try:
+        if cfg.langfuse_host and cfg.langfuse_public_key and cfg.langfuse_secret_key:
+            return Telemetry.for_langfuse(
+                cfg.langfuse_host,
+                cfg.langfuse_public_key,
+                cfg.langfuse_secret_key,
+                service_name=cfg.service_name,
+            )
+        return Telemetry(
+            service_name=cfg.service_name, endpoint=cfg.endpoint, headers=cfg.headers or None
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("otel disabled: %s", exc)
+        return Telemetry.disabled()
+
+
 class Hub:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.servers: dict[str, SupervisedServer] = {}
         self.builtins = BuiltinRegistry()
-        self.authz = AuthzResolver(config.workspace, config.dangerous)
+        self.telemetry = _build_telemetry(config.hub.otel)
+        self.authz = AuthzResolver(config.workspace, config.dangerous, telemetry=self.telemetry)
         self.redactor = Redactor(config.workspace.redact)
         approval_cfg = config.hub.approval
         self.approval_events = ApprovalEventBroadcaster()
@@ -144,6 +174,7 @@ class Hub:
         for server in list(self.servers.values()):
             await server.stop()
         self.audit.stop()  # release the audit lock first — must always happen
+        self.telemetry.shutdown()  # flush batched spans before the process exits
         discovery.remove()  # best-effort; a leftover entry goes stale (ADR-0013)
 
     # --- MCP server surface (spec §10) ---
@@ -201,7 +232,18 @@ class Hub:
         tool_uri = f"mcp://{server_name}/{tool}"
         request_id = str(ULID())
         trace_id, span_id = audit_mod.new_trace_id(), audit_mod.new_span_id()
-        decision = self.authz.resolve(tool_uri, args, caller_id)
+        # Canonical Action (unified.action/v1): the enforcement engine's identity
+        # for this call. strict=False — MCP args are free-form JSON (may hold floats).
+        action = Action.build(
+            principal=Principal(id=f"agent:{caller_id}"),
+            tool=tool_uri,
+            verb="call",
+            resource="*",
+            params=args,
+            context=ActionContext(origin="mcp", trace_id=trace_id, span_id=span_id),
+        )
+        # The same canonical Action is decided on and audited (digest below).
+        decision = self.authz.resolve(tool_uri, args, caller_id, action=action)
 
         authz_decision = decision.effect.value
         prompt_ms: float | None = None
@@ -213,6 +255,7 @@ class Hub:
                 _summary(tool, args),
                 args,
                 floored=decision.source == "danger_floor",
+                action=action,  # same canonical Action the verdict was made on
             )
             prompt_ms = (time.monotonic() - t0) * 1000
             authz_decision = outcome.authz_decision
@@ -242,6 +285,7 @@ class Hub:
             audit_level=decision.audit_level,
             reason=denied_reason,
             decided_by=decided_by,
+            action_digest=action.digest(strict=False),
         )
 
         if not allowed:
@@ -333,7 +377,9 @@ class Hub:
         )
         # Immediate effect: prepend in-memory so the next call sees it before reload.
         self.config.workspace.authz.rules.insert(0, rule)
-        self.authz = AuthzResolver(self.config.workspace, self.config.dangerous)
+        self.authz = AuthzResolver(
+            self.config.workspace, self.config.dangerous, telemetry=self.telemetry
+        )
         # Persist to the machine-managed `.local.yaml` (ADR-0024). The curated
         # workspace file is never rewritten by the hub, so a plain YAML dump of a
         # flat rule list is enough — no comments to preserve. The args_filter
@@ -406,7 +452,7 @@ class Hub:
             logger.error("config reload failed; keeping prior config: %s", exc)
             return
         self.config = new
-        self.authz = AuthzResolver(new.workspace, new.dangerous)
+        self.authz = AuthzResolver(new.workspace, new.dangerous, telemetry=self.telemetry)
         self.redactor = Redactor(new.workspace.redact)
         self.approval.enabled = new.hub.approval.enabled
         await self._apply_server_diff(new.workspace.servers)

@@ -19,6 +19,7 @@ keywords = ["mcp", "model-context-protocol", "ai", "agents", "hub", "authz", "au
 # servers via the standalone `unified-mcp-client` package (ADR-0023).
 dependencies = [
     "unified-mcp-client",    # async upstream MCP client (stdio + HTTP) — ADR-0023
+    "unified-enforce",       # enforcement engine: hash-chained audit + canonical Actions (E1/E2)
     "pydantic>=2.0.0",       # config models
     "pyyaml>=6.0.0",         # config.yaml + workspace files (runtime load + learned-rule dump)
     "ruamel.yaml>=0.18.0",   # comment-preserving round-trip edits for `add-server`/`remove-server`
@@ -50,6 +51,7 @@ unified-mcphub = "unified_mcphub.cli:main"
 # Resolve the shared client from the uv workspace member (ADR-0023).
 [tool.uv.sources]
 unified-mcp-client = { workspace = true }
+unified-enforce = { workspace = true }
 unified-mcp-servers = { workspace = true }
 
 [tool.setuptools.packages.find]

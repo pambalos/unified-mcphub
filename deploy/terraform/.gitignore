@@ -1,0 +1,15 @@
+# terraform init drops provider binaries here — hundreds of megabytes, and
+# platform-specific. Never committed.
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfvars
+crash.log
+
+# Also ignored, which is the less obvious call: a lock file generated on one
+# machine records provider hashes for THAT platform only, so committing the
+# darwin one would break `terraform init` on a Linux runner. These are
+# reference modules that adopters copy into their own root, where they should
+# generate (and commit) their own lock. A deployed root module would commit it;
+# examples should not.
+.terraform.lock.hcl

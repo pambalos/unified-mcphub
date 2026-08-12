@@ -4,10 +4,19 @@ When a call resolves to `effect: prompt`, the decision is made here. The
 "ask a human" step is delegated to a pluggable `ApprovalChannel` (UAI-109):
 `TerminalChannel` reads a keypress from the hub's own terminal (the same-user
 defense) for an interactive hub; an out-of-process channel over the control API
-(UAI-107) sources the decision for a headless hub. `Approval` keeps the
-security-critical logic — master switch (`approval.enabled`), the session cache,
-the no-channel fail-safe, and the outcome computation; channels only return the
-operator's raw decision.
+(UAI-107) sources the decision for a headless hub.
+
+Since UAI-133 the security-critical logic is **not** owned here. `Approval` is
+an adapter over `unified_enforce.Approvals`, which owns the master switch, the
+session cache, and every fail-closed path — the same move `AuthzResolver` made
+onto `PolicyEngine`. The hub keeps its own vocabulary because `DecisionKind` is
+the control API's wire format (transports.py parses these strings) and the
+command/prefix distinction is meaningful in its UI; the engine's `ALLOW_ALWAYS`
+carries that distinction in the scope filter instead.
+
+What the hub gains: a channel that raises or never answers is now a deny rather
+than an exception escaping into the call path — the "later phases" this module
+used to promise.
 
 Allow-always is argument-scoped (ADR-0025): rather than one tool-wide grant, the
 operator allows *this command* (exact) or *this prefix*. Broad, whole-tool trust
@@ -20,7 +29,17 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from enum import Enum
-from typing import NamedTuple, Protocol
+from typing import Any, NamedTuple, Protocol
+
+from unified_enforce import (
+    Action,
+    ApprovalKind,
+    ApprovalRequest,
+    Approvals,
+    Principal,
+)
+from unified_enforce.policy import Decision as EngineDecision
+from unified_enforce.policy import Verdict
 
 
 class DecisionKind(str, Enum):
@@ -184,6 +203,47 @@ class TerminalChannel:
             )
 
 
+#: Hub kinds -> engine kinds. The two allow-always variants differ only in how
+#: their scope filter was built (`equals` vs `starts_with`), which the filter
+#: itself records — so the engine needs one kind, not two.
+_TO_ENGINE_KIND = {
+    DecisionKind.ALLOW: ApprovalKind.ALLOW,
+    DecisionKind.ALLOW_SESSION: ApprovalKind.ALLOW_SESSION,
+    DecisionKind.ALLOW_ALWAYS_COMMAND: ApprovalKind.ALLOW_ALWAYS,
+    DecisionKind.ALLOW_ALWAYS_PREFIX: ApprovalKind.ALLOW_ALWAYS,
+    DecisionKind.DENY: ApprovalKind.DENY,
+    DecisionKind.DENY_ALWAYS: ApprovalKind.DENY_ALWAYS,
+}
+
+
+class _EngineChannel:
+    """Presents a hub `ApprovalChannel` through the engine's protocol.
+
+    Only a shape translation: the hub's channels keep taking the arguments
+    their UIs and wire format are built around, and nothing about how a
+    decision is *interpreted* lives here.
+    """
+
+    def __init__(self, inner: ApprovalChannel) -> None:
+        self.inner = inner
+
+    async def ask(self, request: ApprovalRequest):
+        from unified_enforce import ApprovalResponse
+
+        decision = await self.inner.ask(
+            request.action.tool,
+            request.principal.removeprefix("agent:"),
+            request.summary,
+            dict(request.action.params),
+            request.floored,
+        )
+        return ApprovalResponse(
+            kind=_TO_ENGINE_KIND[decision.kind],
+            decided_by=decision.decided_by,
+            scope=decision.args_filter,
+        )
+
+
 class Approval:
     """Resolves a `prompt`-effect call to allow/deny per ADR-0018/0025.
 
@@ -191,12 +251,41 @@ class Approval:
     or an out-of-process channel for a headless one). `channel=None` means there
     is no way to reach an operator: the hub fails closed to deny
     (`no_approval_channel`), exactly as a detached hub did before.
+
+    The logic itself is `unified_enforce.Approvals`; this class translates in
+    and out of the hub's vocabulary.
     """
 
     def __init__(self, enabled: bool, channel: ApprovalChannel | None) -> None:
-        self.enabled = enabled
+        self._approvals = Approvals(
+            None,
+            enabled=enabled,
+            # ADR-0018: `approval.enabled: false` means "don't prompt, run it".
+            # The engine defaults to deny and requires this to be spelled out,
+            # which is the right default for every deployment except this one.
+            when_disabled="allow",
+        )
         self.channel = channel
-        self._session_allows: set[str] = set()
+
+    # `enabled` and `channel` are reassigned on config reload, so both stay
+    # plain attributes from the caller's point of view.
+
+    @property
+    def enabled(self) -> bool:
+        return self._approvals.enabled
+
+    @enabled.setter
+    def enabled(self, value: bool) -> None:
+        self._approvals.enabled = value
+
+    @property
+    def channel(self) -> ApprovalChannel | None:
+        wrapper = self._approvals.channel
+        return wrapper.inner if wrapper is not None else None
+
+    @channel.setter
+    def channel(self, value: ApprovalChannel | None) -> None:
+        self._approvals.channel = _EngineChannel(value) if value is not None else None
 
     async def resolve(
         self,
@@ -206,47 +295,41 @@ class Approval:
         args: dict | None = None,
         *,
         floored: bool = False,
+        action: Action | None = None,
     ) -> PromptOutcome:
-        # Master switch off -> no prompts at all, auto-allow (spec §5.1, ADR-0018).
-        if not self.enabled:
-            return PromptOutcome(allowed=True, authz_decision="approval_disabled")
-
-        # No reachable approval channel (headless hub, no bridge) -> fail safe:
-        # deny, never silently run.
-        if self.channel is None:
-            return PromptOutcome(
-                allowed=False, authz_decision="prompt_denied", reason="no_approval_channel"
+        """`action` is the canonical Action the hub already built for this call;
+        it is reconstructed here only for callers that do not have one (tests,
+        and any path that prompts outside `_handle_call`)."""
+        args = args or {}
+        if action is None:
+            action = Action.build(
+                principal=Principal(id=f"agent:{caller}"),
+                tool=tool_uri,
+                verb="call",
+                resource="*",
+                params=args,
             )
-
-        # Session allow remembered from a prior allow_session this run.
-        if tool_uri in self._session_allows:
-            return PromptOutcome(
-                allowed=True,
-                authz_decision="prompt_allowed",
-                session=True,
-                decided_by="session",
+        outcome = await self._approvals.resolve(
+            ApprovalRequest(
+                action=action,
+                decision=EngineDecision(verdict=Verdict.DEFER, rule_id=None, source="prompt"),
+                summary=summary,
+                floored=floored,
             )
-
-        decision = await self.channel.ask(tool_uri, caller, summary, args or {}, floored)
-        kind = decision.kind
-        if kind is DecisionKind.ALLOW_SESSION:
-            self._session_allows.add(tool_uri)
-        allowed = kind in (
-            DecisionKind.ALLOW,
-            DecisionKind.ALLOW_SESSION,
-            DecisionKind.ALLOW_ALWAYS_COMMAND,
-            DecisionKind.ALLOW_ALWAYS_PREFIX,
-        )
-        persistent = kind in (
-            DecisionKind.ALLOW_ALWAYS_COMMAND,
-            DecisionKind.ALLOW_ALWAYS_PREFIX,
-            DecisionKind.DENY_ALWAYS,
         )
         return PromptOutcome(
-            allowed=allowed,
-            authz_decision="prompt_allowed" if allowed else "prompt_denied",
-            persistent=persistent,
-            session=kind is DecisionKind.ALLOW_SESSION,
-            args_filter=decision.args_filter,
-            decided_by=decision.decided_by,
+            allowed=outcome.allowed,
+            authz_decision=_authz_decision(outcome),
+            persistent=outcome.persistent,
+            session=outcome.session,
+            reason=outcome.reason,
+            args_filter=outcome.scope,
+            decided_by=outcome.decided_by,
         )
+
+
+def _authz_decision(outcome: Any) -> str:
+    """The hub's audit vocabulary for an engine outcome (spec §6.2)."""
+    if outcome.decision.source == "approval_disabled" and outcome.allowed:
+        return "approval_disabled"
+    return "prompt_allowed" if outcome.allowed else "prompt_denied"

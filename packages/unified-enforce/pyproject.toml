@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-enforce"
+version = "0.0.1"
+description = "The enforcement plane for AI agents — canonical Actions, deterministic policy verdicts, hash-chained audit"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "Bradley Justice", email = "bradleyjusticeca@gmail.com"},
+]
+keywords = ["ai", "agents", "authorization", "policy", "audit", "enforcement", "cel"]
+
+# Policy-path deps must be synchronous, local, allocation-cheap (technologies.md).
+# No network clients, no framework deps — the engine embeds anywhere.
+dependencies = [
+    "pydantic>=2.0.0",       # Action + policy models (JSON Schema export)
+    "pyyaml>=6.0.0",         # policy files
+    "cel-python>=0.2.0",     # rule conditions (compiled once at policy load)
+    "cryptography>=42.0.0",  # Ed25519 action signing
+    "python-ulid>=2.0.0",    # action ids
+]
+
+# Telemetry is opt-in (technologies.md: `otel.enabled` off by default); the core
+# package must stay import-light for the in-process decision path.
+[project.optional-dependencies]
+otel = [
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+]
+gateway = [
+    "fastapi>=0.110.0",   # ext_authz HTTP transport (E3)
+    "uvicorn>=0.28.0",
+    "grpcio>=1.60.0",     # ext_authz gRPC transport — the locked data-plane target
+    # NOT xds-protos: it ships a stale opentelemetry/proto/** that overwrites the
+    # real opentelemetry-proto package, breaking [otel]. We vendor a minimal
+    # wire-compatible subset instead (src/unified_enforce/protos/ext_authz.proto).
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Starter policy packs ship with the wheel: `pip install unified-enforce` should
+# give you something to enforce, not just the machinery to enforce with.
+[tool.setuptools.package-data]
+unified_enforce = ["policies/*.yaml", "policies/*.md"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: needs external services (Docker/Envoy); excluded from the default run",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

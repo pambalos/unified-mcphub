@@ -1,0 +1,99 @@
+// Minimal wire-compatible subset of envoy.service.auth.v3 (ext_authz).
+//
+// Why not the `xds-protos` package: it bundles a stale copy of
+// `opentelemetry/proto/**` and overwrites the real `opentelemetry-proto`
+// distribution (same file paths), which breaks the OTLP exporter. Installing
+// unified-enforce[otel,gateway] together would be broken by install order.
+//
+// Protobuf is wire-compatible by field NUMBER, and unknown fields are
+// preserved/ignored, so declaring only the fields the engine reads and writes
+// is sufficient — Envoy sends the full messages and parses our subset fine.
+// Field numbers below are copied from Envoy v3 and must not drift; the service
+// name Envoy dials is set on the gRPC handler, not by this package.
+//
+// Regenerate (dev only):
+//   uv run python -m grpc_tools.protoc -I src/unified_enforce/protos \
+//     --python_out=src/unified_enforce/protos \
+//     src/unified_enforce/protos/ext_authz.proto
+
+syntax = "proto3";
+
+// Deliberately NOT `envoy.*`: a distinct symbol namespace so this can coexist
+// with real Envoy protos in one process (no duplicate descriptor-pool symbols).
+package unified_enforce.extauthz.v1;
+
+// --- request side (what Envoy sends) ---
+
+message Peer {
+  string principal = 4;  // mTLS SAN, e.g. spiffe://cluster.local/ns/prod/sa/x
+}
+
+message HttpRequest {
+  string method = 2;
+  map<string, string> headers = 3;  // lowercase keys, per Envoy
+  string path = 4;                  // includes query string
+  string host = 5;
+  string scheme = 6;
+
+  // Body, sent only when the ext_authz filter sets `with_request_body`.
+  // `size` is the full declared request size, or -1 when unknown (e.g. a
+  // chunked request) — comparing it against the received length is how
+  // truncation is detected when `allow_partial_message: true`.
+  int64 size = 9;
+  string body = 11;     // set unless the filter sets pack_as_bytes
+  bytes raw_body = 12;  // set when the filter sets pack_as_bytes: true
+}
+
+message Request {
+  HttpRequest http = 2;
+}
+
+message AttributeContext {
+  Peer source = 1;
+  Request request = 4;
+}
+
+message CheckRequest {
+  AttributeContext attributes = 1;
+}
+
+// --- response side (what Envoy expects back) ---
+
+message HeaderValue {
+  string key = 1;
+  string value = 2;
+}
+
+message HeaderValueOption {
+  HeaderValue header = 1;
+}
+
+// envoy.type.v3.HttpStatus — `code` is an enum on the wire, i.e. a varint,
+// so int32 is wire-compatible and spares us the enum table.
+message HttpStatus {
+  int32 code = 1;
+}
+
+// google.rpc.Status subset: 0 = OK, 7 = PERMISSION_DENIED.
+message Status {
+  int32 code = 1;
+  string message = 2;
+}
+
+message OkHttpResponse {
+  repeated HeaderValueOption headers = 2;
+}
+
+message DeniedHttpResponse {
+  HttpStatus status = 1;
+  repeated HeaderValueOption headers = 2;
+  string body = 3;
+}
+
+// denied_response/ok_response are a oneof in Envoy; a oneof is wire-identical
+// to plain fields, and we only ever set one.
+message CheckResponse {
+  Status status = 1;
+  DeniedHttpResponse denied_response = 2;
+  OkHttpResponse ok_response = 3;
+}

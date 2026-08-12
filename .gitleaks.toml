@@ -1,0 +1,28 @@
+# Secret scanning for the repo — UAI-78.
+#
+# Run locally:
+#   docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest detect --source /repo --redact
+#
+# The two allowlisted values below are deliberate fakes in tests, verified by
+# reading them. They are narrow, value-specific exceptions on purpose: a broad
+# path exclusion over `tests/` would be the easy fix and would also blind the
+# scanner to a real credential pasted into a fixture, which is exactly how test
+# directories become the place secrets hide.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Deliberate fakes in tests, each verified by hand"
+# Match the source line, not the secret: gitleaks compares against the captured
+# secret by default, and one of these is a runtime-generated key whose value
+# never appears in the file at all — only the variable holding it does.
+regexTarget = "line"
+regexes = [
+  # A Stripe-shaped literal in the test asserting that unnamed arguments never
+  # reach the audit chain. The value exists to be *excluded* from evidence.
+  '''sk_live_SUPERSECRET''',
+  # An Ed25519/EC key generated at runtime by the throwaway PKI fixture and
+  # held in a local named `rogue_key`; nothing is stored on disk or committed.
+  '''rogue_key''',
+]

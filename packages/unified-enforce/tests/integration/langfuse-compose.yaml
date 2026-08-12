@@ -1,0 +1,138 @@
+# Self-hosted Langfuse, trimmed for automated testing, and version-parameterized
+# so the suite can cover the releases partners actually run rather than only
+# the newest (LANGFUSE_VERSION). Used by
+# tests/integration/test_otlp_backends.py (marked `integration`).
+#
+# Derived from Langfuse's official docker-compose. Four changes, all so this
+# can run unattended on a developer laptop next to whatever else is listening:
+#
+#  1. Only langfuse-web publishes a host port, on ${LANGFUSE_PORT}. The upstream
+#     file binds 5432/6379/8123/9000 as well, which collide with any local
+#     Postgres or Redis — the containers still talk to each other over the
+#     compose network, so nothing is lost by keeping them internal.
+#  2. LANGFUSE_INIT_* seeds an org, project, and API key pair at startup, so the
+#     test never has to drive the sign-up UI to obtain credentials.
+#  3. Ingestion delays are pinned to ~0 so a span reaches ClickHouse in seconds
+#     rather than on the production batching cadence.
+#  4. No named volumes: every run starts empty and leaves nothing behind.
+#
+# Secrets below are throwaway fixtures for a container that lives for the
+# duration of one test run. They are not credentials.
+
+services:
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:${LANGFUSE_VERSION:-4}
+    restart: always
+    depends_on: &langfuse-depends-on
+      postgres: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+    environment: &langfuse-worker-env
+      NEXTAUTH_URL: http://localhost:3000
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/postgres
+      SALT: testsalt
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      # Get a span into ClickHouse in seconds, not on the production cadence.
+      LANGFUSE_INGESTION_QUEUE_DELAY_MS: "0"
+      LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: "1000"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: myredissecret
+      REDIS_TLS_ENABLED: "false"
+
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:${LANGFUSE_VERSION:-4}
+    restart: always
+    depends_on: *langfuse-depends-on
+    ports:
+      - "127.0.0.1:${LANGFUSE_PORT:-3000}:3000"
+    environment:
+      <<: *langfuse-worker-env
+      NEXTAUTH_SECRET: testsecret
+      # Seed an org, project and key pair so the test can authenticate without
+      # ever touching the UI.
+      LANGFUSE_INIT_ORG_ID: unified-test-org
+      LANGFUSE_INIT_ORG_NAME: Unified Test Org
+      LANGFUSE_INIT_PROJECT_ID: unified-test-project
+      LANGFUSE_INIT_PROJECT_NAME: unified-enforce
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-unified-test
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-unified-test
+      LANGFUSE_INIT_USER_EMAIL: test@unified-ai.app
+      LANGFUSE_INIT_USER_NAME: Test
+      LANGFUSE_INIT_USER_PASSWORD: password123
+
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:${CLICKHOUSE_VERSION:-25.12}
+    restart: always
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 1s
+
+  minio:
+    image: cgr.dev/chainguard/minio
+    restart: always
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 20
+      start_period: 1s
+
+  redis:
+    image: docker.io/redis:7
+    restart: always
+    command: --requirepass myredissecret --maxmemory-policy noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  postgres:
+    image: docker.io/postgres:17
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      TZ: UTC
+      PGTZ: UTC

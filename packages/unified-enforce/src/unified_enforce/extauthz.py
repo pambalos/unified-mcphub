@@ -1,0 +1,284 @@
+"""E3 gateway scaffold — Envoy ext_authz seam. Spec: specs/enforce/e3.v1.md.
+
+Envoy is the data plane (technologies.md: we do not build a proxy). This module
+is the engine side of that split, layered so the transport is swappable:
+
+- `ExtAuthzCore.check()` — transport-agnostic: HTTP request attributes → canonical
+  Action (origin "gateway") → Enforcer (decide + chain + span) → CheckResult.
+- `create_http_service()` — Envoy `http_service` ext_authz transport (a plain
+  HTTP authorization server). Working today; needs the [gateway] extra.
+- gRPC `envoy.service.auth.v3.Authorization` transport — the locked target for
+  the sub-10 ms path — lands next on the same core (proto vendoring tracked in
+  the spec). Nothing above the transport changes.
+
+Verdict mapping at the network layer: ALLOW → 200; DENY → 403; DEFER → 403 with
+`x-unified-verdict: defer` (fail closed — a gateway has no interactive approval
+channel until the approval contract is wired in; M0.8). Every response carries
+`x-unified-*` headers so callers and Envoy access logs see why.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from .action import Action, ActionContext, Principal
+from .enforcer import Enforcer
+from .policy import Decision, Verdict
+
+PRINCIPAL_HEADER = "x-unified-principal"
+#: Set by the E4 SDK to the digest of the semantic Action it already decided,
+#: so both observations of one operation can be joined in the audit chain.
+CORRELATION_HEADER = "x-unified-action"
+_TRACEPARENT = re.compile(r"^[0-9a-f]{2}-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$")
+_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class BodyInspection:
+    """Opt-in request-body parsing — spec §8, E3 completion.
+
+    Off by default. Without it the gateway sees only method/host/path, so
+    policy can say "no POST to /v1/payouts" but never "no refund over $5,000".
+    It stays opt-in because it changes the latency profile, requires Envoy to
+    buffer request bodies, and pulls payloads into the audit chain (where the
+    capture level then governs what is retained).
+
+    **Numbers are parsed as strings.** `json.loads(..., parse_float=str)` keeps
+    `8000.50` as `"8000.50"` rather than a float. Floats are rejected by strict
+    canonicalization precisely because their repr is not portable, so parsing
+    them would make the action digest unstable across verifiers. Keeping the
+    literal text is exact, deterministic, and matches the args matchers, which
+    str()-coerce anyway. In CEL, compare with `double(params.amount) > 5000`.
+
+    `on_unreadable` governs a body we cannot turn into params — oversize,
+    truncated, malformed, a content type outside `content_types`, or a JSON
+    document that isn't an object. Enabling body inspection is a statement that
+    bodies carry meaning for policy, so the default is **deny**: a body we
+    cannot read is a body we cannot clear. Set `"ignore"` to fall through to
+    the header-level rules instead, which is the right choice when body rules
+    only ever *narrow* an already-restrictive policy.
+    """
+
+    max_bytes: int = 64 * 1024
+    content_types: tuple[str, ...] = ("application/json",)
+    on_unreadable: Literal["deny", "ignore"] = "deny"
+
+
+@dataclass
+class CheckInput:
+    """The attributes of one intercepted request, however the transport got them."""
+
+    principal_id: str  # from mTLS SAN, sidecar identity, or PRINCIPAL_HEADER
+    method: str
+    host: str
+    path: str  # includes query string if any
+    scheme: str = "https"
+    headers: dict[str, str] = field(default_factory=dict)  # lowercase keys
+    body: bytes | None = None  # only when the filter sets with_request_body
+    # Envoy's declared full request size. None when the transport cannot know
+    # it; a value larger than len(body) means Envoy truncated the body.
+    body_size: int | None = None
+
+
+@dataclass
+class CheckResult:
+    allowed: bool
+    status_code: int  # 200 | 403
+    headers: dict[str, str]  # x-unified-* response headers
+    body: str
+    decision: Decision
+    action: Action
+
+
+def _trace_ids(headers: dict[str, str]) -> tuple[str | None, str | None]:
+    m = _TRACEPARENT.match(headers.get("traceparent", ""))
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+class ExtAuthzCore:
+    """Transport-agnostic ext_authz decision path.
+
+    Principal trust (spec §5) is a deployment property, so it is configured
+    here rather than assumed by a transport:
+
+    - `default_principal` — per-agent **sidecar** mode: identity comes from
+      *which* sidecar received the request, so set it at startup
+      (`agent:crew-1`) and leave the header untrusted.
+    - `trust_principal_header` — **gateway** (multi-tenant) mode: identity
+      arrives in `x-unified-principal`, which is only as trustworthy as the
+      infrastructure that sets it. The header MUST be stripped from
+      client-supplied traffic at the trust boundary (the shipped Envoy
+      templates do this); otherwise an agent can impersonate any principal.
+    - mTLS SAN, when the mesh provides it, outranks both and is unspoofable.
+    """
+
+    def __init__(
+        self,
+        enforcer: Enforcer,
+        *,
+        default_principal: str = "agent:unknown",
+        trust_principal_header: bool = True,
+        body_inspection: BodyInspection | None = None,
+    ) -> None:
+        self._enforcer = enforcer
+        self._default_principal = default_principal
+        self._trust_principal_header = trust_principal_header
+        self._body = body_inspection
+
+    def principal_for(self, *, mtls: str | None = None, header: str | None = None) -> str:
+        """Resolve the acting principal: mTLS identity > header > default.
+
+        An mTLS SAN (e.g. `spiffe://cluster.local/ns/prod/sa/crew-1`) is passed
+        through verbatim — policy globs match SPIFFE paths directly, and any
+        rewrite here would be lossy guesswork.
+        """
+        if mtls:
+            return mtls
+        if header and self._trust_principal_header:
+            return header
+        return self._default_principal
+
+    def _read_body(self, req: CheckInput) -> tuple[dict[str, Any], str | None]:
+        """Parse the request body into params. Returns (params, problem).
+
+        `problem` is None when there is nothing wrong — including the common
+        case of a request that simply has no body (GET, DELETE). An absent body
+        is not a failure to read one: a params-dependent rule just won't match.
+        """
+        cfg = self._body
+        if cfg is None or not req.body:
+            return {}, None
+        ctype = req.headers.get("content-type", "").split(";")[0].strip().lower()
+        if ctype not in cfg.content_types:
+            return {}, "unsupported_content_type"
+        if len(req.body) > cfg.max_bytes:
+            return {}, "oversize"
+        # Envoy truncates rather than rejects when allow_partial_message is on.
+        # A prefix of a JSON document usually fails to parse anyway, but it can
+        # parse cleanly by luck, so check the declared size rather than trust it.
+        if req.body_size is not None and req.body_size > len(req.body):
+            return {}, "truncated"
+        try:
+            parsed = json.loads(req.body, parse_float=str)
+        except (ValueError, UnicodeDecodeError):
+            return {}, "unparseable"
+        if not isinstance(parsed, dict):
+            return {}, "not_an_object"  # params is a mapping; a bare list/scalar isn't one
+        return parsed, None
+
+    def check(self, req: CheckInput) -> CheckResult:
+        trace_id, span_id = _trace_ids(req.headers)
+        params, problem = self._read_body(req)
+        extra: dict[str, Any] = {}
+        if problem is not None:
+            # Recorded even when ignored, so the audit log shows that params
+            # were unavailable rather than merely absent — an auditor can tell
+            # "no rule matched" from "we never saw what this request carried".
+            extra["body"] = problem
+        # SDK correlation (E4). Recorded as a CLAIM and deliberately not
+        # trusted: anything inside the trust boundary can set this header, so a
+        # hostile agent could point it at an unrelated action's digest. It never
+        # affects the verdict — the gateway decides on what it observed either
+        # way — and only the SDK's own chained entry is authoritative. Its value
+        # is that an honest client makes the two records joinable.
+        claimed = req.headers.get(CORRELATION_HEADER)
+        if claimed and _DIGEST.match(claimed):
+            extra["sdk_action_claimed"] = claimed
+        action = Action.build(
+            principal=Principal(id=req.principal_id),
+            tool=f"{req.scheme}://{req.host}{req.path}",
+            verb=req.method.lower(),
+            resource="*",  # network layer can't see business semantics — that's the SDK's job (E4)
+            params=params,  # empty unless body inspection is enabled (see BodyInspection)
+            context=ActionContext(
+                origin="gateway", trace_id=trace_id, span_id=span_id, extra=extra
+            ),
+        )
+        if problem is not None and self._body is not None and self._body.on_unreadable == "deny":
+            # Short-circuit: params-dependent rules cannot be evaluated, so no
+            # ALLOW here would be trustworthy. Recorded through the enforcer so
+            # it is chained and traced exactly like a policy verdict.
+            decision = self._enforcer.record(
+                action,
+                Decision(
+                    verdict=Verdict.DENY,
+                    rule_id=None,
+                    source="body_unreadable",
+                    reason=f"request body {problem}",
+                ),
+            )
+        else:
+            decision = self._enforcer.enforce(action)
+        allowed = decision.verdict is Verdict.ALLOW
+        headers = {
+            "x-unified-verdict": decision.verdict.value,
+            "x-unified-source": decision.source,
+            "x-unified-action-digest": action.digest(),
+        }
+        if decision.rule_id is not None:
+            headers["x-unified-rule"] = decision.rule_id
+        body = "" if allowed else f"unified-enforce: {decision.verdict.value}"
+        return CheckResult(
+            allowed=allowed,
+            status_code=200 if allowed else 403,
+            headers=headers,
+            body=body,
+            decision=decision,
+            action=action,
+        )
+
+
+def create_http_service(core: ExtAuthzCore) -> Any:
+    """Envoy `http_service` ext_authz server: 200 = allow, 403 = deny.
+
+    Envoy forwards the original method and path (plus `path_prefix` if
+    configured — any prefix is accepted here) and the allowlisted headers;
+    see deploy/envoy/ext_authz-http.yaml. Requires the [gateway] extra.
+    """
+    try:
+        from fastapi import FastAPI, Request, Response
+    except ImportError as exc:
+        raise RuntimeError(
+            "FastAPI is not installed — pip install 'unified-enforce[gateway]'"
+        ) from exc
+
+    app = FastAPI(title="unified-enforce ext_authz", docs_url=None, redoc_url=None)
+
+    async def check(path, request):
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        full_path = "/" + path
+        if request.url.query:
+            full_path += "?" + request.url.query
+        body = await request.body()
+        result = core.check(
+            CheckInput(
+                principal_id=core.principal_for(header=headers.get(PRINCIPAL_HEADER)),
+                method=request.method,
+                host=headers.get("x-forwarded-host") or headers.get("host", ""),
+                path=full_path,
+                scheme=headers.get("x-forwarded-proto", "https"),
+                headers=headers,
+                body=body or None,
+                # Unlike the gRPC transport, this one has no trustworthy view of
+                # the original request size — Envoy rewrites content-length when
+                # it truncates — so truncation cannot be detected here. Configure
+                # `allow_partial_message: false` with this transport so Envoy
+                # rejects oversized bodies itself rather than silently shortening
+                # one into something that might still parse.
+                body_size=None,
+            )
+        )
+        return Response(content=result.body, status_code=result.status_code, headers=result.headers)
+
+    # PEP 563 stringifies annotations module-wide, and FastAPI can't resolve names
+    # imported inside this function from the module globals — hand it real objects.
+    check.__annotations__ = {"path": str, "request": Request, "return": Response}
+    app.api_route(
+        "/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    )(check)
+
+    return app

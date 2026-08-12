@@ -1,0 +1,115 @@
+# Envoy sidecar template — unified-enforce ext_authz (HTTP transport). E3 scaffold.
+#
+# Every request an agent makes egresses through this listener; the ext_authz
+# filter consults the engine (127.0.0.1:9002) and enforces its verdict.
+# failure_mode_allow is false: if the engine is down, traffic is DENIED.
+#
+# The no-bypass guarantee is egress policy AROUND this sidecar (NetworkPolicy /
+# iptables / security groups): the agent's network namespace must have no route
+# out except this listener. Templates per deployment mode ship with E3 proper.
+#
+# gRPC transport (the locked target, same engine core) ships alongside this
+# file as ext_authz-grpc.yaml — prefer it; this HTTP variant is for
+# environments where a gRPC sidecar hop is inconvenient.
+#
+# Validated against Envoy's real schema by
+# tests/integration/test_envoy_ext_authz.py (needs Docker). Manually:
+#   docker run --rm -v "$PWD:/cfg" envoyproxy/envoy:v1.31-latest \
+#     envoy --mode validate -c /cfg/ext_authz-http.yaml
+
+static_resources:
+  listeners:
+    - name: agent_egress
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 10000 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: agent_egress
+                route_config:
+                  name: all
+                  # Keep internal headers off the wire to third parties. Route-level
+                  # removal happens when the request is FORWARDED — i.e. after
+                  # ext_authz has already run — so this protects the upstream, and
+                  # is NOT what stops an agent from naming its own principal. That
+                  # is the header_mutation filter below.
+                  request_headers_to_remove:
+                    - "x-unified-principal"
+                    - "x-unified-action"
+                  virtual_hosts:
+                    - name: upstream
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: dynamic_forward }
+                http_filters:
+                  # MUST precede ext_authz — deletes the header before the engine
+                  # sees it, so identity can only come from the sidecar's
+                  # configured default_principal. Multi-tenant gateway deployments
+                  # that convey identity via this header must remove this filter
+                  # and strip the header at their own trust boundary instead.
+                  - name: envoy.filters.http.header_mutation
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+                      mutations:
+                        request_mutations:
+                          - remove: "x-unified-principal"
+                  - name: envoy.filters.http.ext_authz
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                      transport_api_version: V3
+                      failure_mode_allow: false   # engine down => deny (fail closed)
+                      http_service:
+                        server_uri:
+                          uri: http://127.0.0.1:9002
+                          cluster: unified_enforce
+                          timeout: 0.050s          # decision budget is <10ms; 50ms is headroom
+                        authorization_request:
+                          allowed_headers:
+                            patterns:
+                              - exact: x-unified-principal
+                              - exact: x-unified-action   # SDK correlation (E4)
+                              - exact: content-type       # body inspection (E3 §9)
+                              - exact: traceparent
+                              - exact: host
+                              - exact: x-forwarded-host
+                              - exact: x-forwarded-proto
+                        authorization_response:
+                          allowed_upstream_headers:
+                            patterns:
+                              - prefix: x-unified-
+                          allowed_client_headers:
+                            patterns:
+                              - prefix: x-unified-
+                  - name: envoy.filters.http.dynamic_forward_proxy
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
+                      dns_cache_config:
+                        name: egress_dns
+                        dns_lookup_family: V4_ONLY
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: unified_enforce
+      type: STATIC
+      connect_timeout: 0.25s
+      load_assignment:
+        cluster_name: unified_enforce
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 9002 }
+    - name: dynamic_forward
+      connect_timeout: 5s
+      lb_policy: CLUSTER_PROVIDED
+      cluster_type:
+        name: envoy.clusters.dynamic_forward_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
+          dns_cache_config:
+            name: egress_dns
+            dns_lookup_family: V4_ONLY

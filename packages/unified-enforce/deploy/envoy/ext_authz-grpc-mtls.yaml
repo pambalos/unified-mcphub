@@ -1,0 +1,152 @@
+# Envoy sidecar template — unified-enforce ext_authz over **mutual TLS**. E3 §8.
+#
+# Use this instead of ext_authz-grpc.yaml whenever Envoy and the engine are not
+# the same trust domain: a shared host, a multi-tenant gateway, or any hop that
+# leaves the loopback interface.
+#
+# The threat it closes is not eavesdropping — it is impersonation in both
+# directions. Without it, any local process can call the engine directly to map
+# the policy by probing verdicts, and (the worse direction) any local process
+# that wins the port can pose AS the engine and answer ALLOW to everything.
+# Envoy cannot tell the difference; `failure_mode_allow: false` does not help,
+# because a rogue engine is not a failure.
+#
+# Certificates are supplied by the operator; the engine reads its own with
+# ServerTLS.from_files(...). SPIFFE/SDS users should replace the file-based
+# tls_certificates below with an SDS config — the validation logic is the same.
+#
+#   engine side:
+#     tls = ServerTLS.from_files("/etc/unified/tls/server.crt",
+#                                "/etc/unified/tls/server.key",
+#                                client_ca="/etc/unified/tls/ca.crt")
+#     create_grpc_server(core, "0.0.0.0:9001", tls=tls).start()
+#
+# Pair with an egress policy from deploy/egress/ — Envoy is only the lock if
+# the agent has no route around it.
+#
+# Validated against Envoy's real schema by
+# tests/integration/test_envoy_ext_authz.py (needs Docker). Manually:
+#   docker run --rm -v "$PWD:/cfg" envoyproxy/envoy:v1.31-latest \
+#     envoy --mode validate -c /cfg/ext_authz-grpc-mtls.yaml
+
+static_resources:
+  listeners:
+    - name: agent_egress
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 10000 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: agent_egress
+                route_config:
+                  name: all
+                  # Keep internal headers off the wire to third parties. Route-level
+                  # removal happens when the request is FORWARDED — i.e. after
+                  # ext_authz has already run — so this protects the upstream, and
+                  # is NOT what stops an agent from naming its own principal. That
+                  # is the header_mutation filter below.
+                  request_headers_to_remove:
+                    - "x-unified-principal"
+                    - "x-unified-action"
+                  virtual_hosts:
+                    - name: upstream
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: dynamic_forward }
+                http_filters:
+                  # MUST precede ext_authz — deletes the header before the engine
+                  # sees it, so identity can only come from the mTLS SAN or the
+                  # configured default_principal. Multi-tenant gateway deployments
+                  # that convey identity via this header must remove this filter
+                  # and strip the header at their own trust boundary instead.
+                  - name: envoy.filters.http.header_mutation
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.header_mutation.v3.HeaderMutation
+                      mutations:
+                        request_mutations:
+                          - remove: "x-unified-principal"
+                  - name: envoy.filters.http.ext_authz
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                      transport_api_version: V3
+                      failure_mode_allow: false   # engine down => deny (fail closed)
+                      include_peer_certificate: true  # populates source.principal (mTLS SAN)
+                      grpc_service:
+                        envoy_grpc: { cluster_name: unified_enforce }
+                        timeout: 0.050s           # decision budget is <10ms; 50ms is headroom
+                      # --- opt-in body inspection (E3 §8) ---------------------
+                      # Uncomment to let policy see request bodies, e.g. to deny
+                      # a refund over $5,000 rather than only a POST to /refunds.
+                      # Costs buffering and latency, so it is off by default.
+                      #
+                      # allow_partial_message MUST stay false: with it true Envoy
+                      # silently forwards a truncated body, and a prefix of a JSON
+                      # document can still parse into something that looks
+                      # complete. False makes Envoy reject the oversized request
+                      # itself (413) instead. The engine independently detects
+                      # truncation via the declared size, but that is a backstop
+                      # for misconfiguration, not the primary control.
+                      #
+                      # with_request_body:
+                      #   max_request_bytes: 65536      # match BodyInspection.max_bytes
+                      #   allow_partial_message: false
+                      #   pack_as_bytes: true           # engine reads raw_body
+                  - name: envoy.filters.http.dynamic_forward_proxy
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
+                      dns_cache_config:
+                        name: egress_dns
+                        dns_lookup_family: V4_ONLY
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+  clusters:
+    - name: unified_enforce
+      type: STATIC
+      connect_timeout: 0.25s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}   # gRPC requires HTTP/2
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: unified-enforce
+          common_tls_context:
+            # Envoy's own identity, presented to the engine. The engine is
+            # configured with require_client_auth=True, so omitting this makes
+            # every Check fail the handshake — which, with failure_mode_allow
+            # false, denies all traffic rather than passing it.
+            tls_certificates:
+              - certificate_chain: { filename: /etc/unified/tls/envoy.crt }
+                private_key: { filename: /etc/unified/tls/envoy.key }
+            validation_context:
+              trusted_ca: { filename: /etc/unified/tls/ca.crt }
+              # Verify WHICH engine answered, not merely that the cert chains to
+              # a CA we trust. Without this, any certificate the CA ever issued
+              # — including one held by a compromised neighbour — is accepted.
+              match_typed_subject_alt_names:
+                - san_type: DNS
+                  matcher: { exact: "unified-enforce" }
+      load_assignment:
+        cluster_name: unified_enforce
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 9001 }
+    - name: dynamic_forward
+      connect_timeout: 5s
+      lb_policy: CLUSTER_PROVIDED
+      cluster_type:
+        name: envoy.clusters.dynamic_forward_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
+          dns_cache_config:
+            name: egress_dns
+            dns_lookup_family: V4_ONLY

@@ -1,7 +1,8 @@
 """Audit-log reader — spec §6.5 (SEC-MCP-3 CLI half).
 
 Pure read-side functions over an audit directory of <UTC-date>.jsonl files
-written by audit.py. Backs `audit show | pair | search | tail | lint | prune`.
+written by audit.py. Backs `audit show | pair | search | tail | lint | prune |
+verify`.
 """
 
 from __future__ import annotations
@@ -9,6 +10,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from unified_enforce.audit import HashChainWriter, VerifyResult
 
 _ALLOWED_DECISIONS = {"allow", "prompt_allowed", "approval_disabled"}
 
@@ -113,6 +116,11 @@ def lint(audit_dir: Path) -> list[str]:
     for rid in completed - set(received):
         problems.append(f"request {rid}: completed with no received entry")
     return problems
+
+
+def verify(audit_dir: Path) -> VerifyResult:
+    """Replay the hash chain offline: any edited or deleted entry breaks it."""
+    return HashChainWriter.verify(audit_dir)
 
 
 def prune(audit_dir: Path, retention_days: int) -> list[str]:

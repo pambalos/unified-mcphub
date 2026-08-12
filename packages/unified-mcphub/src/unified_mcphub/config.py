@@ -95,10 +95,37 @@ class ApprovalConfig(BaseModel):
     remote_timeout_s: float = 300.0
 
 
+class OtelConfig(BaseModel):
+    """Decision spans over OTLP — UAI-86 / UAI-116, M0.5 Observability.
+
+    Off by default and non-breaking when off: the disabled telemetry object is
+    a no-op and the OpenTelemetry packages are only imported when enabled (they
+    live behind the `unified-enforce[otel]` extra, which the hub does not
+    require). Telemetry is emitted *after* a verdict, never on the decision
+    path.
+
+    The backend is any OTLP/HTTP collector: the embedded Tempo default, or a
+    hosted one. For Langfuse (self-hosted or cloud) set `langfuse_host` plus
+    the two keys instead of `endpoint` — the OTLP path and Basic-auth header
+    are derived from the host, and verdicts map onto
+    `langfuse.observation.level`.
+    """
+
+    enabled: bool = False
+    service_name: str = "unified-mcphub"
+    endpoint: str | None = None  # OTLP/HTTP traces endpoint (full URL)
+    headers: dict[str, str] = Field(default_factory=dict)
+    # Langfuse base URL, e.g. https://cloud.langfuse.com — not the OTLP path.
+    langfuse_host: str | None = None
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+
+
 class HubConfig(BaseModel):
     listen: ListenConfig = Field(default_factory=ListenConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
+    otel: OtelConfig = Field(default_factory=OtelConfig)
     active_workspace: str = "default"
     # Supply-chain safety floor: refuse to stand up an unpinned fetch-and-run
     # upstream (`npx -y pkg`, bare `uvx pkg`). A *drift guard* — it stops silent

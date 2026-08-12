@@ -122,6 +122,14 @@ class Snapshot:
     revocations_health: Health = Health.UNPROVISIONED
     revocations_version: int | None = None
 
+    #: A candidate bundle to evaluate, never to enforce (spec §8). Held in
+    #: entirely separate fields from the enforcing bundle rather than as a flag
+    #: on it, because the one thing that must never happen is a candidate being
+    #: mistaken for policy — and a boolean beside the files is one wrong
+    #: condition away from exactly that.
+    shadow_version: int | None = None
+    shadow_files: dict[str, bytes] = field(default_factory=dict)
+
     def is_usable(self) -> bool:
         return self.health in (Health.FRESH, Health.STALE)
 
@@ -168,6 +176,7 @@ class RefreshReport:
     can surface it — an operator needs to see *why* a fleet went stale."""
 
     applied_bundle: bool = False
+    applied_shadow: bool = False
     applied_revocations: bool = False
     unreachable: bool = False
     #: Refusals worth alarming on. Unreachability is deliberately absent.
@@ -235,6 +244,7 @@ class Distribution:
             return report
 
         self._apply_bundle(bundle_doc, keys, now_ms, report)
+        self._apply_shadow(bundle_doc, keys, now_ms, report)
         self._apply_revocations(revocations_doc, keys, now_ms, report)
         self._reassess(now_ms)
         return report
@@ -286,6 +296,91 @@ class Distribution:
         report.applied_bundle = True
         self._write_cache("bundle.json", doc)
 
+    def _apply_shadow(
+        self,
+        doc: Any,
+        keys: Mapping[str, VerificationKey],
+        now_ms: int,
+        report: RefreshReport,
+        *,
+        hydrating: bool = False,
+    ) -> None:
+        """Accept a candidate for evaluation. It can never become policy.
+
+        Verified exactly like the enforcing bundle — same signature, same fleet
+        binding, same rollback rule — because a candidate that could be forged
+        would let an attacker choose what the divergence report says, and a
+        divergence report is what an operator reads before promoting.
+
+        It has its own freshness line, and the reason is narrower than it first
+        appears. Promotion works either way — accepting a candidate never
+        advances the enforcing pointer — so the line is not about that. What it
+        buys is rollback protection *for the candidate*: with a shared
+        baseline, a candidate at v6 compared against an enforcing v5 accepts a
+        replayed v6 carrying an earlier expiry, because 6 > 5 passes before the
+        equal-version refresh rule is ever reached. An attacker could then pin
+        the divergence report to a stale proposal, which is what an operator
+        reads before promoting.
+
+        (An earlier version of this comment claimed a shared line would block
+        promotion. It would not; mutation testing said so.)
+        """
+        if not isinstance(doc, dict):
+            return
+        shadow = doc.get("shadow")
+        if not shadow:
+            # No candidate, or one that has been promoted or superseded. Drop
+            # what we were holding rather than keep reporting divergences
+            # against a question nobody is asking any more.
+            self.snapshot.shadow_version = None
+            self.snapshot.shadow_files = {}
+            self._shadow_expire_at = None
+            return
+
+        # The real expiry, not a zero. Passing 0 here makes the equal-version
+        # refresh rule compare against nothing, so any replayed artifact at the
+        # same version passes — which defeats the whole point of tracking a
+        # freshness line for the candidate.
+        held = (
+            BundleState(self.snapshot.shadow_version, self._shadow_expire_at or 0)
+            if self.snapshot.shadow_version is not None
+            else None
+        )
+        verdict = accept_manifest(
+            shadow.get("manifest"),
+            keys,
+            fleet_id=self._fleet,
+            current=held,
+            now_ms=now_ms,
+            required_kids=self._required_kids,
+            ignore_expiry=hydrating,
+        )
+        if not verdict:
+            self._refuse(report, "shadow", verdict.reason, verdict.detail)
+            return
+
+        if verdict.payload.get("mode") != "shadow":
+            # A bundle offered as a candidate that does not say so inside its
+            # own signature. Refused rather than evaluated: the mismatch means
+            # either a bug or an attempt to have a signed enforcing bundle
+            # treated as a proposal, and neither should be quietly tolerated.
+            self._refuse(report, "shadow", Reason.WRONG_SCHEMA, "manifest mode is not shadow")
+            return
+
+        files = {
+            path: content.encode() if isinstance(content, str) else content
+            for path, content in (shadow.get("files") or {}).items()
+        }
+        file_verdict = verify_files(verdict.payload, files)
+        if not file_verdict:
+            self._refuse(report, "shadow_files", file_verdict.reason, file_verdict.detail)
+            return
+
+        self.snapshot.shadow_version = verdict.payload["version"]
+        self.snapshot.shadow_files = files
+        self._shadow_expire_at = verdict.payload["expires_at_ms"]
+        report.applied_shadow = True
+
     def _apply_revocations(
         self,
         doc: Any,
@@ -296,7 +391,7 @@ class Distribution:
         hydrating: bool = False,
     ) -> None:
         held = (
-            BundleState(self.snapshot.revocations_version, 0)
+            BundleState(self.snapshot.revocations_version, self._revocations_expire_at or 0)
             if self.snapshot.revocations_version is not None
             else None
         )
@@ -329,6 +424,7 @@ class Distribution:
         self._write_cache("revocations.json", doc)
 
     _revocations_expire_at: int | None = None
+    _shadow_expire_at: int | None = None
 
     def _refuse(self, report: RefreshReport, what: str, reason: Reason | None, detail: str) -> None:
         # Everything that reaches here is worth an operator's attention: a

@@ -79,7 +79,9 @@ def keyset(root: Key, policy_key: Key, *, now=NOW):
     return sign_bytes(payload, root, root.kid)
 
 
-def bundle(policy_key: Key, *, version=1, fleet=FLEET, now=NOW, ttl=DAY, files=None):
+def bundle(
+    policy_key: Key, *, version=1, fleet=FLEET, now=NOW, ttl=DAY, files=None, mode="enforce"
+):
     files = files if files is not None else {"base.yaml": b"default: deny\n"}
     import hashlib
 
@@ -90,7 +92,7 @@ def bundle(policy_key: Key, *, version=1, fleet=FLEET, now=NOW, ttl=DAY, files=N
             "version": version,
             "issued_at_ms": ms(now),
             "expires_at_ms": ms(now + ttl),
-            "mode": "enforce",
+            "mode": mode,
             "files": [
                 {"path": p, "sha256": hashlib.sha256(c).hexdigest(), "size": len(c)}
                 for p, c in sorted(files.items())
@@ -511,3 +513,165 @@ def test_a_restart_remembers_who_was_contained_even_if_the_list_has_expired(
     forced = restarted.gate(action())
     assert forced.verdict == "deny"
     assert forced.source == "containment", "the containment survived the restart"
+
+
+# --- shadow candidates ----------------------------------------------------------
+
+
+def with_shadow(enforce_doc, shadow_doc, version):
+    return {**enforce_doc, "shadow": {"version": version, **shadow_doc}}
+
+
+def test_a_candidate_is_held_but_never_enforced(source, root, policy_key):
+    """The invariant shadow mode exists to keep.
+
+    A candidate is a proposal. If it could replace the enforcing bundle, shadow
+    mode would be a way to ship unreviewed policy while believing you were
+    measuring it.
+    """
+    enforced = bundle(policy_key, version=1, files={"base.yaml": b"deny: all\n"})
+    proposed = bundle(policy_key, version=2, mode="shadow", files={"base.yaml": b"allow: all\n"})
+    source.bundle_doc = with_shadow(enforced, proposed, 2)
+
+    dist = make(source, root)
+    report = dist.refresh(now=NOW)
+
+    assert report.applied_bundle and report.applied_shadow
+    assert dist.snapshot.version == 1, "the enforcing bundle is unchanged"
+    assert dist.snapshot.files == {"base.yaml": b"deny: all\n"}
+    assert dist.snapshot.shadow_version == 2
+    assert dist.snapshot.shadow_files == {"base.yaml": b"allow: all\n"}
+
+
+def test_a_bundle_in_the_shadow_slot_must_say_shadow_inside_its_signature(source, root, policy_key):
+    """Otherwise the slot decides, and the slot is not signed.
+
+    A signed *enforcing* bundle offered as a candidate would be evaluated as a
+    proposal — or, read the other way, whoever controls the response chooses
+    which of two signed bundles is treated as policy.
+    """
+    enforced = bundle(policy_key, version=1)
+    mislabelled = bundle(policy_key, version=2, mode="enforce")
+    source.bundle_doc = with_shadow(enforced, mislabelled, 2)
+
+    dist = make(source, root)
+    report = dist.refresh(now=NOW)
+
+    assert not report.applied_shadow
+    assert report.alarming()
+    assert dist.snapshot.shadow_version is None
+
+
+def test_a_forged_candidate_is_refused_like_any_other_bundle(source, root, policy_key):
+    """A divergence report is what an operator reads before promoting.
+
+    An attacker who could forge a candidate would choose what that report says.
+    """
+    enforced = bundle(policy_key, version=1)
+    forged = bundle(Key(), version=2, mode="shadow")
+    source.bundle_doc = with_shadow(enforced, forged, 2)
+
+    dist = make(source, root)
+    report = dist.refresh(now=NOW)
+
+    assert not report.applied_shadow
+    assert report.alarming()
+
+
+def test_a_candidate_for_another_fleet_is_refused(source, root, policy_key):
+    enforced = bundle(policy_key, version=1)
+    other = bundle(policy_key, version=2, mode="shadow", fleet="staging")
+    source.bundle_doc = with_shadow(enforced, other, 2)
+
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+
+    assert dist.snapshot.shadow_version is None
+
+
+def test_a_withdrawn_candidate_is_dropped(source, root, policy_key):
+    """Promoted or superseded, there is nothing left to measure.
+
+    Continuing would report divergences against a question nobody is asking.
+    """
+    enforced = bundle(policy_key, version=1)
+    proposed = bundle(policy_key, version=2, mode="shadow")
+    source.bundle_doc = with_shadow(enforced, proposed, 2)
+
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+    assert dist.snapshot.shadow_version == 2
+
+    source.bundle_doc = enforced  # no shadow field any more
+    dist.refresh(now=NOW + timedelta(minutes=1))
+
+    assert dist.snapshot.shadow_version is None
+    assert dist.snapshot.shadow_files == {}
+
+
+def test_a_replayed_candidate_is_refused_on_its_own_freshness_line(source, root, policy_key):
+    """The property the separate line actually buys.
+
+    With a shared baseline, a candidate at v6 is compared against the enforcing
+    v5 and a replayed v6 carrying an *earlier* expiry passes on `6 > 5` before
+    the equal-version refresh rule is reached. An attacker could then pin the
+    divergence report to a stale proposal — and that report is what an operator
+    reads before promoting.
+    """
+    fresh = bundle(policy_key, version=2, mode="shadow", ttl=DAY)
+    source.bundle_doc = with_shadow(bundle(policy_key, version=1), fresh, 2)
+
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+    assert dist.snapshot.shadow_version == 2
+
+    stale = bundle(policy_key, version=2, mode="shadow", ttl=timedelta(hours=1))
+    source.bundle_doc = with_shadow(bundle(policy_key, version=1), stale, 2)
+    report = dist.refresh(now=NOW + timedelta(minutes=1))
+
+    assert not report.applied_shadow, "a replayed candidate was accepted"
+    assert report.alarming()
+
+
+def test_a_candidate_does_not_block_the_enforcing_bundle_reaching_its_version(
+    source, root, policy_key
+):
+    """Proposing a change must not stand in the way of shipping it.
+
+    Versions are one sequence across both modes, so proposing v2 and then
+    shipping v2 is the ordinary promotion path.
+    """
+    source.bundle_doc = with_shadow(
+        bundle(policy_key, version=1), bundle(policy_key, version=2, mode="shadow"), 2
+    )
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+
+    # The candidate is promoted: same version, now enforcing.
+    source.bundle_doc = bundle(policy_key, version=2, now=NOW + timedelta(minutes=1))
+    report = dist.refresh(now=NOW + timedelta(minutes=1))
+
+    assert report.applied_bundle, f"promotion refused: {report.problems}"
+    assert dist.snapshot.version == 2
+    assert dist.snapshot.shadow_version is None
+
+
+def test_a_replayed_revocation_list_is_refused(source, root, policy_key):
+    """Same freshness rule, on the artifact where staleness matters most.
+
+    A replayed refresh at the same version pushes the sidecar's idea of when
+    the list expires *backwards*. Here that fails safe — an earlier expiry
+    escalates sooner — but relying on a fail-safe accident for the containment
+    artifact is not a control, and the same defect on the policy line would not
+    fail safe at all.
+    """
+    source.revocations_doc = revocations(policy_key, version=1, ttl=timedelta(hours=1))
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+    assert dist.snapshot.revocations_version == 1
+
+    source.revocations_doc = revocations(policy_key, version=1, ttl=timedelta(minutes=5))
+    report = dist.refresh(now=NOW + timedelta(minutes=1))
+
+    assert not report.applied_revocations, "a replayed revocation list was accepted"
+    assert report.alarming()

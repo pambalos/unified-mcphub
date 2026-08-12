@@ -19,6 +19,7 @@ from .approval import ApprovalOutcome, ApprovalRequest, Approvals, RecordedAppro
 from .audit import AuditChain
 from .distribution import Distribution
 from .evidence import EvidenceShipper
+from .shadow import ShadowEvaluator
 from .policy import Decision, PolicyEngine, Verdict
 from .telemetry import Telemetry
 
@@ -32,6 +33,7 @@ class Enforcer:
         approvals: Approvals | None = None,
         distribution: Distribution | None = None,
         evidence: EvidenceShipper | None = None,
+        shadow: ShadowEvaluator | None = None,
     ) -> None:
         self._engine = engine
         self._chain = chain
@@ -39,6 +41,7 @@ class Enforcer:
         self.approvals = approvals
         self._distribution = distribution
         self._evidence = evidence
+        self._shadow = shadow
 
     def enforce(self, action: Action) -> Decision:
         """Distribution state first, then policy.
@@ -83,6 +86,13 @@ class Enforcer:
         # the dashboard is the copy, not the record.
         if self._evidence is not None and audit_error is None:
             self._evidence.record(action, decision, entry=entry)
+
+        # Last, and after the decision is final. A candidate policy exists to
+        # be measured, not consulted: evaluating it before this point would put
+        # an unreviewed proposal in the decision path, which is the one thing
+        # shadow mode must never do.
+        if self._shadow is not None:
+            self._shadow.compare(action, decision)
 
         if audit_error is not None:
             raise audit_error

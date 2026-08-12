@@ -720,3 +720,117 @@ def accept_resolution(
         return _refuse(Reason.BAD_SIGNATURE, f"signature for {kid} did not verify")
 
     return Verdict(ok=True, payload=dict(response))
+
+
+# --- evidence attestation -------------------------------------------------------
+#
+# **What is signed, and why it is not the chain entry.**
+#
+# The obvious move is to ship the audit chain's own per-entry signature and
+# verify that. It buys less than it looks. The chain signs an entry *hash*,
+# which covers the full entry including action content — and evidence carries
+# metadata only, by design, so a receiver holding a summary cannot recompute
+# that hash. It could check the signature over the hash, learn that some entry
+# exists, and still have no reason to believe the summary beside it describes
+# that entry. A malicious receiver could pair a genuine signature with a
+# fabricated summary and it would verify.
+#
+# So the sidecar signs **the summary it sends**, with the chain position and
+# hash inside the signed payload. That gives the property the chain signature
+# only appears to: the receiver's stored copy is verifiable by anyone holding
+# the reporter's public key, including against the receiver itself, and the
+# chain hash inside it is the join back to the customer's own log.
+#
+# **Timestamps are deliberately outside the signature.** Every field below is a
+# string, an integer or null, so there is nothing whose textual form two
+# implementations can disagree about. This project has twice shipped a
+# signature over a formatted timestamp and watched it verify on the machine
+# that made it and fail everywhere else; the digest and the chain hash are what
+# identify an entry, and a timestamp adds nothing an attacker cannot already
+# see.
+
+#: The evidence payload version, inside the signature, so a change of shape is
+#: a change of meaning rather than a silent reinterpretation.
+EVIDENCE_VERSION = 1
+
+#: Exactly what a reporter signs, in order. Named rather than derived from the
+#: record, because "sign whatever was in the dict" makes the signature's
+#: meaning depend on the sender's version — and the receiver would have no way
+#: to know which fields were covered.
+EVIDENCE_FIELDS = (
+    "action_digest",
+    "principal_id",
+    "tool",
+    "verb",
+    "verdict",
+    "rule_id",
+    "source",
+    "chain_seq",
+    "chain_hash",
+)
+
+
+def evidence_payload(record: Mapping[str, Any]) -> dict[str, Any]:
+    """The signable form of one evidence record.
+
+    One function, both ends of the wire, and the control plane vendors this
+    file — so producer and verifier cannot drift into building different bytes
+    and blaming each other's cryptography.
+    """
+    return {
+        "v": EVIDENCE_VERSION,
+        **{field: record.get(field) for field in EVIDENCE_FIELDS},
+    }
+
+
+def sign_evidence(record: Mapping[str, Any], signer: Any) -> dict[str, Any]:
+    """Return `record` with a signature over its signable form attached.
+
+    `signer` is the audit chain's own `Signer` — `sign_bytes(bytes) -> str` and
+    a `key_id`. Deliberately the same key that signs chain entries: a reporter
+    with two identities is a reporter whose evidence and whose chain can be
+    attributed to different parties, which is one more thing to reconcile
+    during an investigation and nothing to gain.
+
+    `sig` and `key_id` sit beside the payload rather than inside it, for the
+    ordinary reason that a signature cannot cover itself.
+    """
+    import base64
+
+    # The chain signer returns standard base64; everything on this wire is
+    # base64url. Converted here rather than at each end, so there is one place
+    # that knows the two encodings differ.
+    raw = base64.b64decode(signer.sign_bytes(canonical(evidence_payload(record))))
+    return {**record, "sig": b64u(raw), "key_id": signer.key_id}
+
+
+def accept_evidence(
+    record: Mapping[str, Any],
+    public_key_b64: str,
+) -> Verdict:
+    """Check one evidence record against the reporter's key.
+
+    Returns a `Verdict` and never raises, like everything else here. A refusal
+    is not a reason to discard the record — see `chains.py` in the control
+    plane for why: dropping evidence that fails a check hands anyone able to
+    report a way to suppress a record by making it fail. This says whether the
+    record is *attested*, and that is a property to store and surface, not a
+    filter.
+    """
+    signature_b64 = record.get("sig")
+    if not isinstance(signature_b64, str):
+        return _refuse(Reason.MALFORMED, "evidence carries no signature")
+
+    try:
+        payload = canonical(evidence_payload(record))
+    except CanonicalisationError as exc:
+        return _refuse(Reason.MALFORMED, str(exc))
+
+    try:
+        Ed25519PublicKey.from_public_bytes(unb64u(public_key_b64)).verify(
+            unb64u(signature_b64), payload
+        )
+    except (InvalidSignature, ValueError, TypeError):
+        return _refuse(Reason.BAD_SIGNATURE, "evidence signature did not verify")
+
+    return Verdict(ok=True, payload=dict(record))

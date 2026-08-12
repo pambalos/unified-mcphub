@@ -1,0 +1,37 @@
+packages/unified-enforce/tests/integration/test_egress_no_bypass.py
+  s_b24ad4c243d6fd::t_f6dcceabec9be4 1-62,69-218,251-303
+  s_b24ad4c243d6fd::t_26426e6645aa79 63-68
+  s_b24ad4c243d6fd::t_8d1918ee524cf9 219-250
+packages/unified-enforce/deploy/egress/iptables-sidecar.sh
+  s_b24ad4c243d6fd::t_1631ca0160b266 41-50
+packages/unified-enforce/deploy/egress/README.md
+  s_b24ad4c243d6fd::t_a014784c2de8d9 35-64
+packages/unified-enforce/tests/integration/egress/sidecar.py
+  s_b24ad4c243d6fd::t_6ac3947fafb196 1-26
+packages/unified-enforce/tests/integration/egress/Dockerfile
+  s_b24ad4c243d6fd::t_6c175ea7f7d536 1-17
+packages/unified-enforce/tests/integration/test_egress_manifests.py
+  s_b24ad4c243d6fd::t_117be176c07dd2 1-113
+packages/unified-enforce/tests/integration/egress/udp_probe.py
+  s_b24ad4c243d6fd::t_3ac03cf9ad1626 1-26
+specs/enforce/e3.v1.md
+  s_b24ad4c243d6fd::t_d6640c5e39f3cd 116-140
+packages/unified-enforce/tests/integration/egress/upstream.py
+  s_b24ad4c243d6fd::t_2f37a2325b1024 1-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "275e3db49d09861bb0808ee9ab72525a8e9259c3",
+  "prompts": {},
+  "sessions": {
+    "s_b24ad4c243d6fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "18a252bb-92e9-41e0-8235-2461e06281b3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

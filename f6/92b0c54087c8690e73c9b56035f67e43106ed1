@@ -1,0 +1,82 @@
+packages/unified-mcphub/src/unified_mcphub/installers/redaction_hook.py
+  s_8e6c0be89caec0::t_6d0cd0259ecea6 1-83
+packages/unified-mcphub/src/unified_mcphub/transports.py
+  s_c31b9e0fa03557::t_314a953a9e0f30 197
+packages/unified-mcphub/src/unified_mcphub/config.py
+  s_c31b9e0fa03557::t_6f42ea9a6e59f9 124-142,147
+  s_c31b9e0fa03557::t_0e1386fe101f02 263-268
+packages/unified-mcphub/src/unified_mcphub/installers/claude_code.py
+  s_8e6c0be89caec0::t_e3750bc57a003c 121
+  s_8e6c0be89caec0::t_3ba4fcf4582c85 108-109
+  s_8e6c0be89caec0::t_0f6912e1b9fc9c 23,27-32
+packages/unified-mcphub/src/unified_mcphub/servers.py
+  s_c31b9e0fa03557::t_7798c076b5987d 213
+packages/unified-mcphub/src/unified_mcphub/installers/_common.py
+  s_8e6c0be89caec0::t_470844e209d239 17,21-27
+packages/unified-mcphub/src/unified_mcphub/installers/__init__.py
+  s_8e6c0be89caec0::t_745394cb2e7fd0 5,10,16,22
+README.md
+  s_c31b9e0fa03557::t_de4e8da37b059a 98-112
+packages/unified-mcphub/tests/unit/test_secrets_gate.py
+  s_c31b9e0fa03557::t_11711137d929e8 1-83
+packages/unified-mcphub/tests/unit/test_installer_cursor.py
+  s_8e6c0be89caec0::t_d2de5c946e719d 1-72
+packages/unified-mcphub/src/unified_mcphub/hub.py
+  s_c31b9e0fa03557::t_1b505e6d0fddd4 124
+  s_c31b9e0fa03557::t_663fcb6de88ef5 142-180,185
+packages/unified-mcphub/src/unified_mcphub/secrets.py
+  s_c31b9e0fa03557::t_284e7f73cad2cc 3-19,25-27,33,36-37,40-75,79-85,87-101,119-168,170-175,178-183
+packages/unified-mcphub/src/unified_mcphub/cli.py
+  s_c31b9e0fa03557::t_92afbe81c69ba6 136-138
+  s_c31b9e0fa03557::t_1a08c13631bc9c 180
+  s_c31b9e0fa03557::t_7f8b20dd9e1f95 151-179,181-188,190
+  s_c31b9e0fa03557::t_0d7ae838dded5d 455-465
+specs/mcphub/oauth-reauth-hardening.v1.md
+  s_ecba7d4f3745da::t_f28e44a5ed7d7e 1-245
+packages/unified-mcphub/tests/e2e/test_m0_install_claude_code.py
+  s_8e6c0be89caec0::t_94c8721c16a228 101-107
+packages/unified-mcphub/tests/unit/test_secrets.py
+  s_c31b9e0fa03557::t_89a8f8e1613503 7-9
+  s_c31b9e0fa03557::t_25cb8cc13947d3 47-139
+packages/unified-mcphub/tests/conftest.py
+  s_c31b9e0fa03557::t_028a650f31e46a 97-101,107-109
+packages/unified-mcphub/src/unified_mcphub/defaults/config.yaml
+  s_c31b9e0fa03557::t_3aa47842737b68 15-27
+packages/unified-mcphub/README.md
+  s_c31b9e0fa03557::t_da9a91f9581484 288
+  s_c31b9e0fa03557::t_b827e2c298e2d6 202-229
+packages/unified-mcphub/src/unified_mcphub/installers/cursor.py
+  s_8e6c0be89caec0::t_3b3fd0e9bd7187 1-67
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "f692b0c54087c8690e73c9b56035f67e43106ed1",
+  "prompts": {},
+  "sessions": {
+    "s_8e6c0be89caec0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68556a7c-bae6-483b-8974-c9ed3cdcd5d0",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    },
+    "s_c31b9e0fa03557": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1e054506-90b2-4b8d-86e2-0de5ec8ed89e",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    },
+    "s_ecba7d4f3745da": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "43c343a3-c7ea-4a23-8913-2ce05e14ce13",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

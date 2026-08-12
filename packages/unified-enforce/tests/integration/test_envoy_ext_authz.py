@@ -18,6 +18,7 @@ import json
 import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -57,6 +58,28 @@ def _docker_ok() -> bool:
 
 
 requires_docker = pytest.mark.skipif(not _docker_ok(), reason="docker daemon not available")
+
+
+def _readable_by_container(path: Path) -> Path:
+    """Make `path` traversable by an unprivileged uid inside a container.
+
+    pytest creates temp dirs 0700 under a 0700 basetemp. Envoy runs as uid 101,
+    so on a real Linux daemon it cannot read a config bind-mounted from one —
+    the container exits and the fixture times out with no useful message.
+    Docker Desktop for macOS hides this by remapping ownership through its file
+    sharing, which is why every one of these tests passed locally and would
+    have failed on the first CI run.
+    """
+    for parent in [path, *path.parents]:
+        try:
+            parent.chmod(parent.stat().st_mode | 0o055)
+        except PermissionError:  # pragma: no cover - outside our tmp tree
+            break
+        if parent == Path(tempfile.gettempdir()):
+            break
+    for child in path.rglob("*"):
+        child.chmod(child.stat().st_mode | 0o044)
+    return path
 
 
 def _free_port() -> int:
@@ -353,7 +376,15 @@ static_resources:
 
 
 def _run_envoy(cfg_dir: Path, extra_mounts: dict[Path, str] | None = None):
-    """Start Envoy in a container; yields the published listener port."""
+    """Start Envoy in a container; yields the published listener port.
+
+    Every mounted path is made container-readable here rather than by callers:
+    two of the five call sites had already forgotten to, and the symptom is a
+    fixture timeout with no indication that permissions were the problem.
+    """
+    _readable_by_container(cfg_dir)
+    for source in extra_mounts or {}:
+        _readable_by_container(source)
     port = _free_port()
     name = f"unified-envoy-test-{port}"
     mounts: list[str] = ["-v", f"{cfg_dir}:/cfg:ro"]
@@ -393,7 +424,7 @@ def tls_dir(tmp_path_factory, pki) -> Path:
     (d / "server.crt").write_bytes(pki["server"][1])
     (d / "envoy.key").write_bytes(pki["client"][0])
     (d / "envoy.crt").write_bytes(pki["client"][1])
-    return d
+    return _readable_by_container(d)
 
 
 # --- the tests ---

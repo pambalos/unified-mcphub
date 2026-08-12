@@ -30,8 +30,11 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
-      - name: Sync workspace (incl. dev tooling)
-        run: uv sync --frozen
+      # --group crewai: the real CrewAI adapter test only runs where the package
+      # installs, which is glibc Linux — not the macOS dev machine, and not the
+      # musl container used by scripts/ci-local.sh.
+      - name: Sync workspace (incl. dev tooling + crewai)
+        run: uv sync --frozen --group crewai
 
       - name: Check formatting
         run: uv run ruff format --check packages
@@ -69,6 +72,13 @@ jobs:
 
       # Pull in advance so a slow registry shows up as a pull failure rather
       # than a mysterious per-test timeout.
+      # test_terraform_modules.py validates every shipped .tf; without this it
+      # skips, which would look like coverage it does not have.
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
       - name: Pre-pull images
         run: |
           docker pull envoyproxy/envoy:v1.31-latest

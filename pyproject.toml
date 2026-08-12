@@ -11,6 +11,13 @@ exclude = ["packages/unified-mcp-graphify"]
 
 # Dev tooling for the whole workspace (uv installs this group by default).
 [dependency-groups]
+# crewai lives in its own group, not `dev`, for two reasons: it cannot install
+# on macOS x86_64 at all (lancedb has no wheel), and on musl it drags in
+# onnxruntime, which has no musllinux wheel either — so a plain `uv sync` in an
+# Alpine container would fail on a dependency nothing in that container needs.
+# CI adds `--group crewai` on glibc Linux, where the real adapter test runs.
+crewai = ["crewai>=0.80.0 ; sys_platform == 'linux'"]
+
 dev = [
     "pytest>=8.4.0",
     "pytest-asyncio>=0.23.0",
@@ -26,7 +33,6 @@ dev = [
     "grpcio-tools>=1.60.0",
     "langchain-core>=1.5.4",
     "llama-index-core>=0.14.23",
-    "crewai>=0.80.0 ; sys_platform == 'linux'",
 ]
 
 # Shared test/lint config so a workspace-wide run behaves identically to the

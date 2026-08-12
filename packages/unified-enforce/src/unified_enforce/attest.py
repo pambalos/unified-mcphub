@@ -19,6 +19,14 @@ class of bug that hit decision signing — where a re-serialised field differed
 between producer and consumer and the signature verified only where it was
 made — cannot occur here at all.
 
+Approval resolutions are the exception and are handled at the bottom of this
+file. They are signed over a canonical JSON form rather than a JWS envelope,
+because the control plane stores the fields and composes the response from
+them. That is a real difference in kind, so `canonical` and `verify_resolution`
+are written to match the producer exactly and the producer's own test suite
+runs against *this* code through the vendored copy — the byte-for-byte
+agreement is checked rather than asserted in a comment.
+
 **Nothing raises on hostile input.** Every check returns a `Verdict` carrying a
 machine-readable reason. A verifier that throws invites a caller to wrap it in
 `try/except`, and the except branch is where somebody eventually decides to let
@@ -51,6 +59,12 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 MANIFEST_SCHEMA = "unified.policy-bundle/v1"
+#: The signed-decision payload version. `v1` carried the approver as a bare
+#: string the console supplied; `v2` carries the derived approver object. Only
+#: v2 is accepted, and that is the point of the version being inside the
+#: signature: a verifier that accepted both would honour a self-declared name
+#: from anything still speaking the old shape.
+RESOLUTION_VERSION = 2
 REVOCATIONS_SCHEMA = "unified.revocations/v1"
 KEYSET_SCHEMA = "unified.keyset/v1"
 
@@ -72,6 +86,9 @@ class Reason(StrEnum):
 
     MALFORMED = "malformed"
     BAD_ALGORITHM = "bad_algorithm"
+    NOT_RESOLVED = "not_resolved"
+    WRONG_ACTION = "wrong_action"
+    UNKNOWN_KIND = "unknown_kind"
     UNKNOWN_KEY = "unknown_key"
     WRONG_ROLE = "wrong_role"
     KEY_EXPIRED = "key_expired"
@@ -496,3 +513,210 @@ def verify_files(manifest: Mapping[str, Any], files: Mapping[str, bytes]) -> Ver
             return _refuse(Reason.FILE_UNEXPECTED, path)
 
     return Verdict(ok=True, payload=dict(manifest))
+
+
+# --- approval resolutions -------------------------------------------------------
+#
+# A resolved approval releases an action a policy floor deliberately held, so
+# **anything able to produce the JSON below can unblock a blocked action**. TLS
+# narrows who can and does not close it: a mis-issued certificate, an over-broad
+# corporate trust store, DNS takeover, or a TLS-terminating proxy somebody added
+# for observability all widen it again. TLS authenticates a peer; it says
+# nothing about an artifact once that artifact is past the socket.
+#
+# So the object is verified, not the connection. Four bindings do the work, and
+# each closes a specific attack:
+#
+#   action_digest  a genuine allow cannot be moved onto a different action
+#   fleet_id       one tenant's decision cannot be served to another
+#   expires_at_ms  a captured allow is an answer, not a standing credential
+#   approver       who authorised it cannot be rewritten after the fact
+#
+# The nonce is deliberately *not* a replay defence here. A sidecar legitimately
+# re-polls the same decision for the same action and must get the same answer;
+# replay onto a different action is stopped by the digest and replay later by
+# the expiry. It distinguishes two otherwise identical decisions, nothing more.
+
+
+class CanonicalisationError(Exception):
+    """A payload that cannot be canonicalised, and therefore cannot be checked."""
+
+
+def canonical(payload: Mapping[str, Any]) -> bytes:
+    """Deterministic bytes for a resolution payload.
+
+    Must match the producer exactly: sorted keys, no incidental whitespace,
+    UTF-8, and **floats refused**. A float has no portable textual
+    representation, so a signature over one verifies on the machine that made it
+    and fails elsewhere — an intermittent, environment-dependent authentication
+    failure, which is both miserable to diagnose and likely to be "fixed" by
+    disabling the check.
+
+    Refusing floats here is not symmetry for its own sake. The producer cannot
+    have signed a payload containing one, so a float arriving in a response
+    means what is on the wire is not what was signed.
+    """
+
+    def check(value: Any) -> None:
+        if isinstance(value, float):
+            raise CanonicalisationError("floats are not signable")
+        if isinstance(value, Mapping):
+            for v in value.values():
+                check(v)
+        elif isinstance(value, (list, tuple)):
+            for v in value:
+                check(v)
+
+    check(payload)
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
+
+
+def resolution_payload(
+    *,
+    action_digest: str,
+    kind: str,
+    approver: Mapping[str, Any],
+    scope: Mapping[str, Any] | None,
+    resolved_at_ms: int,
+    expires_at_ms: int,
+    nonce: str,
+    fleet_id: str,
+) -> dict[str, Any]:
+    """Exactly what is signed.
+
+    One function on each side of the wire, and the vendored copy makes them the
+    same function. A verifier that reconstructs the payload independently is a
+    standing opportunity for a field to be added on one side only — and the
+    failure mode is a signature that stops verifying, which somebody eventually
+    "fixes" by not checking it.
+
+    `approver` is passed through whole rather than rebuilt from its parts. The
+    response carries it as a nested object precisely so there is no
+    reconstruction step to get subtly wrong.
+    """
+    return {
+        "v": RESOLUTION_VERSION,
+        "action_digest": action_digest,
+        "approver": dict(approver),
+        "expires_at_ms": expires_at_ms,
+        "fleet_id": fleet_id,
+        "kind": kind,
+        "nonce": nonce,
+        "resolved_at_ms": resolved_at_ms,
+        "scope": dict(scope) if scope is not None else None,
+    }
+
+
+#: What a resolution may say. An unrecognised value is refused rather than
+#: treated as a deny: it means this sidecar and the control plane disagree about
+#: the vocabulary, and guessing in either direction is worse than refusing.
+RESOLUTION_KINDS = frozenset({"allow", "allow_session", "allow_always", "deny", "deny_always"})
+
+#: Every field of the approver the signature covers. Listed so a response that
+#: omits one is malformed rather than silently canonicalising to something the
+#: producer never signed.
+APPROVER_FIELDS = ("sub", "email", "sid", "auth_time_ms")
+
+
+def accept_resolution(
+    response: Mapping[str, Any],
+    keys: Mapping[str, VerificationKey],
+    *,
+    fleet_id: str,
+    action_digest: str,
+    now_ms: int,
+    skew_ms: int = DEFAULT_SKEW_MS,
+) -> Verdict:
+    """Decide whether a polled decision may release the action it names.
+
+    Returns a `Verdict` and never raises, like everything else here. **False
+    must mean deny** — an allow nobody can vouch for does not release a held
+    action, and treating "cannot verify" as anything other than a refusal
+    defeats the entire mechanism.
+
+    `action_digest` is the digest of the action *this sidecar asked about*,
+    supplied by the caller rather than read from the response. That is the
+    binding: a response is only ever accepted as an answer to the question that
+    was actually asked, so a captured allow for a trivial action cannot be
+    replayed against a payout.
+    """
+    status = response.get("status")
+    if status != "resolved":
+        # Not an error. The overwhelmingly common case is a human who has not
+        # answered yet, and the caller polls again.
+        return _refuse(Reason.NOT_RESOLVED, str(status))
+
+    kind = response.get("kind")
+    if kind not in RESOLUTION_KINDS:
+        return _refuse(Reason.UNKNOWN_KIND, str(kind))
+
+    approver = response.get("approver")
+    if not isinstance(approver, Mapping) or any(f not in approver for f in APPROVER_FIELDS):
+        return _refuse(Reason.MALFORMED, "resolution names no complete approver")
+
+    signature_b64 = response.get("signature")
+    kid = response.get("key_id")
+    nonce = response.get("nonce")
+    if not isinstance(signature_b64, str) or not isinstance(kid, str) or not isinstance(nonce, str):
+        # Includes the unsigned case, which is what an attacker serving plain
+        # JSON produces.
+        return _refuse(Reason.MALFORMED, "resolution is unsigned")
+
+    resolved_at_ms = response.get("resolved_at_ms")
+    expires_at_ms = response.get("expires_at_ms")
+    if not isinstance(resolved_at_ms, int) or not isinstance(expires_at_ms, int):
+        # Integers, not formatted timestamps. The first version of this scheme
+        # signed `.isoformat()` and broke between SQLite and Postgres, which
+        # return naive and aware datetimes for the same column.
+        return _refuse(Reason.MALFORMED, "timestamps are not integer milliseconds")
+
+    # Bindings first, before any cryptography. They are cheap, and a decision
+    # that is correctly signed but answers a different question is a more
+    # alarming event than a bad signature — worth its own distinct reason
+    # rather than being buried behind one.
+    if response.get("action_digest") != action_digest:
+        return _refuse(
+            Reason.WRONG_ACTION,
+            f"resolution names {str(response.get('action_digest'))[:12]}…, asked about "
+            f"{action_digest[:12]}…",
+        )
+    if response.get("fleet_id") != fleet_id:
+        return _refuse(Reason.WRONG_FLEET, f"resolution is for {response.get('fleet_id')!r}")
+    if expires_at_ms + skew_ms <= now_ms:
+        return _refuse(Reason.EXPIRED, "resolution has expired")
+
+    key = keys.get(kid)
+    if key is None:
+        return _refuse(Reason.UNKNOWN_KEY, f"kid {kid!r} is not in the key set")
+    # A compromised policy key must not also be able to release held actions.
+    if key.role != "decision":
+        return _refuse(Reason.WRONG_ROLE, f"key {kid} has role {key.role!r}, needed 'decision'")
+    if key.expires_at_ms + skew_ms <= now_ms:
+        return _refuse(Reason.KEY_EXPIRED, f"key {kid} expired")
+
+    try:
+        payload = canonical(
+            resolution_payload(
+                action_digest=action_digest,
+                kind=kind,
+                approver=approver,
+                scope=response.get("scope"),
+                resolved_at_ms=resolved_at_ms,
+                expires_at_ms=expires_at_ms,
+                nonce=nonce,
+                fleet_id=fleet_id,
+            )
+        )
+    except CanonicalisationError as exc:
+        return _refuse(Reason.MALFORMED, str(exc))
+
+    try:
+        Ed25519PublicKey.from_public_bytes(unb64u(key.public_key)).verify(
+            unb64u(signature_b64), payload
+        )
+    except (InvalidSignature, ValueError, TypeError):
+        return _refuse(Reason.BAD_SIGNATURE, f"signature for {kid} did not verify")
+
+    return Verdict(ok=True, payload=dict(response))

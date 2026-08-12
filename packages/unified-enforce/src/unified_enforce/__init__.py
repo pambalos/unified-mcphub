@@ -17,7 +17,9 @@ from .approval import (
     ApprovalRequest,
     ApprovalResponse,
     Approvals,
+    Approver,
     RecordedApproval,
+    SignedResolution,
 )
 from .audit import AuditChain, HashChainWriter, VerifyResult
 from .canonical import CanonicalizationError, GENESIS_HASH, canonical_bytes, digest, sha256_hex
@@ -50,6 +52,8 @@ __all__ = [
     "ApprovalRequest",
     "ApprovalResponse",
     "Approvals",
+    "Approver",
+    "SignedResolution",
     "AuditChain",
     "AuditIndex",
     "BodyInspection",

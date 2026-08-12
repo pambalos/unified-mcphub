@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Literal, Protocol
 
@@ -69,12 +69,63 @@ class ApprovalRequest:
 
 
 @dataclass(frozen=True)
+class Approver:
+    """Who authorised a deferred action, as the control plane attested it.
+
+    Every field is derived from an authenticated session and covered by the
+    signature on the resolution. That is the difference between this and the
+    `decided_by` string beside it: a name a channel supplies is whatever that
+    channel chose to say, and for a local TTY channel that is honest and
+    sufficient. For anything releasing an action across a network it is not,
+    because it cannot be disproved and cannot be relied on.
+
+    `subject` is a stable IdP id (`google:117…`), not an address. Addresses get
+    reassigned, and a record naming one stops resolving to a person the moment
+    they leave the company — which is exactly when somebody asks.
+
+    `authenticated_at_ms` is when that human last authenticated, not when they
+    clicked. An approval made eleven hours into a session is visibly that.
+    """
+
+    subject: str
+    email: str = ""
+    session_id: str = ""
+    authenticated_at_ms: int = 0
+
+
+@dataclass(frozen=True)
+class SignedResolution:
+    """The proof, kept so the audit chain records it rather than the belief.
+
+    Without this the chain says "allowed, by alice" and an auditor has only our
+    word for it. With it, the entry contains the signature and the key that made
+    it, so the claim can be re-verified years later against a key set — by
+    somebody who does not trust us, which is the only kind of verification worth
+    having.
+    """
+
+    signature: str
+    key_id: str
+    nonce: str
+    resolved_at_ms: int
+    expires_at_ms: int
+    fleet_id: str
+
+
+@dataclass(frozen=True)
 class ApprovalResponse:
     """What a channel returns. Nothing more than the operator's raw decision."""
 
     kind: ApprovalKind
     decided_by: str | None = None  # responder identity, for the audit trail
     scope: dict[str, Any] | None = None  # persistence filter for *_always
+
+    #: Set by channels that carry an attested identity — currently the control
+    #: plane. A local TTY channel leaves both None, and that is not a lesser
+    #: form of the same thing: nobody authenticated, and the record should not
+    #: imply otherwise by carrying an empty approver object.
+    approver: Approver | None = None
+    attestation: SignedResolution | None = None
 
 
 @dataclass
@@ -89,6 +140,8 @@ class ApprovalOutcome:
     scope: dict[str, Any] | None = None
     reason: str | None = None
     elapsed_ms: float = 0.0
+    approver: Approver | None = None
+    attestation: SignedResolution | None = None
 
     @property
     def allowed(self) -> bool:
@@ -237,6 +290,8 @@ class Approvals:
                 persistent=kind in _PERSISTENT,
                 session=kind is ApprovalKind.ALLOW_SESSION,
                 scope=response.scope,
+                approver=response.approver,
+                attestation=response.attestation,
             )
         )
 
@@ -264,6 +319,15 @@ class RecordedApproval:
     elapsed_us: int = 0
     scope: dict[str, Any] | None = field(default=None)
 
+    #: The attested approver and the signature over their decision, when the
+    #: channel had one. Present in the chain entry rather than only in the
+    #: control plane's `approvals` table, because that table is a queue and
+    #: this is the evidence: it lives in the customer's environment, it is
+    #: hash-chained, and it can be re-verified by somebody who does not trust
+    #: whoever operates the control plane.
+    approver: dict[str, Any] | None = field(default=None)
+    attestation: dict[str, Any] | None = field(default=None)
+
     @classmethod
     def build(cls, request: ApprovalRequest, outcome: ApprovalOutcome) -> "RecordedApproval":
         return cls(
@@ -276,4 +340,6 @@ class RecordedApproval:
             reason=outcome.reason,
             elapsed_us=int(outcome.elapsed_ms * 1000),
             scope=outcome.scope,
+            approver=asdict(outcome.approver) if outcome.approver else None,
+            attestation=asdict(outcome.attestation) if outcome.attestation else None,
         )

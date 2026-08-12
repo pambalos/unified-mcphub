@@ -195,7 +195,9 @@ def create_grpc_server(
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(_INSTALL_HINT) from exc
 
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
+    # Typed Any deliberately: `bound_port` below is an attribute we attach to
+    # grpc's Server so a caller binding port 0 can discover what it got.
+    server: Any = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
     server.add_generic_rpc_handlers((create_generic_handler(core),))
     if tls is None:
         server.bound_port = server.add_insecure_port(address)

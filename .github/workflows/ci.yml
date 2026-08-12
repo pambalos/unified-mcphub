@@ -42,6 +42,13 @@ jobs:
       - name: Lint
         run: uv run ruff check packages
 
+      # technologies.md lists mypy as a locked cross-cutting choice, but until
+      # UAI-135 it was configured only for the hub and never run by CI at all —
+      # so the two packages intended for public `pip install` had no type
+      # checking while the private one did.
+      - name: Type-check
+        run: uv run mypy
+
       - name: Tests
         run: uv run pytest packages
 

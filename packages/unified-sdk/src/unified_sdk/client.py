@@ -32,7 +32,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from unified_enforce import (
     Action,
@@ -153,7 +153,7 @@ class UnifiedAI:
         *,
         principal: str,
         workspace: str | None = None,
-        principal_kind: str = "agent",
+        principal_kind: Literal["agent", "user", "service"] = "agent",
     ) -> None:
         self._enforcer = enforcer
         self._principal = Principal(id=principal, kind=principal_kind)

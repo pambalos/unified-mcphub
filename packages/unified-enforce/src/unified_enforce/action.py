@@ -13,14 +13,14 @@ round-trip exactly through JSON.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from ulid import ULID
 
 from .canonical import canonical_bytes, sha256_hex
 
-SCHEMA_VERSION = "unified.action/v1"
+SCHEMA_VERSION: Final = "unified.action/v1"
 
 
 def _utcnow_iso() -> str:

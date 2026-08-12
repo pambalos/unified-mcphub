@@ -33,6 +33,10 @@ dev = [
     "grpcio-tools>=1.60.0",
     "langchain-core>=1.5.4",
     "llama-index-core>=0.14.23",
+    "mypy>=2.1.0",
+    "types-protobuf>=7.34.1.20260518",
+    "types-pyyaml>=6.0.12.20260724",
+    "types-grpcio>=1.83.0.20260730",
 ]
 
 # Shared test/lint config so a workspace-wide run behaves identically to the
@@ -51,3 +55,27 @@ addopts = "--ignore=packages/unified-mcp-graphify -m 'not integration'"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+# The published packages are the ones with an external API surface, so they are
+# the ones worth type-checking. The hub keeps its own config.
+files = ["packages/unified-enforce/src", "packages/unified-sdk/src"]
+# Generated protobuf: its members are built at runtime from a descriptor pool,
+# so every message reads as a missing attribute. Checking generated code would
+# mean annotating a file we regenerate from a .proto anyway.
+exclude = "packages/unified-enforce/src/unified_enforce/protos/"
+
+[[tool.mypy.overrides]]
+# Optional framework adapters: these imports are deliberately absent unless the
+# matching extra is installed, and on this machine crewai cannot be installed
+# at all. Their absence is the designed state, not an error.
+module = ["crewai.*", "langchain_core.*", "llama_index.*", "grpc", "celpy.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["unified_enforce.protos.*"]
+follow_imports = "skip"

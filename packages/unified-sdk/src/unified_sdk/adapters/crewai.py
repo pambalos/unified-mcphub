@@ -51,7 +51,7 @@ def guard_tool(tool: Any, guard: ToolGuard) -> Any:
 
     name = tool.name
 
-    class Guarded(BaseTool):  # type: ignore[misc, valid-type]
+    class Guarded(BaseTool):
         # Declared as Pydantic field defaults; CrewAI reads them off the model.
         name: str = tool.name
         description: str = tool.description

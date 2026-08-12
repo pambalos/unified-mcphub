@@ -58,6 +58,13 @@ jobs:
   secret-scan:
     name: secret scan
     runs-on: ubuntu-latest
+    # The action reads the PR's commit list to decide what to scan, and the
+    # default token could not: it 403'd with "Resource not accessible by
+    # integration". Granted narrowly rather than by widening the workflow's
+    # default permissions -- this job needs to read a PR, nothing more.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v5
         with:

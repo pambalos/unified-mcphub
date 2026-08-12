@@ -1,0 +1,21 @@
+packages/unified-enforce/tests/test_evidence_shipper.py
+  s_b24ad4c243d6fd::t_c90011f95c0b86 1-374
+packages/unified-enforce/src/unified_enforce/evidence.py
+  s_b24ad4c243d6fd::t_27964884ae5933 1-238,257-260,264-302
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "54640add402c2e96982274981db2decbf4f0aea6",
+  "prompts": {},
+  "sessions": {
+    "s_b24ad4c243d6fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "18a252bb-92e9-41e0-8235-2461e06281b3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

@@ -423,6 +423,12 @@ class FakeControlPlane:
 
 
 def channel_over(fake: FakeControlPlane, s: Signer, **kwargs) -> RemoteApprovals:
+    # A one-second deadline unless a test says otherwise. The production default
+    # is five minutes, and inheriting it here makes every test that *should*
+    # fail fast instead hang until it expires: breaking the "stop on a refusal"
+    # path turned a one-second failure into a five-minute one, which in CI eats
+    # the job timeout instead of naming the defect.
+    kwargs.setdefault("deadline_seconds", 1.0)
     channel = RemoteApprovals(
         "http://cp.invalid",
         "uai_sc_test",
@@ -500,28 +506,65 @@ async def test_an_unverifiable_allow_denies_the_agent(build, why):
 
 async def test_an_unverifiable_resolution_stops_polling():
     """It is not a transient condition. The same bytes with the same signature
-    would arrive again, so retrying only delays the denial."""
+    would arrive again, so retrying only delays the denial.
+
+    The short deadline is load-bearing, not tidiness. With the early refusal
+    removed this test still fails — but it took five minutes to do it, because
+    it fell through to the deadline instead. A guard that reports in five
+    minutes is a guard somebody disables, and in CI it eats the job timeout
+    rather than naming the defect.
+    """
     s = signer()
     a = action()
     fake = FakeControlPlane([fresh(signer(), a.digest(strict=False))])
 
     with pytest.raises(UnverifiedResolution):
-        await channel_over(fake, s).ask(request_for(a))
+        await channel_over(fake, s, deadline_seconds=0.2).ask(request_for(a))
 
     assert fake.polls == 1
 
 
 async def test_a_control_plane_that_never_answers_denies():
     """Silence is not consent. The sidecar owns the deadline and fails closed
-    on it rather than holding an agent open indefinitely."""
+    on it rather than holding an agent open indefinitely.
+
+    Wrapped in an outer timeout so that a broken deadline *fails* rather than
+    hangs. Without it, deleting the deadline check leaves this test polling
+    until something else gives up — and a test that hangs reports nothing
+    useful, it just consumes the CI job.
+    """
     s = signer()
     a = action()
     fake = FakeControlPlane([{"status": "pending"}])
 
-    outcome = await Approvals(channel_over(fake, s, deadline_seconds=0.05)).resolve(request_for(a))
+    outcome = await asyncio.wait_for(
+        Approvals(channel_over(fake, s, deadline_seconds=0.05)).resolve(request_for(a)),
+        timeout=5,
+    )
 
     assert not outcome.allowed
     assert "approval_channel_error" in (outcome.reason or "")
+
+
+async def test_the_callers_timeout_bounds_a_channel_that_never_returns():
+    """Defence in depth, and the reason `Approvals` has a timeout of its own.
+
+    `RemoteApprovals` bounds itself. If that bound were ever wrong — a deadline
+    misconfigured to something enormous, a bug in the loop — an agent would sit
+    blocked on a human who is not coming. The caller's timeout is what actually
+    protects the agent, and it holds regardless of how a channel misbehaves.
+    """
+
+    class NeverAnswers:
+        async def ask(self, request):
+            await asyncio.sleep(3600)
+
+    outcome = await asyncio.wait_for(
+        Approvals(NeverAnswers(), timeout_s=0.05).resolve(request_for(action())), timeout=5
+    )
+
+    assert not outcome.allowed
+    assert outcome.reason == "approval_timed_out"
 
 
 async def test_an_unreachable_control_plane_denies():

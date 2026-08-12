@@ -24,6 +24,7 @@ import json
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from unified_enforce import attest
 from unified_enforce.attest import (
     KEYSET_SCHEMA,
     MANIFEST_SCHEMA,
@@ -478,3 +479,149 @@ def test_malformed_envelopes_are_refused_not_raised(keys, envelope):
     verdict = accept_manifest(envelope, keys, fleet_id="acme", current=None, now_ms=NOW)
     assert not verdict
     assert verdict.reason is not None
+
+
+# --- evidence attestation --------------------------------------------------------
+#
+# What is signed here is the *summary*, not the chain entry, and the difference
+# is the whole point. The chain signs an entry hash covering action content that
+# deliberately never leaves the customer's environment — so a receiver holding a
+# metadata summary could verify that signature, learn an entry exists, and still
+# have no reason to believe the summary beside it describes that entry. Signing
+# the summary makes the receiver's stored copy checkable by anyone holding the
+# reporter's key, including against the receiver itself.
+
+
+def _record(**overrides):
+    record = {
+        "action_digest": "a" * 64,
+        "principal_id": "agent:payments-1",
+        "tool": "sdk://payments/refund",
+        "verb": "create",
+        "verdict": "allow",
+        "rule_id": "payouts",
+        "source": "rule",
+        "chain_seq": 41,
+        "chain_hash": "b" * 64,
+        "decided_at": "2026-08-12T00:00:00+00:00",
+    }
+    record.update(overrides)
+    return record
+
+
+def _reporter():
+    from unified_enforce.signing import Signer
+
+    signer = Signer.generate("chain")
+    return signer, attest.b64u(signer.public_bytes())
+
+
+def test_a_signed_record_verifies():
+    signer, public = _reporter()
+    assert attest.accept_evidence(attest.sign_evidence(_record(), signer), public)
+
+
+def test_the_evidence_verifier_is_not_vacuous():
+    """Guards every negative case below."""
+    signer, public = _reporter()
+    signed = attest.sign_evidence(_record(), signer)
+    assert not attest.accept_evidence({**signed, "sig": attest.b64u(b"x" * 64)}, public)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("verdict", "deny"),
+        ("action_digest", "c" * 64),
+        ("principal_id", "agent:someone-else"),
+        ("tool", "mcp://aws/delete_bucket"),
+        ("rule_id", "some-other-rule"),
+        ("chain_seq", 99),
+        ("chain_hash", "d" * 64),
+    ],
+)
+def test_rewriting_any_signed_field_is_caught(field, value):
+    """Including the chain position and hash.
+
+    Those are what a receiver uses to notice a missing range, so leaving them
+    outside the signature would let anyone able to write the record erase the
+    evidence of their own gap.
+    """
+    signer, public = _reporter()
+    signed = attest.sign_evidence(_record(), signer)
+
+    assert not attest.accept_evidence({**signed, field: value}, public)
+
+
+def test_the_timestamp_is_deliberately_not_signed():
+    """Stated as a test so it is a decision rather than an oversight.
+
+    Every signed field is a string, an integer or null — nothing whose textual
+    form two implementations can disagree about. This project has twice shipped
+    a signature over a formatted timestamp and watched it verify on the machine
+    that produced it and fail everywhere else. The digest and the chain hash
+    identify the entry; a timestamp adds nothing an attacker cannot already see.
+    """
+    signer, public = _reporter()
+    signed = attest.sign_evidence(_record(), signer)
+
+    assert attest.accept_evidence({**signed, "decided_at": "2099-01-01T00:00:00+00:00"}, public)
+
+
+def test_an_unsigned_record_is_refused_as_unsigned():
+    """A distinct reason from a bad signature, because the responses differ: one
+    is a reporter that does not attest, the other is one whose attestation
+    failed."""
+    _, public = _reporter()
+    verdict = attest.accept_evidence(_record(), public)
+
+    assert not verdict
+    assert verdict.reason is attest.Reason.MALFORMED
+
+
+def test_another_reporters_key_does_not_verify():
+    signer, _ = _reporter()
+    _, someone_else = _reporter()
+
+    assert not attest.accept_evidence(attest.sign_evidence(_record(), signer), someone_else)
+
+
+def test_a_json_round_trip_does_not_change_the_verdict():
+    """The seam that has broken signing here before."""
+    signer, public = _reporter()
+    signed = json.loads(json.dumps(attest.sign_evidence(_record(), signer)))
+
+    assert attest.accept_evidence(signed, public)
+
+
+def test_a_null_field_is_signed_as_null():
+    """`rule_id` is routinely absent. Treating missing and null differently
+    would make a signature depend on how the sender omitted something."""
+    signer, public = _reporter()
+    signed = attest.sign_evidence(_record(rule_id=None), signer)
+
+    assert attest.accept_evidence(signed, public)
+    assert not attest.accept_evidence({**signed, "rule_id": ""}, public)
+
+
+def test_the_shipper_signs_what_it_ships():
+    """End to end through the real summariser, since that is what builds the
+    record a receiver actually sees."""
+    from unified_enforce import Action, Principal
+    from unified_enforce.evidence import summarise
+    from unified_enforce.policy import Decision, Verdict
+
+    signer, public = _reporter()
+    action = Action.build(
+        principal=Principal(id="agent:payments-1"),
+        tool="sdk://payments/refund",
+        verb="create",
+        resource="*",
+        params={"amount": "12400.00"},
+    )
+    decision = Decision(verdict=Verdict.ALLOW, rule_id="payouts", source="rule")
+
+    record = summarise(action, decision, entry={"seq": 7, "hash": "e" * 64}, signer=signer)
+
+    assert attest.accept_evidence(record, public)
+    assert "12400.00" not in json.dumps(record), "signing must not have started shipping content"

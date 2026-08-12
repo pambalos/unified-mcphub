@@ -121,7 +121,7 @@ class Hub:
         )
         self.audit = audit_mod.AuditLog(audit_dir())
         self.tokens = TokenStore()
-        self.secrets = SecretsStore()
+        self.secrets = SecretsStore.from_config(config.hub.secrets)
         self._transport = TransportServer(build_app(self), config.hub.listen)
         self._started_at = now_iso()
         self._reload_task: asyncio.Task | None = None
@@ -139,10 +139,50 @@ class Hub:
 
     # --- lifecycle (spec §8) ---
 
+    def _required_secret_refs(self) -> list[str]:
+        """Names this workspace's enabled servers will read from the secrets store."""
+        refs: set[str] = set()
+        for name, spec in self.config.workspace.servers.items():
+            if not spec.enabled:
+                continue
+            if spec.oauth is not None:
+                refs.add(f"{name}-oauth-refresh")
+            elif spec.auth_secret_ref:
+                refs.add(spec.auth_secret_ref)
+        return sorted(refs)
+
+    def _gate_secrets(self) -> None:
+        """List the credentials the hub will read, then unlock the store once.
+
+        Skipped entirely when nothing needs a secret or no store exists yet (a
+        fresh install never touches the key backend). In `prompt` mode this waits
+        for a single y/N and fails fast without a TTY; `auto` just proceeds. The
+        one `unlock()` warms the per-process key cache so the per-server reads that
+        follow never re-hit the backend (no repeated keychain prompts)."""
+        refs = self._required_secret_refs()
+        if not refs or not self.secrets.exists():
+            return
+        mode = self.config.hub.secrets.access_mode
+        logger.info(
+            "secrets: unlocking store (%s backend) to read: %s",
+            self.secrets.backend,
+            ", ".join(refs),
+        )
+        if mode == "prompt":
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                raise SystemExit(
+                    "secrets: access_mode 'prompt' needs a TTY to confirm; set "
+                    "`secrets.access_mode: auto` in config.yaml for headless runs"
+                )
+            if input("secrets: unlock now? [y/N] ").strip().lower() not in ("y", "yes"):
+                raise SystemExit("secrets: unlock declined")
+        self.secrets.unlock()
+
     async def start(self) -> None:
         mcphub_home().mkdir(parents=True, exist_ok=True)
         self.audit.start()
         self.builtins.load_user_tools(mcphub_home() / "tools")
+        self._gate_secrets()
 
         for name, spec in self.config.workspace.servers.items():
             if not spec.enabled:

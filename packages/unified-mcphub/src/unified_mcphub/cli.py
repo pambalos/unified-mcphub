@@ -133,7 +133,9 @@ def cmd_remove_server(args: argparse.Namespace) -> int:
 
 
 def cmd_secrets(args: argparse.Namespace) -> int:
-    store = SecretsStore()
+    if args.sec_command == "key":
+        return cmd_secrets_key(args)
+    store = SecretsStore.from_config()
     if args.sec_command == "set":
         store.set(args.name, getpass.getpass(f"value for '{args.name}' (no echo): "))
         print(f"stored secret '{args.name}'")
@@ -146,8 +148,46 @@ def cmd_secrets(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_secrets_key(args: argparse.Namespace) -> int:
+    """Manage the Fernet master key itself — export/import/migrate between backends.
+
+    The key *is* the lock on secrets.enc: switching `key_backend` requires moving
+    the same key value, or stored secrets won't decrypt. `migrate` does that move
+    in one step."""
+    from unified_mcphub.config import load_secrets_config
+    from unified_mcphub.secrets import ENV_KEY_VAR
+
+    cfg = load_secrets_config()
+    current = SecretsStore.from_config(cfg)
+
+    if args.key_command == "export":
+        key = current.read_key()
+        if key is None:
+            raise SystemExit(f"no master key found in the '{current.backend}' backend")
+        print(key)
+    elif args.key_command == "import":
+        current.write_key(getpass.getpass("master key (no echo): "))
+        print(f"imported master key into the '{current.backend}' backend")
+    elif args.key_command == "migrate":
+        key = current.read_key()
+        if key is None:
+            raise SystemExit(f"no master key in the '{current.backend}' backend to migrate")
+        if args.to == current.backend:
+            raise SystemExit(f"already on the '{args.to}' backend — nothing to migrate")
+        target = SecretsStore(current._path, backend=args.to, key_file=cfg.key_file)
+        if args.to == "env":
+            # Can't persist into the parent environment — emit the export line.
+            print("# set this in your environment, then `key_backend: env` in config.yaml")
+            print(f"export {ENV_KEY_VAR}={key}")
+        else:
+            target.write_key(key)
+            print(f"migrated master key: {current.backend} → {args.to}")
+            print(f"now set `secrets.key_backend: {args.to}` in config.yaml")
+    return 0
+
+
 def cmd_auth(args: argparse.Namespace) -> int:
-    store = SecretsStore()
+    store = SecretsStore.from_config()
     if args.auth_command == "revoke":
         store.remove(f"{args.server}-oauth-refresh")
         print(f"revoked OAuth for '{args.server}'")
@@ -412,6 +452,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_sec_rm = sec_sub.add_parser("remove", help="remove a secret")
     p_sec_rm.add_argument("name")
     p_sec_rm.set_defaults(func=cmd_secrets)
+    p_sec_key = sec_sub.add_parser("key", help="manage the master key (export/import/migrate)")
+    key_sub = p_sec_key.add_subparsers(dest="key_command", required=True)
+    key_sub.add_parser("export", help="print the current master key").set_defaults(func=cmd_secrets)
+    key_sub.add_parser("import", help="store a master key in the configured backend").set_defaults(
+        func=cmd_secrets
+    )
+    p_key_migrate = key_sub.add_parser("migrate", help="move the master key to another backend")
+    p_key_migrate.add_argument(
+        "--to", required=True, choices=["keyring", "file", "env"], help="target backend"
+    )
+    p_key_migrate.set_defaults(func=cmd_secrets)
 
     p_auth = sub.add_parser("auth", help="upstream OAuth")
     auth_sub = p_auth.add_subparsers(dest="auth_command", required=True)

@@ -2,22 +2,24 @@
 
 `install <harness>` / `uninstall <harness>` dispatch to a per-harness module.
 M0 ships claude-code + opencode; openclaw is the first-class reference harness
-(UAI-108); add more as small modules (M1+).
+(UAI-108); cursor is an M1 JSON-merge adapter; add more as small modules (M1+).
 """
 
 from __future__ import annotations
 
-from . import claude_code, openclaw, opencode
+from . import claude_code, cursor, openclaw, opencode
 
 INSTALLERS = {
     "claude-code": claude_code.install,
     "opencode": opencode.install,
     "openclaw": openclaw.install,
+    "cursor": cursor.install,
 }
 UNINSTALLERS = {
     "claude-code": claude_code.uninstall,
     "opencode": opencode.uninstall,
     "openclaw": openclaw.uninstall,
+    "cursor": cursor.uninstall,
 }
 
 

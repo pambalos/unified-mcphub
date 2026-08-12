@@ -12,6 +12,19 @@
 #   port: 7712
 approval:
   enabled: true                                    # prompt for `prompt`-effect calls; false = no prompts at all
+# Where the Fernet master key (which decrypts secrets.enc) lives, and how the hub
+# gates access to it at start. Only this one key ever touches the keychain — the
+# credentials themselves stay encrypted on disk.
+secrets:
+  key_backend: auto      # auto | keyring | file | env
+                         #   auto  — env var if set → macOS/Windows keychain →
+                         #           Linux Secret Service if present, else file
+                         #   file  — 0600 key file beside secrets.enc (no OS prompt)
+                         #   env   — $UNIFIED_MCPHUB_SECRETS_KEY (headless / CI)
+  access_mode: prompt    # prompt | auto — at start, log the credential names to be
+                         # read, then (prompt) wait for one y/N, or (auto) proceed.
+                         # prompt fails fast with no TTY — use auto for headless.
+  # key_file: ~/.unified-ai/mcphub/secrets.key   # `file` backend path (default shown)
 active_workspace: default
 # Refuse to start an unpinned fetch-and-run upstream (`npx -y pkg`, bare `uvx pkg`).
 # A drift guard, not a fetch-and-run block — see the README "Supply chain" section.

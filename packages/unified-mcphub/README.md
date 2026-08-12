@@ -199,6 +199,34 @@ auth login linear
 refresh token — so an expired token self-heals on the next reconnect. Until you log
 in, an `oauth:` server connects with no auth (and the log points you to `auth login`).
 
+### The master key & where it lives
+
+Every secret above is stored encrypted in `~/.unified-ai/mcphub/secrets.enc`. The
+**only** thing kept outside that file is the Fernet master key that decrypts it.
+Where that key lives is set by `secrets.key_backend` in `config.yaml`:
+
+| Backend | Key location | Prompts? | Use when |
+|---|---|---|---|
+| `keyring` | OS keychain (macOS Keychain / Win DPAPI / Linux Secret Service) | macOS may prompt once/run | desktop, most secure at rest |
+| `file` | `~/.unified-ai/mcphub/secrets.key` (`0600`) | never | headless Linux / containers (no Secret Service) |
+| `env` | `$UNIFIED_MCPHUB_SECRETS_KEY` | never | CI / automation |
+| `auto` *(default)* | env-if-set → keychain on macOS/Win → Linux keychain if present, else file | per resolved backend | leave it; it just works per-platform |
+
+The key is **read once per process** (memoized), so the backend — and any macOS
+keychain prompt — is hit at most once per run, not once per server. At start the hub
+logs the credential names it will read and, in the default `access_mode: prompt`,
+waits for a single `y/N` before unlocking (set `access_mode: auto` to skip — required
+for headless, where `prompt` fails fast for lack of a TTY).
+
+The key **is** the lock on `secrets.enc`, so switching backends means moving the same
+key, not re-entering every secret:
+
+```sh
+secrets key migrate --to file      # keychain → 0600 key file (then set key_backend: file)
+secrets key migrate --to env       # prints the `export …` line for $UNIFIED_MCPHUB_SECRETS_KEY
+secrets key export                 # print the current key   ·   secrets key import  # store one
+```
+
 ### Supply chain & version pinning
 
 `npx -y pkg` / `uvx pkg` **download and run remote code at startup** — *upstream* of the hub's
@@ -257,7 +285,7 @@ and won't accept a merge until they pass.
 | `authz.py` | §4 | Policy resolver: precedence (exact rule > danger floor > wildcard > implicit deny) |
 | `approval.py` | §5 | In-process TUI prompt (decisions only from hub's own terminal) |
 | `audit.py` | §6 | Two-phase append-only audit log writer + reader + `audit` CLI subcommands |
-| `secrets.py` | §9 | Encrypted secrets store (OS keyring) + `secrets` CLI |
+| `secrets.py` | §9 | Encrypted secrets store + pluggable master-key backend (keyring/file/env) + `secrets` CLI |
 | `oauth.py` | §3.4 | Upstream OAuth (Auth Code + PKCE) |
 | `tools.py` | §10 | Built-in tool discovery (`~/.unified-ai/mcphub/tools/*.py` + in-tree registry) |
 | `sandbox.py` | §7 | Containerized MCP server sandboxing + image-digest pinning + Sigstore |

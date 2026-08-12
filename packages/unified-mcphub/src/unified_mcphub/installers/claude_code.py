@@ -20,27 +20,16 @@ from unified_mcphub import endpoints
 from unified_mcphub.tokens import TokenStore
 
 from . import _common
+from .redaction_hook import REDACT_MARKER, command_redaction_hook_group
 
 CALLER = "claude-code"
 
-# Opt-in defense-in-depth (spec §11.2): a PreToolUse hook that rewrites
-# `claude mcp …` commands to pipe their output through a token redactor, so a
-# bearer token echoed by the Claude CLI never lands in a transcript. Scoped via
-# `if` to those commands only; degrades to a no-op (passthrough) if jq is absent
-# or the command is already wrapped. The hub's own `run_cli` already redacts the
-# install path — this covers direct `claude mcp` calls the harness makes.
-_REDACT_MARKER = "#RDCT_HOOK"
-_REDACT_HOOK_COMMAND = (
-    "command -v jq >/dev/null 2>&1 || exit 0; "
-    "i=$(cat); c=$(printf '%s' \"$i\" | jq -r '.tool_input.command // empty'); "
-    '[ -z "$c" ] && exit 0; '
-    'case "$c" in *RDCT_HOOK*) exit 0;; esac; '
-    "n=\"{ $c ; } 2>&1 | sed -E 's/Bearer [0-9a-fA-F]{16,}/Bearer [REDACTED]/g' "
-    + _REDACT_MARKER
-    + '"; '
-    'printf \'%s\' "$i" | jq -c --arg c "$n" '
-    "'{hookSpecificOutput:{hookEventName:\"PreToolUse\",updatedInput:(.tool_input + {command:$c})}}'"
-)
+# Opt-in defense-in-depth (spec §11.2): a PreToolUse hook that rewrites every
+# Bash command to pipe its output through a token redactor, so a bearer token
+# surfaced by any command — the Claude CLI, or a direct read of ~/.claude.json
+# via cat/grep/jq — never lands in a transcript. The hook itself (charset,
+# heredoc/pipefail safety, un-gated scope) lives in the shared `redaction_hook`
+# module so any hook-capable harness (Claude Code, Cursor, ...) reuses it.
 
 
 def _config_path() -> Path:
@@ -49,13 +38,6 @@ def _config_path() -> Path:
 
 def _settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
-
-
-def _redaction_hook_group() -> dict:
-    return {
-        "matcher": "Bash",
-        "hooks": [{"type": "command", "command": _REDACT_HOOK_COMMAND, "if": "Bash(claude mcp *)"}],
-    }
 
 
 def _scope_target(scope: str) -> tuple[Path, list[str]]:
@@ -123,8 +105,8 @@ def install(
         _common.merge_hook(
             _settings_path(),
             event="PreToolUse",
-            group=_redaction_hook_group(),
-            marker=_REDACT_MARKER,
+            group=command_redaction_hook_group(),
+            marker=REDACT_MARKER,
             dry_run=dry_run,
         )
 
@@ -136,8 +118,6 @@ def uninstall(*, dry_run: bool = False, scope: str = "local") -> None:
     path, key_path = _scope_target(scope)
     _common.remove_json(path, key_path, "unified-hub", dry_run=dry_run)
     # Always drop the redaction hook if present (harmless when it isn't).
-    _common.remove_hook(
-        _settings_path(), event="PreToolUse", marker=_REDACT_MARKER, dry_run=dry_run
-    )
+    _common.remove_hook(_settings_path(), event="PreToolUse", marker=REDACT_MARKER, dry_run=dry_run)
     if not dry_run:
         TokenStore().revoke(CALLER)

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import stat
 
-from unified_mcphub.secrets import SecretsStore
+import unified_mcphub.secrets as secrets_mod
+from unified_mcphub.config import SecretsConfig
+from unified_mcphub.secrets import ENV_KEY_VAR, SecretsStore, resolve_backend
 
 # `fake_keyring` fixture is provided by conftest.py.
 
@@ -42,3 +44,96 @@ def test_file_is_0600_and_encrypted(tmp_path, fake_keyring):
     store.set("token", "PLAINTEXT_SECRET")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert b"PLAINTEXT_SECRET" not in path.read_bytes()
+
+
+# --- memoization: the backend is read once per process ------------------------
+
+
+def test_key_is_read_once_per_process(tmp_path, monkeypatch):
+    """Many get()s across instances must hit the keychain at most once — this is
+    what stops the per-server macOS prompt storm."""
+    secrets_mod._reset_key_cache()
+    backing: dict = {}
+    reads = {"n": 0}
+
+    def counting_get(service, user):
+        reads["n"] += 1
+        return backing.get((service, user))
+
+    monkeypatch.setattr(secrets_mod.keyring, "get_password", counting_get)
+    monkeypatch.setattr(
+        secrets_mod.keyring, "set_password", lambda s, u, v: backing.__setitem__((s, u), v)
+    )
+
+    path = tmp_path / "secrets.enc"
+    SecretsStore(path).set("a", "1")  # creates + caches the key
+    reads_after_set = reads["n"]
+    # Fresh instances, repeated reads — all served from the module cache.
+    for _ in range(5):
+        assert SecretsStore(path).get("a") == "1"
+    assert reads["n"] == reads_after_set
+    secrets_mod._reset_key_cache()
+
+
+# --- file backend -------------------------------------------------------------
+
+
+def test_file_backend_roundtrip_no_keyring(tmp_path, monkeypatch):
+    """The file backend never calls the keychain and writes a 0600 key file."""
+    secrets_mod._reset_key_cache()
+
+    def boom(*a, **k):  # any keychain touch is a bug for this backend
+        raise AssertionError("file backend must not touch the keychain")
+
+    monkeypatch.setattr(secrets_mod.keyring, "get_password", boom)
+    monkeypatch.setattr(secrets_mod.keyring, "set_password", boom)
+
+    key_file = tmp_path / "secrets.key"
+    store = SecretsStore(tmp_path / "secrets.enc", backend="file", key_file=str(key_file))
+    store.set("k", "v")
+    assert store.get("k") == "v"
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+    secrets_mod._reset_key_cache()
+
+
+# --- env backend --------------------------------------------------------------
+
+
+def test_env_backend_reads_key_from_environment(tmp_path, monkeypatch):
+    secrets_mod._reset_key_cache()
+    from cryptography.fernet import Fernet
+
+    key = Fernet.generate_key().decode()
+    monkeypatch.setenv(ENV_KEY_VAR, key)
+
+    a = SecretsStore(tmp_path / "secrets.enc", backend="env")
+    a.set("k", "v")
+    # A second store with the same env key decrypts the same blob.
+    b = SecretsStore(tmp_path / "secrets.enc", backend="env")
+    assert b.get("k") == "v"
+    secrets_mod._reset_key_cache()
+
+
+# --- auto resolution ----------------------------------------------------------
+
+
+def test_resolve_backend_explicit_passthrough():
+    assert resolve_backend(SecretsConfig(key_backend="file")) == "file"
+
+
+def test_resolve_backend_auto_prefers_env(monkeypatch):
+    monkeypatch.setenv(ENV_KEY_VAR, "x")
+    assert resolve_backend(SecretsConfig(key_backend="auto")) == "env"
+
+
+def test_resolve_backend_auto_macos_uses_keyring(monkeypatch):
+    monkeypatch.delenv(ENV_KEY_VAR, raising=False)
+    monkeypatch.setattr(secrets_mod.sys, "platform", "darwin")
+    assert resolve_backend(SecretsConfig(key_backend="auto")) == "keyring"
+
+
+def test_resolve_backend_auto_headless_linux_falls_back_to_file(monkeypatch):
+    monkeypatch.delenv(ENV_KEY_VAR, raising=False)
+    monkeypatch.setattr(secrets_mod.sys, "platform", "linux")
+    monkeypatch.setattr(secrets_mod, "_keyring_available", lambda: False)
+    assert resolve_backend(SecretsConfig(key_backend="auto")) == "file"

@@ -1,0 +1,21 @@
+packages/unified-enforce/tests/unit/test_remote_approvals.py
+  s_b24ad4c243d6fd::t_e9345b2eafca56 1-137,139-254,256-441,443-458,462,464-466,468-505,507-575
+packages/unified-enforce/src/unified_enforce/remote_approvals.py
+  s_b24ad4c243d6fd::t_dbdaeb28a4605d 1-245,252-321
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "dd251af4854f96f6b493b1ef2f96422419bef8e4",
+  "prompts": {},
+  "sessions": {
+    "s_b24ad4c243d6fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "18a252bb-92e9-41e0-8235-2461e06281b3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

@@ -17,6 +17,7 @@ from __future__ import annotations
 from .action import Action
 from .approval import ApprovalOutcome, ApprovalRequest, Approvals, RecordedApproval
 from .audit import AuditChain
+from .distribution import Distribution
 from .policy import Decision, PolicyEngine, Verdict
 from .telemetry import Telemetry
 
@@ -28,13 +29,31 @@ class Enforcer:
         chain: AuditChain | None = None,
         telemetry: Telemetry | None = None,
         approvals: Approvals | None = None,
+        distribution: Distribution | None = None,
     ) -> None:
         self._engine = engine
         self._chain = chain
         self._telemetry = telemetry or Telemetry.disabled()
         self.approvals = approvals
+        self._distribution = distribution
 
     def enforce(self, action: Action) -> Decision:
+        """Distribution state first, then policy.
+
+        Wired here rather than left as a component someone remembers to call.
+        This project has already shipped one security feature that was correct
+        and unreachable (signing, UAI-145), and an unwired kill switch is worse
+        than none: it is a button an operator believes they pressed.
+
+        The order matters and is not negotiable. A contained principal is
+        contained whatever the rules say, and a sidecar that cannot verify its
+        policy must not consult it — otherwise the two failures that most need
+        to override policy are the two that policy would overrule.
+        """
+        if self._distribution is not None:
+            forced = self._distribution.gate(action)
+            if forced is not None:
+                return self.record(action, forced)
         return self.record(action, self._engine.decide(action))
 
     def record(self, action: Action, decision: Decision) -> Decision:

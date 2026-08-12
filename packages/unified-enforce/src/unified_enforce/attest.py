@@ -336,6 +336,7 @@ def accept_manifest(
     now_ms: int,
     skew_ms: int = DEFAULT_SKEW_MS,
     required_kids: set[str] | None = None,
+    ignore_expiry: bool = False,
 ) -> Verdict:
     """A policy manifest. See `accept_document`."""
     return accept_document(
@@ -347,6 +348,7 @@ def accept_manifest(
         now_ms=now_ms,
         skew_ms=skew_ms,
         required_kids=required_kids,
+        ignore_expiry=ignore_expiry,
     )
 
 
@@ -359,6 +361,7 @@ def accept_revocations(
     now_ms: int,
     skew_ms: int = DEFAULT_SKEW_MS,
     required_kids: set[str] | None = None,
+    ignore_expiry: bool = False,
 ) -> Verdict:
     """A revocation list — the kill switch's wire format.
 
@@ -383,6 +386,7 @@ def accept_revocations(
         now_ms=now_ms,
         skew_ms=skew_ms,
         required_kids=required_kids,
+        ignore_expiry=ignore_expiry,
     )
 
 
@@ -396,6 +400,7 @@ def accept_document(
     now_ms: int,
     skew_ms: int = DEFAULT_SKEW_MS,
     required_kids: set[str] | None = None,
+    ignore_expiry: bool = False,
 ) -> Verdict:
     """The acceptance rule from spec §2, shared by every signed artifact.
 
@@ -403,6 +408,16 @@ def accept_document(
     the subtle part — the equal-version refresh branch in particular — and two
     copies of it would drift, leaving one artifact protected against rollback
     and the other not.
+
+    `ignore_expiry` exists for exactly one caller: hydrating a cache at
+    startup. Every other check still applies — signature, key role, fleet,
+    schema, rollback — so an expired artifact is recovered for *what it said*
+    without being treated as current. The distinction matters because a
+    restart would otherwise forget which agents are contained: a hard `deny`
+    containment would silently become whatever the caller does about an
+    unknown list, and losing a containment during a restart is losing it at
+    the worst moment. The caller is then responsible for marking the result
+    stale, which is what turns "remembered" into "not trusted as current".
 
     Order matters: signature first, then identity, then freshness. Checking
     freshness on an unverified document would let an attacker learn a fleet's
@@ -435,7 +450,7 @@ def accept_document(
     # has no previous version to compare against, so a genuine old bundle would
     # otherwise be accepted. It is also what turns a freeze — an attacker who
     # simply stops serving updates — into a visible state rather than silence.
-    if expires + skew_ms <= now_ms:
+    if not ignore_expiry and expires + skew_ms <= now_ms:
         return _refuse(Reason.EXPIRED, "bundle has expired")
 
     if current is not None:

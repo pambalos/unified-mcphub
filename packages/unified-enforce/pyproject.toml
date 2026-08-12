@@ -43,6 +43,11 @@ gateway = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Starter policy packs ship with the wheel: `pip install unified-enforce` should
+# give you something to enforce, not just the machinery to enforce with.
+[tool.setuptools.package-data]
+unified_enforce = ["policies/*.yaml", "policies/*.md"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 markers = [

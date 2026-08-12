@@ -1,0 +1,164 @@
+# Starter policy pack — OWASP Top 10 for LLM Applications (2025)
+#
+# A reference policy, not a drop-in. Tool URIs and thresholds are examples;
+# every deployment must replace them with its own. What is meant to survive
+# copying is the *shape*: which categories an enforcement plane can act on, and
+# how each rule is written.
+#
+# Read policies/README.md first. It states which OWASP categories this can
+# genuinely enforce (LLM06 fully, LLM02 and LLM10 partially, LLM01 by
+# containment) and which belong to other layers. A pack that claimed all ten
+# would be worse than useless to a security team.
+#
+# Precedence, which the rule order below depends on:
+#   exact rules -> floors -> wildcard rules -> non-configurable default-deny
+# Floors are the important tier: a wildcard `allow` cannot waive them, so a
+# broad grant added later cannot silently unprotect a dangerous operation.
+
+version: 1
+
+rules:
+  # ---------------------------------------------------------------- LLM06
+  # Excessive Agency — the category an enforcement plane exists for. An agent
+  # holds credentials for tools far beyond its task; the question is not
+  # whether the model behaves, but what it is able to reach when it does not.
+
+  # ORDER MATTERS. Within a tier it is first-match-wins, so every deny has to
+  # precede the broad read allow below. Written the other way round — which is
+  # how this pack was first drafted — `mcp://vault/get_secret` with verb=read
+  # matched the allow and the credential deny never ran. A deny placed after a
+  # broader allow is not a deny.
+
+  - id: llm06-no-iam-tools
+    reason: "LLM06: an agent that can mint credentials can escalate past this plane"
+    match:
+      principal: "agent:*"
+      tool: "mcp://iam/**"
+    effect: deny
+
+  - id: llm06-no-secrets-tools
+    reason: "LLM06: reading the secrets store exfiltrates every other control"
+    match:
+      principal: "agent:*"
+      tool: "mcp://secrets/**"
+    effect: deny
+
+  - id: llm06-no-vault-tools
+    reason: "LLM06: as above. Three rules, not one brace pattern — see README"
+    match:
+      principal: "agent:*"
+      tool: "mcp://vault/**"
+    effect: deny
+
+  - id: llm06-read-only-tools-allowed
+    reason: "LLM06: reads are the agent's job; everything else is argued for"
+    match:
+      principal: "agent:*"
+      tool: "mcp://**"
+      verb: read
+    effect: allow
+
+  - id: llm06-refunds-within-authority
+    reason: "LLM06: bounded spend authority, enforced on the value not the intent"
+    match:
+      principal: "agent:*"
+      tool: "sdk://payments/refund"
+      verb: create
+    # Amounts arrive as strings (floats are non-portable in canonical bytes),
+    # so compare with double(). A missing or unparseable amount makes this
+    # condition error, which the engine treats as DENY — the right direction.
+    when: 'double(params.amount) <= 500.0'
+    effect: allow
+    audit_level: detailed
+
+  # ---------------------------------------------------------------- LLM02
+  # Sensitive Information Disclosure — partial. We cannot inspect what a model
+  # says; we can govern which sinks it may send data to, and how much of the
+  # payload is retained in evidence.
+
+  - id: llm02-no-external-mail-with-customer-data
+    reason: "LLM02: outbound mail is the most common exfiltration sink"
+    match:
+      principal: "agent:*"
+      tool: "sdk://email/send"
+      verb: create
+      args:
+        data_class:
+          equals: ["pii", "phi", "pci"]
+    effect: deny
+    audit_level: full
+
+  - id: llm02-internal-mail-allowed
+    reason: "LLM02: same tool, in-perimeter recipient"
+    match:
+      principal: "agent:*"
+      tool: "sdk://email/send"
+      verb: create
+    when: 'params.to.endsWith("@internal.example")'
+    effect: allow
+
+  # ---------------------------------------------------------------- LLM10
+  # Unbounded Consumption — PARTIAL, and the partiality is structural. A
+  # per-action cap is enforceable; a *cumulative* budget is not, because the
+  # engine is deliberately stateless (pure, sub-10ms, no I/O on the decision
+  # path). An agent held to $500 per refund can still issue a thousand of them.
+  # See README and UAI-147: this needs a stateful counter the engine does not
+  # currently have, and pretending otherwise in a pack would be the dangerous
+  # kind of wrong.
+
+  - id: llm10-cap-single-batch-size
+    reason: "LLM10: one obviously-abusive request; NOT a rate limit"
+    match:
+      principal: "agent:*"
+      tool: "sdk://**"
+    when: 'has(params.count) && double(params.count) > 1000.0'
+    effect: deny
+
+floors:
+  # ---------------------------------------------------------------- LLM01
+  # Prompt Injection — we do not detect it, and this pack does not pretend to.
+  # These floors exist so that a *successful* injection still cannot complete a
+  # damaging action without a human. They are floors rather than rules because
+  # that tier survives a later wildcard allow: the failure mode to design
+  # against is someone broadening policy months from now and silently
+  # unprotecting these.
+  #
+  # E5 will add taint propagation and intent binding, which catch the effect of
+  # an injection rather than its wording.
+
+  - id: llm01-floor-destructive-operations
+    reason: "LLM01/LLM06: irreversible, so a human confirms even when policy would allow"
+    match:
+      tool: "mcp://**"
+      verb: delete
+
+  - id: llm01-floor-payments
+    reason: "LLM01: moving money is the canonical injection payoff"
+    match:
+      tool: "sdk://payments/**"
+      verb: create
+
+  - id: llm01-floor-shell
+    reason: "LLM01: arbitrary execution defeats every other control in the plane"
+    match:
+      tool: "mcp://shell/**"
+
+  # One floor per provider: brace alternation is a load error precisely because
+  # a floor that matches nothing is indistinguishable from a floor that works.
+  - id: llm01-floor-aws-writes
+    reason: "LLM01: an agent that can change infrastructure can remove its own egress lock"
+    match:
+      tool: "mcp://aws/**"
+      verb: write
+
+  - id: llm01-floor-gcp-writes
+    reason: "LLM01: as above"
+    match:
+      tool: "mcp://gcp/**"
+      verb: write
+
+  - id: llm01-floor-k8s-writes
+    reason: "LLM01: as above"
+    match:
+      tool: "mcp://k8s/**"
+      verb: write

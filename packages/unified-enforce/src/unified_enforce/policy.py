@@ -115,6 +115,19 @@ class PolicyDoc(BaseModel):
 
 
 def _glob_to_regex(pattern: str) -> re.Pattern[str]:
+    # Brace expansion is NOT supported, and silently treating `{a,b}` as
+    # literal characters is the worst available behaviour: the pattern compiles,
+    # the policy loads, and the rule matches nothing forever. A dead *allow*
+    # is merely annoying; a dead *deny* is a security control that was never
+    # there. Anyone writing braces means alternation, so fail at load and say
+    # what to do instead — same reasoning as unknown args operators being a
+    # load error rather than a silent non-match.
+    if "{" in pattern or "}" in pattern:
+        raise PolicyError(
+            f"glob pattern {pattern!r} contains braces, which are not expanded. "
+            "Write one rule per alternative (a deny that matches nothing looks "
+            "identical to a deny that is working)."
+        )
     if pattern == "*":
         return re.compile(r"^.*$", re.DOTALL)
     out: list[str] = []

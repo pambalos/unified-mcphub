@@ -52,6 +52,23 @@ jobs:
       - name: Tests
         run: uv run pytest packages
 
+  # UAI-78. The repo was public for ~10 weeks before anyone checked its history
+  # for credentials; a scan that only ever runs by hand is how that happens
+  # again. fetch-depth: 0 because the point is the whole history, not the tip.
+  secret-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"
+
   # Everything that needs a real Envoy, a real kernel firewall, or a real OTLP
   # receiver. Before this job existed the whole `-m integration` suite ran only
   # by hand on one developer laptop and gated nothing — a change breaking the

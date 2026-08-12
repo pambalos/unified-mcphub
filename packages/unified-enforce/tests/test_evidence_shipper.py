@@ -372,3 +372,162 @@ def test_stopping_does_not_hang_on_an_unreachable_control_plane():
 
     assert not stopper.is_alive(), "stop() hung"
     assert time.monotonic() - started < 5
+
+
+# --- over a real socket --------------------------------------------------------
+
+
+class Receiver:
+    """A control-plane stand-in on a real port.
+
+    Over HTTP rather than a mock, because the failures that matter here are
+    protocol-shaped: a status code read the wrong way round, a header the server
+    does not see, a timeout that is not applied. None of those show up against
+    an object with a `send` method.
+    """
+
+    def __init__(self, status=202, delay=0.0):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        self.batches: list[list[dict]] = []
+        self.auth: list[str | None] = []
+        self.status = status
+        self.delay = delay
+        receiver = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                import json as _json
+
+                length = int(self.headers.get("content-length", 0))
+                body = _json.loads(self.rfile.read(length) or b"{}")
+                receiver.auth.append(self.headers.get("authorization"))
+                if receiver.delay:
+                    time.sleep(receiver.delay)
+                if receiver.status < 300:
+                    receiver.batches.append(body.get("decisions", []))
+                self.send_response(receiver.status)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                pass
+
+        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_port}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+
+    @property
+    def records(self):
+        return [r for b in self.batches for r in b]
+
+
+@pytest.fixture
+def receiver():
+    r = Receiver()
+    yield r
+    r.close()
+
+
+def test_records_reach_a_real_endpoint_with_the_credential(receiver):
+    from unified_enforce.evidence import HttpSink
+
+    shipper = EvidenceShipper(HttpSink(receiver.url, "uai_sc_test-credential"))
+    # Captured once: every `action()` mints a fresh ULID and timestamp, and the
+    # digest covers both, so comparing against a second call compares two
+    # different actions.
+    shipped = action()
+    shipper.record(shipped, decision())
+
+    assert shipper.flush() == 1
+    assert len(receiver.records) == 1
+    assert receiver.auth == ["Bearer uai_sc_test-credential"]
+
+    record = receiver.records[0]
+    assert record["action_digest"] == shipped.digest()
+    assert "params" not in record
+
+
+def test_a_server_error_requeues():
+    """5xx is the receiver's problem. The records wait."""
+    from unified_enforce.evidence import HttpSink
+
+    server = Receiver(status=500)
+    try:
+        shipper = EvidenceShipper(HttpSink(server.url, "t"))
+        shipper.record(action(), decision())
+        shipper.flush()
+        assert len(shipper.spool) == 1
+        assert shipper.spool.stats.rejected == 0
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize("status", [400, 410, 422])
+def test_a_permanent_refusal_discards_rather_than_blocking_the_queue(status):
+    """One poison batch must not stop all evidence for the life of the process.
+
+    Requeueing a batch the receiver refuses on its merits parks it at the head
+    of the queue forever; every later record piles up behind it and the spool
+    fills and starts dropping, with the cause sitting at the front unlogged.
+    """
+    from unified_enforce.evidence import HttpSink
+
+    server = Receiver(status=status)
+    try:
+        shipper = EvidenceShipper(HttpSink(server.url, "t"), batch_size=1)
+        shipper.record(action(), decision())
+        shipper.record(action(tool="sdk://payments/lookup"), decision("allow"))
+
+        shipper.flush()
+
+        assert len(shipper.spool) == 0, "a permanent refusal blocked the queue"
+        assert shipper.spool.stats.rejected == 2
+    finally:
+        server.close()
+
+
+def test_rate_limiting_is_transient_not_permanent():
+    """429 is explicitly "try later" — discarding on it would lose evidence for
+    the one reason the receiver has told us not to."""
+    from unified_enforce.evidence import HttpSink
+
+    server = Receiver(status=429)
+    try:
+        shipper = EvidenceShipper(HttpSink(server.url, "t"))
+        shipper.record(action(), decision())
+        shipper.flush()
+
+        assert len(shipper.spool) == 1
+        assert shipper.spool.stats.rejected == 0
+    finally:
+        server.close()
+
+
+def test_a_slow_receiver_cannot_stall_shipping_forever():
+    """The timeout is applied.
+
+    A stuck socket cannot delay a decision — shipping is on another thread —
+    but it can stall shipping indefinitely, turning a slow receiver into
+    staleness nobody notices.
+    """
+    from unified_enforce.evidence import HttpSink
+
+    server = Receiver(delay=5)
+    try:
+        shipper = EvidenceShipper(HttpSink(server.url, "t", timeout_seconds=0.3))
+        shipper.record(action(), decision())
+
+        started = time.monotonic()
+        shipper.flush()
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 3, f"flush waited {elapsed:.1f}s despite a 0.3s timeout"
+        assert len(shipper.spool) == 1, "the record should be requeued, not lost"
+    finally:
+        server.close()

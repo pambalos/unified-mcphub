@@ -55,8 +55,26 @@ DEFAULT_CAPACITY = 10_000
 DEFAULT_BATCH = 200
 
 
+class PermanentRejection(Exception):
+    """The receiver will never accept this batch, however many times it is sent.
+
+    Distinguished from an ordinary failure because the responses are opposite.
+    A transient failure — connection refused, 5xx, a timeout — must requeue, or
+    an outage becomes silent data loss. A permanent one must *not*: a batch the
+    receiver refuses on its merits (malformed, a field it will not store) would
+    otherwise be retried forever at the head of the queue, blocking every record
+    behind it. One poison record would stop all evidence for the life of the
+    process, and the spool would fill and start dropping while the cause sat at
+    the front, unlogged.
+    """
+
+
 class Sink(Protocol):
-    """Where records go. Raises on failure; the shipper handles that."""
+    """Where records go.
+
+    Raises on failure; the shipper handles that. Raise `PermanentRejection` when
+    retrying cannot help — see above for why that distinction is load-bearing.
+    """
 
     def send(self, batch: list[dict[str, Any]]) -> None: ...
 
@@ -65,6 +83,11 @@ class Sink(Protocol):
 class SpoolStats:
     queued: int = 0
     shipped: int = 0
+    #: Batches the receiver refused on their merits. Counted separately from
+    #: `dropped` because the causes differ: dropped means we were too slow or
+    #: too full, rejected means we sent something it will not store, and only
+    #: one of those is fixed by a bigger spool.
+    rejected: int = 0
     #: Records discarded because the spool was full. Surfaced, never silent —
     #: this number is the difference between a dashboard with a known gap and a
     #: dashboard that is quietly wrong.
@@ -217,6 +240,17 @@ class EvidenceShipper:
                 return shipped
             try:
                 self._sink.send(batch)
+            except PermanentRejection as exc:
+                # Dropped deliberately, and loudly. Requeueing would park it at
+                # the head of the queue forever and take every later record
+                # with it.
+                self.spool.stats.rejected += len(batch)
+                log.error(
+                    "control plane permanently refused %d evidence record(s); discarding them: %s",
+                    len(batch),
+                    exc,
+                )
+                continue
             except Exception as exc:
                 # Put it back and stop. Retrying immediately against a
                 # receiver that just failed would spin; the next tick is soon
@@ -300,3 +334,55 @@ class EvidenceShipper:
                 # A flush that raises must not kill the thread, or evidence
                 # stops for the life of the process and nothing says so.
                 log.exception("evidence flush raised")
+
+
+class HttpSink:
+    """Posts batches to a control plane's evidence endpoint.
+
+    Standard library only, on purpose: the core package stays import-light for
+    the in-process decision path, and this runs in every sidecar.
+
+    **Always has a timeout.** It runs on the background thread, so a stuck
+    socket cannot delay a decision — but it can stall shipping indefinitely,
+    which turns a slow receiver into silent staleness. A bounded wait makes it a
+    visible failure instead.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        credential: str,
+        *,
+        timeout_seconds: float = 10.0,
+        path: str = "/api/v1/evidence",
+    ) -> None:
+        self._url = base_url.rstrip("/") + path
+        self._credential = credential
+        self._timeout = timeout_seconds
+
+    def send(self, batch: list[dict[str, Any]]) -> None:
+        import json as _json
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(
+            self._url,
+            data=_json.dumps({"decisions": batch}).encode(),
+            headers={
+                "content-type": "application/json",
+                "authorization": f"Bearer {self._credential}",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                if response.status >= 300:
+                    raise RuntimeError(f"unexpected status {response.status}")
+        except urllib.error.HTTPError as exc:
+            # 4xx means the receiver has judged the batch and will judge it the
+            # same way next time — except 429, which is explicitly "try later".
+            # 5xx is the receiver's problem and worth retrying.
+            if 400 <= exc.code < 500 and exc.code != 429:
+                raise PermanentRejection(f"HTTP {exc.code}: {exc.reason}") from exc
+            raise

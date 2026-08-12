@@ -18,6 +18,7 @@ from .action import Action
 from .approval import ApprovalOutcome, ApprovalRequest, Approvals, RecordedApproval
 from .audit import AuditChain
 from .distribution import Distribution
+from .evidence import EvidenceShipper
 from .policy import Decision, PolicyEngine, Verdict
 from .telemetry import Telemetry
 
@@ -30,12 +31,14 @@ class Enforcer:
         telemetry: Telemetry | None = None,
         approvals: Approvals | None = None,
         distribution: Distribution | None = None,
+        evidence: EvidenceShipper | None = None,
     ) -> None:
         self._engine = engine
         self._chain = chain
         self._telemetry = telemetry or Telemetry.disabled()
         self.approvals = approvals
         self._distribution = distribution
+        self._evidence = evidence
 
     def enforce(self, action: Action) -> Decision:
         """Distribution state first, then policy.
@@ -66,12 +69,21 @@ class Enforcer:
         make. `Decision.source` is what distinguishes them to a reader.
         """
         audit_error: Exception | None = None
+        entry: dict | None = None
         if self._chain is not None:
             try:
-                self._chain.append_decision(action, decision)
+                entry = self._chain.append_decision(action, decision)
             except Exception as exc:
                 audit_error = exc
         self._telemetry.record_decision(action, decision)
+
+        # Only ship what the chain actually holds. Reporting a decision whose
+        # chain write failed would put a row in someone's dashboard that cannot
+        # be corroborated against the evidence it claims to summarise -- and
+        # the dashboard is the copy, not the record.
+        if self._evidence is not None and audit_error is None:
+            self._evidence.record(action, decision, entry=entry)
+
         if audit_error is not None:
             raise audit_error
         return decision

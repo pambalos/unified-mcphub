@@ -58,6 +58,13 @@ jobs:
   secret-scan:
     name: secret scan
     runs-on: ubuntu-latest
+    # The action reads the PR's commit list to decide what to scan, and the
+    # default token could not: it 403'd with "Resource not accessible by
+    # integration". Granted narrowly rather than by widening the workflow's
+    # default permissions -- this job needs to read a PR, nothing more.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v5
         with:
@@ -66,6 +73,13 @@ jobs:
       - name: gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
+          # Required since gitleaks-action v2's breaking change. Without it the
+          # job errors out *before scanning anything* -- which is worse than a
+          # failure, because the check appears red for a configuration reason
+          # and a reader assumes the code was examined and found wanting. It
+          # was not examined at all. This is the hard gate for the public flip,
+          # so it has to actually run.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
           GITLEAKS_ENABLE_SUMMARY: "true"
 

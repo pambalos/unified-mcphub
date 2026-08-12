@@ -1,0 +1,35 @@
+scripts/ci-local/Dockerfile
+  s_b24ad4c243d6fd::t_4ab4c340efd5dc 39
+  s_b24ad4c243d6fd::t_59f766e5397ecf 29-37
+  s_b24ad4c243d6fd::t_7301fd3f5007f3 1-9,17,28,45-49
+  s_b24ad4c243d6fd::t_a645fe60ff7cd1 10-16,18-27,38,40-44
+packages/unified-enforce/tests/integration/test_terraform_modules.py
+  s_b24ad4c243d6fd::t_48c9dc8e28c40a 109-113
+  s_b24ad4c243d6fd::t_d4d65315f2b28b 1-108,114-118
+scripts/ci-local/entrypoint.sh
+  s_b24ad4c243d6fd::t_a7956fdeecd856 1-5,7-39
+deploy/terraform/modules/dataplane-aws/variables.tf
+  s_b24ad4c243d6fd::t_567982a418189a 1-68
+deploy/terraform/README.md
+  s_b24ad4c243d6fd::t_1f7f933e5f4ae8 1-82
+deploy/terraform/modules/dataplane-aws/main.tf
+  s_b24ad4c243d6fd::t_df560a2234f468 1-153
+scripts/ci-local.sh
+  s_b24ad4c243d6fd::t_50183de7f60a4c 1-32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "25903c257269d06de15e22aebb6b5cd42b2fb05f",
+  "prompts": {},
+  "sessions": {
+    "s_b24ad4c243d6fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "18a252bb-92e9-41e0-8235-2461e06281b3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

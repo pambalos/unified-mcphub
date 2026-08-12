@@ -64,7 +64,7 @@ resource "aws_vpc_security_group_egress_rule" "agent_to_sidecar" {
   from_port                    = var.proxy_port
   to_port                      = var.proxy_port
   ip_protocol                  = "tcp"
-  description                  = "agent -> Envoy listener (the only allowed path)"
+  description                  = "agent to Envoy listener (the only allowed path)"
   tags                         = local.tags
 }
 

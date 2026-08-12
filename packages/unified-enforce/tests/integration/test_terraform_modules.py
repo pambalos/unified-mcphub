@@ -116,3 +116,44 @@ def test_no_module_grants_blanket_egress():
                 f"{tf.relative_to(REPO)}:{number} grants 0.0.0.0/0 — "
                 "an allowlist that includes everything is not an allowlist"
             )
+
+
+def test_rule_descriptions_use_only_characters_aws_accepts():
+    """AWS rejects security-group rule descriptions outside a specific set, and
+    `terraform validate` has no idea — it is an API constraint, not a schema
+    one. A real apply is the only other way to find out, which is how this was
+    found: an `agent -> Envoy listener` description failed at create time with
+    `InvalidParameterValue`, leaving the agent group with DNS egress and no
+    path to its own sidecar.
+
+    Cheap to check statically, so there is no reason to learn it from an apply
+    ever again. The permitted set is quoted verbatim from the API error.
+    """
+    permitted = set(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._-:/()#,@[]+=&;{}!$*"
+    )
+    checked = 0
+    for root in (TERRAFORM_ROOT, EGRESS):
+        for tf in root.rglob("*.tf"):
+            # Only descriptions inside an `aws_*` resource reach the API.
+            # Variable descriptions are prose for humans and may contain
+            # anything — flagging those would be a false positive, which this
+            # test produced on its first run over an apostrophe in "agent's".
+            in_aws_resource = False
+            for number, line in enumerate(tf.read_text().splitlines(), start=1):
+                if line.startswith('resource "aws_'):
+                    in_aws_resource = True
+                elif line.startswith("}"):
+                    in_aws_resource = False
+                if not in_aws_resource:
+                    continue
+                stripped = line.strip()
+                if not stripped.startswith("description") or "=" not in stripped:
+                    continue
+                value = stripped.split("=", 1)[1].strip().strip('"')
+                bad = sorted(set(value) - permitted)
+                assert not bad, (
+                    f"{tf.name}:{number} description contains {bad!r}, which AWS rejects: {value!r}"
+                )
+                checked += 1
+    assert checked > 5, f"only {checked} descriptions checked — the scan is not finding them"

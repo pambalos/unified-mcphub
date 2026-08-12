@@ -31,7 +31,7 @@ resource "aws_vpc_security_group_egress_rule" "agent_to_proxy" {
   from_port                    = 10000
   to_port                      = 10000
   ip_protocol                  = "tcp"
-  description                  = "agent -> Envoy listener (the only allowed path)"
+  description                  = "agent to Envoy listener (the only allowed path)"
 }
 
 resource "aws_vpc_security_group_egress_rule" "agent_dns_udp" {

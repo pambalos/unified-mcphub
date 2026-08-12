@@ -6,6 +6,11 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # The Langfuse version matrix stands up six containers twice over, which is
+  # too slow to sit in front of every PR but too important to run only by hand.
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
 
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:
@@ -36,6 +41,72 @@ jobs:
 
       - name: Tests
         run: uv run pytest packages
+
+  # Everything that needs a real Envoy, a real kernel firewall, or a real OTLP
+  # receiver. Before this job existed the whole `-m integration` suite ran only
+  # by hand on one developer laptop and gated nothing — a change breaking the
+  # vendored proto field numbers, the Envoy templates or the egress lock would
+  # have merged green (UAI-141).
+  #
+  # GitHub's ubuntu runners ship Docker, so no service container is needed. This
+  # is also the only place these tests run on **Linux**: the ext_authz protos,
+  # the iptables rules and the DNS-resolver workaround were all developed on
+  # macOS, which is the platform least like production.
+  integration:
+    name: integration (docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync workspace (incl. dev tooling)
+        run: uv sync --frozen
+
+      # Pull in advance so a slow registry shows up as a pull failure rather
+      # than a mysterious per-test timeout.
+      - name: Pre-pull images
+        run: |
+          docker pull envoyproxy/envoy:v1.31-latest
+          docker pull otel/opentelemetry-collector-contrib:latest
+
+      # The Langfuse matrix is excluded here and runs nightly instead; these are
+      # the checks worth blocking a merge on.
+      - name: Integration tests
+        run: uv run pytest packages -m integration -p no:cacheprovider
+             --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_langfuse_ingests_a_deferred_decision_as_a_warning
+             --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_every_decision_attribute_is_retrievable_from_langfuse
+             --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_an_allow_is_not_flagged_as_a_warning
+             --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_each_major_refuses_the_other_majors_read_path
+             --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_langfuse_v2_has_no_otlp_endpoint_at_all
+
+  # The full Langfuse tier: two complete self-hosted stacks (v3 and v4) plus the
+  # v2 support-floor probe. Minutes of container time, so nightly rather than
+  # per-PR — but it is the only thing standing between us and an integration
+  # that silently stops working when Langfuse changes its read API.
+  langfuse-matrix:
+    name: langfuse matrix (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync workspace (incl. dev tooling)
+        run: uv sync --frozen
+
+      - name: Langfuse version matrix
+        run: uv run pytest packages/unified-enforce/tests/integration/test_otlp_backends.py
+             -m integration -p no:cacheprovider
 
   # unified-mcp-graphify is EXCLUDED from the uv workspace (heavy graphify deps),
   # so the job above can't import it and skips it via the root pytest --ignore.

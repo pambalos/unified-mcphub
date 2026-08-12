@@ -101,3 +101,89 @@ rules:
     assert entry["payload"]["action_digest"] == action.digest()
     assert isinstance(entry["payload"]["elapsed_us"], int)
     assert AuditChain.verify(tmp_path / "audit").ok
+
+
+# --- signed chains (UAI-145) ---
+
+
+def test_a_signed_chain_verifies_with_the_public_key(tmp_path):
+    from unified_enforce import Signer
+
+    signer = Signer.generate("test-key-1")
+    chain = AuditChain(tmp_path / "audit", signer=signer)
+    chain.start()
+    try:
+        chain.append("decision", {"verdict": "allow"})
+        chain.append("decision", {"verdict": "deny"})
+    finally:
+        chain.stop()
+
+    assert AuditChain.verify(tmp_path / "audit", public_key=signer.public_bytes()).ok
+
+
+def test_a_rewritten_history_survives_the_hash_check_but_not_the_signature(tmp_path):
+    """The property signing actually buys.
+
+    An attacker with write access can rewrite an unsigned chain end to end —
+    recomputing every hash — and `verify()` reports it as pristine. That is the
+    honest limit of a hash chain, and it is what a signature closes: forging
+    the rewrite now needs the key as well as the file.
+    """
+    from unified_enforce import Signer
+
+    signer = Signer.generate("test-key-1")
+    audit_dir = tmp_path / "audit"
+    chain = AuditChain(audit_dir, signer=signer)
+    chain.start()
+    try:
+        chain.append("decision", {"verdict": "deny"})
+    finally:
+        chain.stop()
+
+    # Rewrite the entry as an ALLOW, recomputing the hash exactly as the writer
+    # would. This is the attack, done properly rather than by corrupting bytes.
+    path = next(audit_dir.glob("*.jsonl"))
+    entry = json.loads(path.read_text().splitlines()[0])
+    entry.pop("hash"), entry.pop("sig"), entry.pop("key_id")
+    entry["payload"]["verdict"] = "allow"
+    from unified_enforce import canonical_bytes, sha256_hex
+
+    rehashed = sha256_hex(canonical_bytes(entry, strict=False))
+    path.write_text(json.dumps({**entry, "hash": rehashed}, sort_keys=True) + "\n")
+
+    # Hash chain alone: no complaint. This is not a bug, it is the model.
+    assert AuditChain.verify(audit_dir).ok
+
+    # With the key, the forgery is caught — here as a missing signature, since
+    # the attacker cannot produce one.
+    signed = AuditChain.verify(audit_dir, public_key=signer.public_bytes())
+    assert not signed.ok
+    assert "unsigned" in signed.error
+
+
+def test_a_signature_from_the_wrong_key_is_rejected(tmp_path):
+    from unified_enforce import Signer
+
+    signer, other = Signer.generate("real"), Signer.generate("attacker")
+    chain = AuditChain(tmp_path / "audit", signer=signer)
+    chain.start()
+    try:
+        chain.append("decision", {"verdict": "allow"})
+    finally:
+        chain.stop()
+
+    result = AuditChain.verify(tmp_path / "audit", public_key=other.public_bytes())
+    assert not result.ok
+    assert "bad signature" in result.error
+
+
+def test_signing_is_optional_and_off_by_default(tmp_path):
+    """Existing deployments must keep verifying unchanged."""
+    chain = AuditChain(tmp_path / "audit")
+    chain.start()
+    try:
+        written = chain.append("decision", {"verdict": "allow"})
+    finally:
+        chain.stop()
+    assert "sig" not in written
+    assert AuditChain.verify(tmp_path / "audit").ok

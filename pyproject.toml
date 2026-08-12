@@ -26,6 +26,7 @@ dev = [
     "grpcio-tools>=1.60.0",
     "langchain-core>=1.5.4",
     "llama-index-core>=0.14.23",
+    "crewai>=0.80.0 ; sys_platform == 'linux'",
 ]
 
 # Shared test/lint config so a workspace-wide run behaves identically to the

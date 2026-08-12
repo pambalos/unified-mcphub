@@ -19,6 +19,7 @@ members = [
 
 [manifest.dependency-groups]
 dev = [
+    { name = "crewai", marker = "sys_platform == 'linux'", specifier = ">=0.80.0" },
     { name = "grpcio", specifier = ">=1.60.0" },
     { name = "grpcio-tools", specifier = ">=1.60.0" },
     { name = "langchain-core", specifier = ">=1.5.4" },

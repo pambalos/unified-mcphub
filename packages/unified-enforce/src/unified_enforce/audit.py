@@ -50,9 +50,11 @@ class HashChainWriter:
         *,
         strict: bool = True,
         clock: Callable[[], datetime] | None = None,  # UTC now; injectable for rotation tests
+        signer: Any = None,  # unified_enforce.Signer; signs each entry hash
     ) -> None:
         self._dir = Path(audit_dir)
         self._strict = strict
+        self._signer = signer
         self._clock = clock or (lambda: datetime.now(UTC))
         self._fd: int | None = None
         self._lock_fd: int | None = None
@@ -105,6 +107,13 @@ class HashChainWriter:
         body = {**entry, "prev_hash": self._head}
         entry_hash = sha256_hex(canonical_bytes(body, strict=self._strict))
         full = {**body, "hash": entry_hash}
+        if self._signer is not None:
+            # Sign the entry hash, which already covers the payload and the
+            # whole preceding chain via prev_hash — so one signature per entry
+            # authenticates everything before it, and a rewritten history needs
+            # the key rather than just write access to the file.
+            full["sig"] = self._signer.sign_bytes(entry_hash.encode("ascii"))
+            full["key_id"] = self._signer.key_id
         line = (
             json.dumps(full, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
             + "\n"
@@ -121,9 +130,18 @@ class HashChainWriter:
     # --- verification (offline, no lock needed) ---
 
     @classmethod
-    def verify(cls, audit_dir: str | Path) -> VerifyResult:
+    def verify(cls, audit_dir: str | Path, *, public_key: bytes | None = None) -> VerifyResult:
         """Re-serialization of parsed JSON is deterministic without the strict
-        type checks, so one verifier covers strict and lenient chains alike."""
+        type checks, so one verifier covers strict and lenient chains alike.
+
+        Pass `public_key` to also check signatures. Without it, signed chains
+        verify exactly as before — the hash chain alone is still meaningful,
+        and an auditor who has not been given the key can still detect
+        tampering *within* what they hold. What the key adds is proof of *who*
+        wrote it, which is the part a hash chain cannot give you: an attacker
+        with write access can rewrite an unsigned chain end to end and it will
+        verify perfectly.
+        """
         files = sorted(Path(audit_dir).glob("*.jsonl"))
         anchor: str | None = None
         prev: str | None = None
@@ -139,6 +157,8 @@ class HashChainWriter:
                         entry = json.loads(raw)
                     except json.JSONDecodeError as exc:
                         return VerifyResult(False, count, f"{where}: unparseable: {exc}", anchor)
+                    signature = entry.pop("sig", None)
+                    key_id = entry.pop("key_id", None)
                     claimed = entry.pop("hash", None)
                     if prev is None:
                         # First retained entry is the trust anchor (GENESIS unless
@@ -152,6 +172,15 @@ class HashChainWriter:
                         return VerifyResult(
                             False, count, f"{where}: hash mismatch (tampered)", anchor
                         )
+                    if public_key is not None:
+                        from .signing import verify_bytes
+
+                        if signature is None:
+                            return VerifyResult(False, count, f"{where}: entry is unsigned", anchor)
+                        if not verify_bytes(public_key, signature, claimed.encode("ascii")):
+                            return VerifyResult(
+                                False, count, f"{where}: bad signature (key_id={key_id})", anchor
+                            )
                     prev = claimed
                     count += 1
         return VerifyResult(True, count, None, anchor)
@@ -192,9 +221,18 @@ class HashChainWriter:
 
 
 class AuditChain:
-    def __init__(self, audit_dir: str | Path) -> None:
+    def __init__(self, audit_dir: str | Path, *, signer: Any = None) -> None:
+        """`signer` upgrades the chain from tamper-*evident* to
+        tamper-evident-and-*attributable*.
+
+        Without it the chain proves internal consistency, which an attacker who
+        controls the writer defeats by rewriting the whole history — every hash
+        recomputes and `verify()` is perfectly happy. With it, that rewrite also
+        needs the private key. Still not a defence against a compromised *live*
+        writer (it holds the key), which is what external anchoring is for.
+        """
         self._dir = Path(audit_dir)
-        self._writer = HashChainWriter(audit_dir, strict=True)
+        self._writer = HashChainWriter(audit_dir, strict=True, signer=signer)
         self._seq = 0
 
     # --- lifecycle ---
@@ -267,5 +305,5 @@ class AuditChain:
     # --- verification ---
 
     @classmethod
-    def verify(cls, audit_dir: str | Path) -> VerifyResult:
-        return HashChainWriter.verify(audit_dir)
+    def verify(cls, audit_dir: str | Path, *, public_key: bytes | None = None) -> VerifyResult:
+        return HashChainWriter.verify(audit_dir, public_key=public_key)

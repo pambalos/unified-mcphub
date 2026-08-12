@@ -56,6 +56,30 @@ class Signer:
             signature=base64.b64encode(sig).decode("ascii"),
         )
 
+    def sign_bytes(self, payload: bytes) -> str:
+        """Base64 Ed25519 over arbitrary bytes.
+
+        Used by the audit chain, which signs each entry's hash rather than the
+        action: that hash already covers the payload *and*, through `prev_hash`,
+        everything written before it — so one signature per entry authenticates
+        the whole history up to that point.
+        """
+        return base64.b64encode(self._key.sign(payload)).decode("ascii")
+
+
+def verify_bytes(public_key_raw: bytes, signature_b64: str, payload: bytes) -> bool:
+    """Counterpart to `Signer.sign_bytes`, for offline verification.
+
+    A module-level function because whoever checks a chain has a public key and
+    a file — not a Signer, and by design no access to the private key.
+    """
+    key = Ed25519PublicKey.from_public_bytes(public_key_raw)
+    try:
+        key.verify(base64.b64decode(signature_b64), payload)
+        return True
+    except (InvalidSignature, ValueError):
+        return False
+
 
 class SignedAction(BaseModel):
     model_config = ConfigDict(extra="forbid")

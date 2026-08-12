@@ -34,7 +34,7 @@ from .extauthz import (
 from .index import AuditIndex
 from .policy import Decision, Floor, Match, PolicyDoc, PolicyEngine, PolicyError, Rule, Verdict
 from .replay import Divergence, ReplayReport, replay
-from .signing import SignedAction, Signer
+from .signing import SignedAction, Signer, verify_bytes
 from .telemetry import Telemetry
 
 __all__ = [
@@ -74,6 +74,7 @@ __all__ = [
     "Rule",
     "SignedAction",
     "Signer",
+    "verify_bytes",
     "Verdict",
     "VerifyResult",
     "canonical_bytes",

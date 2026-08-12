@@ -243,6 +243,31 @@ def _crewai_invoke(client, tool, args, on_call):
         return guarded._run(**args)
 
 
+def _crewai_invoke_real(client, tool, args, on_call):
+    """The same driver against the genuine package.
+
+    Runs wherever `crewai` is installed — CI (Linux) does, this dev machine
+    cannot. Kept alongside the stub rather than replacing it so the stub keeps
+    guarding the logic locally while CI proves the real contract.
+    """
+    from crewai.tools import BaseTool
+
+    from unified_sdk.adapters.crewai import crewai_guard, guard_tool
+
+    class Original(BaseTool):
+        name: str = tool
+        description: str = tool
+        args_schema: Any = _lc_schema(tool, args)
+
+        def _run(self, **kwargs: Any) -> Any:
+            on_call(kwargs)
+            return "ok"
+
+    guarded = guard_tool(Original(), crewai_guard(client))
+    assert guarded.name == tool
+    return guarded._run(**args)
+
+
 def _llamaindex_invoke(client, tool, args, on_call):
     from llama_index.core.tools import FunctionTool
 
@@ -278,8 +303,10 @@ SYNC_DRIVERS = [
     Driver("toolloop", _toolloop_invoke),
     pytest.param(Driver("langchain", _langchain_invoke), marks=needs_langchain, id="langchain"),
     pytest.param(Driver("llamaindex", _llamaindex_invoke), marks=needs_llamaindex, id="llamaindex"),
-    # Structural only — see _fake_crewai.
+    # Structural only — see _fake_crewai. The real package runs beside it
+    # wherever it can be installed.
     Driver("crewai(stub)", _crewai_invoke),
+    pytest.param(Driver("crewai", _crewai_invoke_real), marks=needs_crewai, id="crewai"),
 ]
 
 ASYNC_DRIVERS = [

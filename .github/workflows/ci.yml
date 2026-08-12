@@ -66,6 +66,13 @@ jobs:
       - name: gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
+          # Required since gitleaks-action v2's breaking change. Without it the
+          # job errors out *before scanning anything* -- which is worse than a
+          # failure, because the check appears red for a configuration reason
+          # and a reader assumes the code was examined and found wanting. It
+          # was not examined at all. This is the hard gate for the public flip,
+          # so it has to actually run.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
           GITLEAKS_ENABLE_SUMMARY: "true"
 

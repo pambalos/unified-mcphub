@@ -1,0 +1,47 @@
+packages/unified-sdk/src/unified_sdk/adapters/providers.py
+  s_b24ad4c243d6fd::t_7426fa2a2b77f1 1-71,97-115,117-136,138-147,149-210
+  s_b24ad4c243d6fd::t_ed1b9161186f73 72-96
+packages/unified-sdk/README.md
+  s_b24ad4c243d6fd::t_7ff49e6cf67588 99-146
+specs/enforce/adapters.v1.md
+  s_b24ad4c243d6fd::t_f25659f7a93d9b 159-173,177-179
+  s_b24ad4c243d6fd::t_8363e684a1c7aa 181-218
+  s_b24ad4c243d6fd::t_e6ca6b84439b66 44-75
+packages/unified-sdk/src/unified_sdk/adapters/crewai.py
+  s_b24ad4c243d6fd::t_d84d3d5d485f7e 1-69
+packages/unified-sdk/src/unified_sdk/adapters/llamaindex.py
+  s_b24ad4c243d6fd::t_3fcf7f129cfa95 1-73
+packages/unified-sdk/tests/unit/test_provider_normalizers.py
+  s_b24ad4c243d6fd::t_9ee3abb01c2404 1-26,31-37,41-161,163-209,211-235
+  s_b24ad4c243d6fd::t_04f452cbcdb4f7 27-30,38-40
+packages/unified-enforce/src/unified_enforce/telemetry.py
+  s_b24ad4c243d6fd::t_162e3b6b80227e 155-160
+packages/unified-enforce/tests/integration/test_otlp_backends.py
+  s_b24ad4c243d6fd::t_83c462374270cb 161-195,197-198
+  s_b24ad4c243d6fd::t_037a716bacc96c 215
+  s_b24ad4c243d6fd::t_fbfe0c9fca0cf5 212-213,216,218-228,230-241,244,251,255-270
+  s_b24ad4c243d6fd::t_166ed7bd8d1056 332-333,337-346,348-351,354-361
+  s_b24ad4c243d6fd::t_76ca639a87bb0e 381,384-388,390-395,397,399-410,421-422,431,434,436-442,445,447-456
+packages/unified-sdk/src/unified_sdk/adapters/__init__.py
+  s_b24ad4c243d6fd::t_6617cc7cf77498 11-12,15-21
+specs/enforce/e3.v1.md
+  s_b24ad4c243d6fd::t_a8bf83dc1576a5 221-223
+packages/unified-enforce/tests/integration/langfuse-v2-compose.yaml
+  s_b24ad4c243d6fd::t_ab9d753b4dd32a 1-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "88706288aa3f98d3223e6557ff462dc84c568ecd",
+  "prompts": {},
+  "sessions": {
+    "s_b24ad4c243d6fd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "18a252bb-92e9-41e0-8235-2461e06281b3",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

@@ -170,6 +170,172 @@ class DirectorySource:
         return self._read("revocations.json")
 
 
+class ControlPlaneSource:
+    """The three artifacts, over HTTP, from a control plane.
+
+    The counterpart to `DirectorySource`, and the reason containment has a
+    number attached to it at all: until something fetched on a schedule, "an
+    operator contains an agent and it stops" had no elapsed time — only a
+    `gate()` that would have denied had anything told it to.
+
+    **Unverified bytes.** Everything this returns goes through `attest`, which
+    checks a root-signed chain of signatures. So a hostile response is a refused
+    refresh, not a compromised sidecar, and that is what makes it acceptable to
+    fetch policy over a channel this class does not authenticate. TLS narrows
+    who can answer; the signature is what decides whether the answer counts.
+
+    **`channel` binds each request to the key this sidecar registered**, same as
+    the approval client. Without it a stolen bearer token reads another fleet's
+    policy — less serious than forging it, and still not something to leave
+    open.
+
+    Raising is the contract: `Distribution.refresh` catches, reports
+    unreachable, and keeps the last verified snapshot.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        credential: str,
+        *,
+        channel: Any = None,
+        http_timeout: float = 10.0,
+    ) -> None:
+        self._base = base_url.rstrip("/")
+        self._credential = credential
+        self._channel = channel
+        self._timeout = http_timeout
+
+    def fetch_keyset(self) -> Any:
+        return self._get("/api/v1/policy/keyset")
+
+    def fetch_bundle(self) -> Any:
+        return self._get("/api/v1/policy/bundle")
+
+    def fetch_revocations(self) -> Any:
+        # Returned as served, wrapper and all. `_apply_revocations` unwraps,
+        # and doing it here as well produced a sidecar that refused every
+        # revocation list it was handed — which, because an unusable list
+        # escalates rather than assuming nobody is contained, presented as
+        # everything being denied instead of as a broken fetch. Unwrapping
+        # belongs in one place; this is not it.
+        return self._get("/api/v1/policy/revocations")
+
+    def _get(self, path: str) -> Any:
+        import urllib.error
+        import urllib.request
+
+        headers = {"authorization": f"Bearer {self._credential}"}
+        if self._channel is not None:
+            headers.update(self._channel.headers("GET", path, None))
+
+        request = urllib.request.Request(self._base + path, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                return json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            raise SourceUnavailable(f"HTTP {exc.code} for {path}: {exc.reason}") from exc
+        except urllib.error.URLError as exc:
+            raise SourceUnavailable(f"cannot reach {self._base}: {exc.reason}") from exc
+        except ValueError as exc:
+            raise SourceUnavailable(f"{path} returned invalid JSON") from exc
+        except OSError as exc:
+            # A read that times out mid-response arrives as a bare
+            # `TimeoutError`, not a `URLError` — urllib only wraps what fails
+            # while connecting. Left uncaught it escapes as a type callers do
+            # not expect, and the one place that must never be surprised is the
+            # poll loop.
+            raise SourceUnavailable(f"cannot read from {self._base}: {exc}") from exc
+
+
+class SourceUnavailable(Exception):
+    """A fetch failed. Ordinary, and handled by keeping the last snapshot."""
+
+
+#: How long an operator waits between pressing the kill switch and the last
+#: sidecar honouring it. This is the entire containment bound, so it is a
+#: constant with a justification rather than a parameter with a default.
+#:
+#: Thirty seconds, not five minutes: the actions worth a kill switch — a loop
+#: burning spend, an agent walking a filesystem — are ones where minutes are
+#: many more operations. Not one second either; that is a request per sidecar
+#: per second, forever, against a document that changes about twice a year, and
+#: the cost is paid by every customer to shorten an event most never have.
+#:
+#: The revocation list's expiry is what makes this safe to get wrong. A sidecar
+#: that cannot reach the control plane for longer than that expiry escalates
+#: rather than assuming nobody is contained, so a missed poll degrades towards
+#: stricter, not towards stale.
+DEFAULT_POLL_SECONDS = 30.0
+
+
+class Poller:
+    """Calls `refresh()` forever, on an interval, without letting it die.
+
+    Small, and load-bearing. A poller that stops on the first exception turns a
+    transient control-plane blip into a sidecar that never learns anything
+    again — containment included — while every health check stays green,
+    because `gate()` keeps working perfectly against a snapshot from Tuesday.
+    That is the failure this class exists to not have.
+
+    `refresh()` already promises not to raise; this catches anyway. The promise
+    is one edit away from being untrue, and the cost of being wrong is silent.
+    """
+
+    def __init__(
+        self,
+        distribution: "Distribution",
+        *,
+        interval_seconds: float = DEFAULT_POLL_SECONDS,
+        on_report: Any = None,
+    ) -> None:
+        self._distribution = distribution
+        self._interval = interval_seconds
+        self._on_report = on_report
+        self._task: Any = None
+        #: Set after each completed poll, so a caller — a test measuring the
+        #: bound, or a readiness probe — can wait for one rather than sleep.
+        self.polled: Any = None
+
+    async def start(self) -> None:
+        import asyncio
+
+        if self._task is not None:
+            return
+        self.polled = asyncio.Event()
+        self._task = asyncio.create_task(self._run(), name="unified-distribution-poll")
+
+    async def stop(self) -> None:
+        import asyncio
+
+        task, self._task = self._task, None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def _run(self) -> None:
+        import asyncio
+
+        while True:
+            try:
+                report = await asyncio.to_thread(self._distribution.refresh)
+                if self._on_report is not None:
+                    self._on_report(report)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Deliberately swallowed. See the class docstring: the only
+                # thing worse than a failed poll is a poller that stopped.
+                log.exception("policy refresh raised; continuing to poll")
+            if self.polled is not None:
+                self.polled.set()
+            await asyncio.sleep(self._interval)
+
+
 @dataclass
 class RefreshReport:
     """What happened on one poll. Returned rather than only logged so a caller
@@ -184,6 +350,27 @@ class RefreshReport:
 
     def alarming(self) -> bool:
         return bool(self.problems)
+
+
+#: The principal id that means "every principal in this fleet".
+#:
+#: Not a pattern language. A kill switch is pressed by somebody having a bad
+#: day, and the failure mode of a glob is containing more or less than intended
+#: while believing otherwise. One literal, one meaning.
+FLEET_WIDE = "*"
+
+#: Strictness order, tightest first. Composition takes the strictest of the
+#: rules that apply, because a kill switch a narrower rule can weaken is not a
+#: kill switch: a fleet-wide `deny` must not be softened to `defer` by a
+#: per-principal entry somebody set last week and forgot.
+_STRICTNESS = ("deny", "deny_except", "defer")
+
+
+def _strictest(*candidates: "Containment | None") -> "Containment | None":
+    present = [c for c in candidates if c is not None]
+    if not present:
+        return None
+    return min(present, key=lambda c: _STRICTNESS.index(c.mode) if c.mode in _STRICTNESS else 99)
 
 
 class Distribution:
@@ -488,7 +675,12 @@ class Distribution:
         # Containment first. A contained agent is contained whatever the rules
         # say — that is the entire point of a kill switch, and a policy that
         # allowed the action would otherwise quietly win.
-        contained = self.snapshot.containment.get(principal)
+        contained = _strictest(
+            self.snapshot.containment.get(principal),
+            # `*` is the whole fleet: the button an incident responder presses
+            # when they do not yet know which agent is the problem.
+            self.snapshot.containment.get(FLEET_WIDE),
+        )
         if contained is not None:
             forced = _containment_decision(contained, action)
             if forced is not None:

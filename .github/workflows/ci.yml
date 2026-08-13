@@ -124,7 +124,15 @@ jobs:
 
       # The Langfuse matrix is excluded here and runs nightly instead; these are
       # the checks worth blocking a merge on.
+      #
+      # UNIFIED_REQUIRE_INTEGRATION turns every environment skip in this suite
+      # into a failure. Without it a runner that lost Docker, or a Terraform
+      # step that quietly failed, produces a green job that tested none of what
+      # this job exists for -- and "the integration suite passed" would not mean
+      # "the integration suite ran".
       - name: Integration tests
+        env:
+          UNIFIED_REQUIRE_INTEGRATION: "1"
         run: uv run pytest packages -m integration -p no:cacheprovider
              --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_langfuse_ingests_a_deferred_decision_as_a_warning
              --deselect packages/unified-enforce/tests/integration/test_otlp_backends.py::test_every_decision_attribute_is_retrievable_from_langfuse

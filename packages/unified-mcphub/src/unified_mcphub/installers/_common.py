@@ -8,24 +8,23 @@ bearer token for the TCP transport. Kept here so each `<harness>.py` stays tiny.
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
 
 from unified_mcphub.util import utcnow
 
-# Secrets that must never reach a terminal or transcript: per-caller bearer
-# tokens are 64-hex (TokenStore.mint -> secrets.token_hex(32)); harness CLIs
-# like `claude mcp add/get` echo them back in an Authorization header.
-_BEARER_RE = re.compile(r"(Bearer\s+)[0-9a-fA-F]{16,}")
-_HEX64_RE = re.compile(r"\b[0-9a-fA-F]{64}\b")
+from .redaction_hook import redact_text
 
 
 def redact_secrets(text: str) -> str:
-    """Mask bearer tokens / 64-hex caller tokens in text before it is shown."""
-    text = _BEARER_RE.sub(r"\1[REDACTED]", text)
-    return _HEX64_RE.sub("[REDACTED-TOKEN]", text)
+    """Mask bearer tokens / 64-hex caller tokens before text is shown.
+
+    Thin wrapper over the shared redactor so the installer's Python path and the
+    Claude-Code hook's shell `sed` share one token charset and never drift (see
+    `redaction_hook.TOKEN_CHARSET`).
+    """
+    return redact_text(text)
 
 
 def harness_cli_present(binary: str) -> bool:

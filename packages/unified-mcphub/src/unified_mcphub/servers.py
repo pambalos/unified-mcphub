@@ -210,7 +210,7 @@ def probe(spec: ServerSpec, *, name: str = "", timeout: float = 120.0) -> list[t
         from .secrets import SecretsStore
         from .supervisor import build_connection, resolve_auth_headers
 
-        headers = await resolve_auth_headers(spec, SecretsStore(), name=name)
+        headers = await resolve_auth_headers(spec, SecretsStore.from_config(), name=name)
         conn = build_connection(spec, auth_headers=headers, name=name)
         async with conn:
             return await conn.list_tools()

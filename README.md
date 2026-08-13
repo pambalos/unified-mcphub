@@ -95,6 +95,21 @@ uv run unified-mcphub start          # seeds ~/.unified-ai/mcphub on first run, 
 
 Point a harness at it, or query the socket directly (`~/.unified-ai/mcphub/mcphub.sock`).
 
+### Install globally
+
+To run `unified-mcphub` from any directory (no `uv run`, no `cd` into the repo),
+install the CLI as a uv tool — `--editable` keeps it on live source, so code edits
+take effect on the next run with no reinstall:
+
+```sh
+uv tool install --editable ./packages/unified-mcphub   # binary lands on PATH (~/.local/bin)
+unified-mcphub start                                   # now works from anywhere
+```
+
+Reinstall (same command + `--reinstall`) only when `dependencies` change; plain
+source edits need no reinstall. The optional `graphify` server installs separately
+(see [Optional servers](#optional-servers)).
+
 Wire a harness with `uv run unified-mcphub install claude-code`. Secret-shaped output
 is redacted by default; for the extra-safe path (a Claude Code redaction hook + the
 workspace `redact:` result policy) see

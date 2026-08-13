@@ -98,7 +98,13 @@ def test_redaction_hook_installed_and_removed(hub_home, enable_tcp, monkeypatch)
     groups = settings["hooks"]["PreToolUse"]
     cmds = [h["command"] for g in groups for h in g["hooks"]]
     assert any("#RDCT_HOOK" in c for c in cmds)
-    assert all(g["hooks"][0]["if"] == "Bash(claude mcp *)" for g in groups)
+    # Un-gated (no `if`) so it covers config-file reads, not just `claude mcp`;
+    # hardened wrapper (pipefail) and widened token charset.
+    rgroup = next(g for g in groups if any("#RDCT_HOOK" in h["command"] for h in g["hooks"]))
+    rhook = rgroup["hooks"][0]
+    assert "if" not in rhook
+    assert "pipefail" in rhook["command"]
+    assert "[A-Za-z0-9._~+/=-]" in rhook["command"]
 
     # idempotent: a second install doesn't duplicate the hook group
     installers.dispatch_install("claude-code", scope="user", with_redaction_hook=True)

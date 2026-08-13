@@ -94,10 +94,16 @@ def enable_tcp(hub_home):
 
 @pytest.fixture
 def fake_keyring(monkeypatch):
-    """In-memory keyring so secrets tests never touch the real OS keyring."""
+    """In-memory keyring so secrets tests never touch the real OS keyring.
+
+    Also clears the process-wide key cache so each test re-reads this fresh
+    backing dict instead of a key memoized by an earlier test.
+    """
     backing: dict = {}
     monkeypatch.setattr(secrets_mod.keyring, "get_password", lambda s, u: backing.get((s, u)))
     monkeypatch.setattr(
         secrets_mod.keyring, "set_password", lambda s, u, v: backing.__setitem__((s, u), v)
     )
-    return backing
+    secrets_mod._reset_key_cache()
+    yield backing
+    secrets_mod._reset_key_cache()

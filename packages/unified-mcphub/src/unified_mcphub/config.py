@@ -121,10 +121,30 @@ class OtelConfig(BaseModel):
     langfuse_secret_key: str | None = None
 
 
+class SecretsConfig(BaseModel):
+    """Where the Fernet master key (which decrypts `secrets.enc`) lives, and how
+    the hub gates access to it at startup. See spec §9.
+
+    The actual credentials never touch the OS keychain — only this one key does.
+    `key_backend` decides where that key is read from; `auto` resolves per-platform
+    in secrets.py (env var if set → macOS/Windows keychain → Linux Secret Service if
+    present, else a 0600 key file)."""
+
+    # auto | keyring | file | env
+    key_backend: str = "auto"
+    # prompt | auto — at start the hub logs the credential names it will read, then
+    # either waits for a single y/N (prompt) or proceeds (auto). prompt fails fast
+    # with no TTY (set `auto` for headless). Gates the hub only, not the CLI.
+    access_mode: str = "prompt"
+    # `file` backend only: path to the 0600 key file. Defaults beside secrets.enc.
+    key_file: str | None = None
+
+
 class HubConfig(BaseModel):
     listen: ListenConfig = Field(default_factory=ListenConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
+    secrets: SecretsConfig = Field(default_factory=SecretsConfig)
     otel: OtelConfig = Field(default_factory=OtelConfig)
     active_workspace: str = "default"
     # Supply-chain safety floor: refuse to stand up an unpinned fetch-and-run
@@ -238,6 +258,12 @@ def _read_yaml(path: Path) -> dict:
 
 def load_hub_config() -> HubConfig:
     return HubConfig.model_validate(_read_yaml(config_path()))
+
+
+def load_secrets_config() -> SecretsConfig:
+    """Just the `secrets:` block of config.yaml — read by SecretsStore at the many
+    call sites that construct a store without the full Config loaded."""
+    return HubConfig.model_validate(_read_yaml(config_path())).secrets
 
 
 def load_learned_rules(name: str) -> list[dict]:

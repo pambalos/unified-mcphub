@@ -194,6 +194,7 @@ class TransportServer:
     async def stop(self) -> None:
         for server in self._servers:
             server.should_exit = True
+            server.force_exit = True  # don't wait on long-lived SSE/MCP streams
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         if self.uds_path and os.path.exists(self.uds_path):

@@ -194,6 +194,13 @@ def summarise(
         "source": decision.source,
         "chain_seq": (entry or {}).get("seq"),
         "chain_hash": (entry or {}).get("hash"),
+        # How the identity every rule keys on was established, and what spawned
+        # it. Shipped because a receiver counting denies per principal is
+        # counting something whose meaning depends on this -- "agent:crew-1 was
+        # denied nine times" is a different fact when that name was a header a
+        # gateway stamped than when it was proven.
+        "attestation": action.principal.attestation,
+        "parent_id": action.principal.parent_id,
         "decided_at": action.ts,
     }
     return sign_evidence(record, signer) if signer is not None else record

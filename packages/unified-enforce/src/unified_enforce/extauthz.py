@@ -188,7 +188,15 @@ class ExtAuthzCore:
         if claimed and _DIGEST.match(claimed):
             extra["sdk_action_claimed"] = claimed
         action = Action.build(
-            principal=Principal(id=req.principal_id),
+            principal=Principal(
+                id=req.principal_id,
+                # Stamped by the gateway from deployment position. UAI-137 made
+                # sure an agent cannot set this header itself, which stops it
+                # *asserting* an identity and does not *establish* one: the
+                # claim is exactly as good as the customer's pod topology, and
+                # several agents behind one sidecar necessarily share it.
+                attestation="assigned",
+            ),
             tool=f"{req.scheme}://{req.host}{req.path}",
             verb=req.method.lower(),
             resource="*",  # network layer can't see business semantics — that's the SDK's job (E4)

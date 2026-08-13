@@ -63,3 +63,39 @@ carrying the attested approver and the signature. That is what makes "alice
 approved the $12,400 refund" re-checkable years later by somebody who does not
 trust whoever operates the control plane — a control plane's own queue table is
 a queue, not evidence.
+
+## What "per agent" means
+
+Policy is written against `principal.id`. Floors, budgets, deny rules and the
+kill switch all key on it — so the strength of every rule is the strength of
+that identifier, and every action now records **how it was established**:
+
+| `attestation` | what it means |
+|---|---|
+| `assigned` | deployment position: a header a gateway stamped, a config value, a process boundary |
+| `derived` | an authenticated channel: a bearer token the hub issued, a sidecar's enrolment credential |
+| `attested` | a workload attestation — SPIFFE SVID, mTLS client certificate, cloud instance identity |
+
+**Nothing produces `attested` yet.** The value exists so that adding it later is
+a change of value rather than a change of shape, and so the distinction is
+visible in the meantime rather than implied away.
+
+**The honest phrasing today** is that the plane enforces per *deployment
+position*. UAI-137 stopped an agent asserting its own identity, which is not the
+same as establishing one. Two consequences worth stating rather than
+discovering:
+
+* **Several agents behind one sidecar share a principal.** They are
+  indistinguishable to the plane, so per-agent policy is a fiction there and
+  "revoke this agent" revokes all of them. One sidecar per agent is what makes
+  per-agent policy mean what it says.
+* **Per-agent policy is exactly as trustworthy as the customer's pod topology.**
+  That is a defensible position. Pretending otherwise is not.
+
+**Sub-agents carry lineage.** An agent that spawns agents is the common case,
+and a child inheriting its parent's id makes the audit wrong in a way that only
+surfaces during an incident. `parent_id` records the descent, and it is covered
+by the action digest and by the evidence signature — but lineage is exactly as
+trustworthy as the principal it descends from. A child of an `assigned` parent
+is not better attested than its parent, and the two fields stay independent so
+lineage cannot launder an unproven identity into a trusted-looking one.

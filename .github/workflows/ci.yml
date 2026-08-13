@@ -164,6 +164,41 @@ jobs:
         run: uv run pytest packages/unified-enforce/tests/integration/test_otlp_backends.py
              -m integration -p no:cacheprovider
 
+  external-benchmarks:
+    name: external benchmarks (nightly)
+    # Nightly and on demand, never per-PR. It fetches data from a third party,
+    # so a per-PR gate would make every merge depend on somebody else's uptime
+    # — and the number it reports moves when the benchmark moves, which is not
+    # a reason to block a change to this repository.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - run: uv sync --frozen
+
+      # Not `--fail-on-allowed`. The headline is expected to be unflattering
+      # while the packs are reference policies, and a nightly job that is always
+      # red is a nightly job nobody reads. The report is the deliverable; the
+      # findings become authored corpus cases, which *are* gated per-PR.
+      - name: InjecAgent against the shipped packs
+        working-directory: packages/unified-enforce
+        run: uv run python benchmarks/external.py --suite injecagent --json report.json
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-benchmark-report
+          path: packages/unified-enforce/report.json
+          if-no-files-found: warn
+
   # unified-mcp-graphify is EXCLUDED from the uv workspace (heavy graphify deps),
   # so the job above can't import it and skips it via the root pytest --ignore.
   # This dedicated stage installs it in its own venv and runs its suite, so the

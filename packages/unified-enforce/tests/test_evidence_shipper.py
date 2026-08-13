@@ -301,7 +301,7 @@ def test_a_decision_whose_chain_write_failed_is_not_shipped(tmp_path):
     from unified_enforce.policy import PolicyEngine
 
     class FailingChain:
-        def append_decision(self, action, decision):
+        def append_decision(self, action, decision, **_):
             raise OSError("disk full")
 
     sink = Collecting()

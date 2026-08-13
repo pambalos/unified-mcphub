@@ -27,11 +27,13 @@ Fail closed, always:
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import celpy
@@ -39,6 +41,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from .action import Action
+
+log = logging.getLogger("unified_enforce.policy")
 
 
 class Verdict(str, Enum):
@@ -100,12 +104,44 @@ class Floor(BaseModel):
     reason: str | None = None
 
 
+class Counter(BaseModel):
+    """What to accumulate, so a rule can ask a cumulative question (UAI-147).
+
+    Declared separately from the rule that reads it, because the two are not
+    one-to-one: a spend total is written by the refund rule and read by the
+    budget floor, and a deny count is written by every rule and read by none of
+    them (the control plane reads it, as the rogue signal of UAI-167).
+
+    `value` is CEL over the same names a rule condition sees, so the amount
+    counted is the amount in the action rather than a field name this module
+    has to know about. Absent, each matching action counts as one — which is
+    what a rate limit is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    match: Match = Field(default_factory=Match)
+    value: str | None = None
+    #: Which decisions add to it. `allow` by default: a refund that was denied
+    #: did not spend anything, and counting it would let a blocked agent
+    #: exhaust its own budget and then point at the total as evidence it was
+    #: throttled unfairly. `deny` is the rogue signal; `any` is attempt rate.
+    #:
+    #: Named `on_verdict` and not `on`, which was the first choice and lasted
+    #: one test run: YAML 1.1 reads a bare `on` as the boolean true, so the key
+    #: never reached this model. A policy language whose fields silently become
+    #: booleans is a policy language that eventually loads a rule nobody wrote.
+    on_verdict: Literal["allow", "deny", "any"] = "allow"
+
+
 class PolicyDoc(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: Literal[1]
     rules: list[Rule] = Field(default_factory=list)
     floors: list[Floor] = Field(default_factory=list)
+    counters: list[Counter] = Field(default_factory=list)
 
 
 # --- glob compilation ---
@@ -259,6 +295,22 @@ class PolicyEngine:
         ]
         self._wildcard = [c for c in rules if not c.is_exact]
 
+        # Counters compile through the same path as rules -- same globs, same
+        # CEL environment, same duplicate-id check -- so a counter whose match
+        # is subtly different from the rule it is meant to shadow fails loudly
+        # at load rather than by quietly totalling nothing.
+        self._counters = [
+            (
+                compile_one(c.id, c.match, c.value, Verdict.ALLOW, "standard", None),
+                c.on_verdict,
+            )
+            for c in doc.counters
+        ]
+        #: Every declared id, so a snapshot can resolve all of them to a number.
+        #: A counter that resolved to nothing would make the rule reading it
+        #: raise, which becomes a deny -- safe, and awful to debug.
+        self.counter_ids = [c.id for c in doc.counters]
+
     # --- loaders ---
 
     @classmethod
@@ -283,7 +335,16 @@ class PolicyEngine:
 
     # --- evaluation ---
 
-    def decide(self, action: Action) -> Decision:
+    def decide(
+        self, action: Action, counters: Mapping[str, Mapping[str, float]] | None = None
+    ) -> Decision:
+        """Still a pure function; `counters` is an argument, not a lookup.
+
+        That is the whole of ADR-0026. The engine could not count because
+        counting means state and state on this path means a lookup that can
+        hang -- but a pure function can be *handed* a number, and the layer
+        that already does I/O is the one that should compute it.
+        """
         start = time.perf_counter()
 
         def done(d: Decision) -> Decision:
@@ -309,7 +370,7 @@ class PolicyEngine:
                     continue
                 if c.condition is not None:
                     if activation is None:
-                        activation = _activation(action)
+                        activation = _activation(action, counters)
                     try:
                         result = c.condition.evaluate(activation)
                     except Exception as exc:
@@ -338,10 +399,73 @@ class PolicyEngine:
 
         return done(Decision(Verdict.DENY, None, "default", "standard", "no rule matched"))
 
+    def deltas(self, action: Action, decision: Decision) -> dict[str, float]:
+        """What this action adds to each counter. Pure, like everything else here.
 
-def _activation(action: Action) -> dict[str, Any]:
+        Computed after the verdict because `on:` depends on it, and returned
+        rather than applied because applying is state and state does not live
+        in this class. The `Enforcer` applies it and writes it into the audit
+        entry, which is what makes the totals recoverable after a restart.
+        """
+        if not self._counters:
+            return {}
+
+        activation: dict[str, Any] | None = None
+        out: dict[str, float] = {}
+        for compiled, on in self._counters:
+            if on != "any" and decision.verdict.value != on:
+                continue
+            if not (
+                any(p.fullmatch(action.principal.id) for p in compiled.principals)
+                and compiled.tool.fullmatch(action.tool)
+                and compiled.verb.fullmatch(action.verb)
+                and compiled.resource.fullmatch(action.resource)
+            ):
+                continue
+            if compiled.args is not None and not _args_match(compiled.args, action.params):
+                continue
+
+            if compiled.condition is None:
+                out[compiled.id] = out.get(compiled.id, 0.0) + 1.0
+                continue
+
+            if activation is None:
+                activation = _activation(action)
+            try:
+                computed = compiled.condition.evaluate(activation)
+                if isinstance(computed, celpy.celtypes.BoolType) or not isinstance(
+                    computed,
+                    celpy.celtypes.DoubleType | celpy.celtypes.IntType | celpy.celtypes.UintType,
+                ):
+                    # A counter that evaluates to a string or a bool is a policy
+                    # that means something other than what it says. `true` would
+                    # otherwise quietly become 1.0 and total the number of times
+                    # a condition held, which is a plausible thing to want and
+                    # not what was written.
+                    raise TypeError(f"value must be numeric, got {type(computed).__name__}")
+                value = float(computed)
+            except Exception as exc:  # noqa: BLE001 -- one counter must not break a decision
+                # Deliberately not a deny. The verdict is already made and
+                # returning it is correct; a counter that cannot compute its
+                # own value is a policy bug, and turning it into a denial would
+                # mean a typo in an accounting expression takes an agent
+                # offline. Logged loudly, and the total is visibly wrong rather
+                # than silently wrong.
+                log.error("counter %r could not compute a value: %s", compiled.id, exc)
+                continue
+            out[compiled.id] = out.get(compiled.id, 0.0) + value
+        return out
+
+
+def _activation(
+    action: Action, counters: Mapping[str, Mapping[str, float]] | None = None
+) -> dict[str, Any]:
     dumped = action.model_dump(mode="json")
     return {
+        # `count.<id>.day` and friends. Always present, even with no counters
+        # declared, so a policy referencing one that does not exist fails on the
+        # missing id rather than on a missing name -- a much better error.
+        "count": celpy.json_to_cel({k: dict(v) for k, v in (counters or {}).items()}),
         "action": celpy.json_to_cel(dumped),
         "principal": celpy.json_to_cel(dumped["principal"]),
         "tool": celpy.json_to_cel(action.tool),

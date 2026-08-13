@@ -166,7 +166,14 @@ def cmd_secrets_key(args: argparse.Namespace) -> int:
             raise SystemExit(f"no master key found in the '{current.backend}' backend")
         print(key)
     elif args.key_command == "import":
-        current.write_key(getpass.getpass("master key (no echo): "))
+        from unified_mcphub.secrets import SecretsKeyError
+
+        try:
+            current.write_key(getpass.getpass("master key (no echo): "))
+        except SecretsKeyError as exc:
+            # The env backend cannot hold anything. Its own message says what to
+            # do; a traceback here would bury that.
+            raise SystemExit(str(exc)) from None
         print(f"imported master key into the '{current.backend}' backend")
     elif args.key_command == "migrate":
         key = current.read_key()

@@ -46,7 +46,7 @@ from .config import (
     workspace_local_path,
 )
 from .redaction import Redactor
-from .secrets import SecretsStore
+from .secrets import SecretsKeyError, SecretsStore
 from .supervisor import SupervisedServer
 from .tokens import TokenStore
 from .tools import BuiltinRegistry
@@ -176,7 +176,13 @@ class Hub:
                 )
             if input("secrets: unlock now? [y/N] ").strip().lower() not in ("y", "yes"):
                 raise SystemExit("secrets: unlock declined")
-        self.secrets.unlock()
+        try:
+            self.secrets.unlock()
+        except SecretsKeyError as exc:
+            # A missing key is a configuration problem with a specific remedy,
+            # not a crash. Failing here rather than at the first server that
+            # needs a credential means the operator learns it at start-up.
+            raise SystemExit(f"secrets: {exc}") from None
 
     async def start(self) -> None:
         mcphub_home().mkdir(parents=True, exist_ok=True)

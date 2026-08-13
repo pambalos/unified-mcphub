@@ -75,6 +75,15 @@ def resolve_backend(cfg: SecretsConfig) -> str:
     return "keyring" if _keyring_available() else "file"
 
 
+class SecretsKeyError(RuntimeError):
+    """The master key cannot be obtained or persisted from this backend.
+
+    Its own type because the remedy is specific and mechanical — set an
+    environment variable, or migrate a key — and a generic failure here reads
+    as "secrets are broken" rather than as one missing setting.
+    """
+
+
 class SecretsStore:
     def __init__(
         self,
@@ -156,13 +165,29 @@ class SecretsStore:
         if self.backend == "file":
             secure_write(self._key_file, key.encode())
         elif self.backend == "env":
-            # The hub can't persist an env var into the parent shell — surface the
-            # value so the operator can export it, and use it for this process.
-            logger.warning(
-                "secrets: env backend can't persist the master key; set it in your "
-                "environment so it survives restarts:\n    export %s=%s",
-                ENV_KEY_VAR,
-                key,
+            # Refused rather than logged, and refused rather than best-effort.
+            #
+            # This backend cannot persist anything: the hub cannot export a
+            # variable into its parent shell. Generating a key here and carrying
+            # on would encrypt `secrets.enc` with something that vanishes when
+            # the process exits — the next run generates a *different* key and
+            # every stored credential is unrecoverable. The first run looks
+            # fine, which is what makes it worth refusing loudly.
+            #
+            # The earlier version logged the key so an operator could copy it.
+            # That put the one value which decrypts every credential into a log
+            # stream, and log streams go to files, journald, and CI output. The
+            # join-token path in this codebase already says why: printed once to
+            # a terminal, never into a log.
+            raise SecretsKeyError(
+                f"the env backend cannot store a master key. Generate one and export "
+                f"it before starting:\n\n"
+                f'    export {ENV_KEY_VAR}="$(python -c '
+                f"'from cryptography.fernet import Fernet; "
+                f"print(Fernet.generate_key().decode())')\"\n\n"
+                f"Or migrate an existing key out of another backend with "
+                f"`mcphub secrets key export`. Continuing here would encrypt your "
+                f"secrets with a key that disappears when this process does."
             )
         else:
             keyring.set_password(_KEYRING_SERVICE, _KEYRING_USER, key)

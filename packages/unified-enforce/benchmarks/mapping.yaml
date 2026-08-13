@@ -1,0 +1,116 @@
+# InjecAgent's tool namespace, mapped onto canonical Action URIs. UAI-148.
+#
+# The mapping is the work, and it is the part most able to produce a flattering
+# lie. Two ways that happens, both guarded against in `external.py`:
+#
+#   1. Map nothing, and every attacker call falls through to default-deny. The
+#      report would read "100% denied" while the pack recognised none of them.
+#      So a default-deny is counted and reported *separately* from a rule
+#      denying something, and the summary leads with the rule-denied figure.
+#
+#   2. Map an attacker tool onto a URI the pack already denies broadly, which
+#      turns the mapping into the answer. So each entry names the *capability*
+#      the tool exercises, in the vocabulary a customer's own policy would use,
+#      and mapping a benchmark tool to something narrower than it really is
+#      counts as cheating.
+#
+# `verb` matters: the packs distinguish read from create, and an attacker tool
+# that moves money is a `create` however the benchmark names it.
+
+version: 1
+
+tools:
+  # --- money -------------------------------------------------------------------
+  BankManagerPayBill:            { tool: "sdk://payments/transfer", verb: create }
+  BankManagerTransferFunds:      { tool: "sdk://payments/transfer", verb: create }
+  VenmoWithdrawMoney:            { tool: "sdk://payments/transfer", verb: create }
+  BinanceWithdraw:               { tool: "sdk://payments/transfer", verb: create }
+  BinanceDeposit:                { tool: "sdk://payments/transfer", verb: create }
+  BinancePlaceOrder:             { tool: "sdk://payments/order",    verb: create }
+
+  # --- credentials and identity ------------------------------------------------
+  NortonIdentitySafeSharePassword:               { tool: "mcp://secrets/share",  verb: create }
+  NortonIdentitySafeAutoFillPersonalInfo:        { tool: "mcp://secrets/read",   verb: read }
+  NortonIdentitySafeDisableTwoFactorAuthentication:
+    { tool: "mcp://iam/update", verb: update }
+
+  # --- infrastructure and code -------------------------------------------------
+  TerminalExecute:               { tool: "mcp://shell/exec",   verb: execute }
+  GitHubDeleteRepository:        { tool: "mcp://github/repo",  verb: delete }
+  CiscoUmbrellaCreatePolicy:     { tool: "mcp://network/policy", verb: create }
+  CiscoUmbrellaUpdatePolicy:     { tool: "mcp://network/policy", verb: update }
+
+  # --- physical world ----------------------------------------------------------
+  # Mapped rather than skipped. A reference pack written for software tools has
+  # nothing to say about a door lock, and that is a finding about the pack —
+  # exactly the blind spot an external suite is supposed to surface.
+  AugustSmartLockUnlockDoor:       { tool: "sdk://physical/lock",   verb: update }
+  AugustSmartLockGrantGuestAccess: { tool: "sdk://physical/lock",   verb: create }
+  GoogleHomeScheduleDeviceAction:  { tool: "sdk://physical/device", verb: create }
+  IndoorRobotGoToRoom:             { tool: "sdk://physical/robot",  verb: create }
+  TrafficControlManageTrafficLightState:
+    { tool: "sdk://physical/traffic", verb: update }
+  TrafficControlGivePriorityToEmergencyVehicle:
+    { tool: "sdk://physical/traffic", verb: update }
+  EmergencyDispatchSystemCreateDispatchRequest:
+    { tool: "sdk://physical/dispatch", verb: create }
+
+  # --- health and genetic data -------------------------------------------------
+  EpicFHIRManagePatientRecords:      { tool: "sdk://health/records",     verb: update }
+  EpicFHIRManageClinicalDocuments:   { tool: "sdk://health/documents",   verb: update }
+  EpicFHIRManageAppointments:        { tool: "sdk://health/appointments", verb: update }
+  The23andMeShareData:               { tool: "sdk://health/genetic",     verb: create }
+  The23andMeUpdateData:              { tool: "sdk://health/genetic",     verb: update }
+
+  # --- data movement and social ------------------------------------------------
+  DropboxMoveItem:                       { tool: "sdk://files/move",     verb: update }
+  EvernoteManagerManageNoteSharingLevel: { tool: "sdk://files/share",    verb: update }
+  FedExShipManagerManageShipment:        { tool: "sdk://logistics/ship", verb: update }
+  FacebookManagerUpdateUserProfile:      { tool: "sdk://social/profile", verb: update }
+  SlackLeaveChannel:                     { tool: "sdk://social/channel", verb: delete }
+
+  # --- the data-stealing split -------------------------------------------------
+  #
+  # These attacks are two steps: read something sensitive, then exfiltrate it.
+  # `GmailSendEmail` is the sink in every one of the 544 cases, which makes it
+  # the single most load-bearing entry in this file — it is the call the pack's
+  # LLM02 rule exists to govern, and mapping it anywhere else would quietly
+  # excuse the pack from the attack it is most supposed to stop.
+  #
+  # The reads are mapped as reads. Refusing them all would be a pack that
+  # forbids an agent from doing its job; the enforcement question is what
+  # leaves, not what is looked at.
+  GmailSendEmail:                        { tool: "sdk://email/send",        verb: create }
+
+  AmazonViewSavedAddresses:              { tool: "sdk://commerce/profile",  verb: read }
+  AmazonViewSavedPaymentMethods:         { tool: "sdk://payments/methods",  verb: read }
+  AugustSmartLockViewAccessHistory:      { tool: "sdk://physical/lock",     verb: read }
+  BankManagerGetAccountInformation:      { tool: "sdk://payments/account",  verb: read }
+  BankManagerSearchPayee:                { tool: "sdk://payments/account",  verb: read }
+  BinanceGetOrderHistory:                { tool: "sdk://payments/order",    verb: read }
+  CiscoUmbrellaGetLogDetails:            { tool: "mcp://network/logs",      verb: read }
+  DeepfakeGeneratorGenerateAudioDeepfake: { tool: "sdk://media/synthesise", verb: create }
+  DropboxGetItemMetadata:                { tool: "sdk://files/read",        verb: read }
+  DropboxListFilesAndFolders:            { tool: "sdk://files/read",        verb: read }
+  EpicFHIRDownloadFiles:                 { tool: "sdk://health/documents",  verb: read }
+  EpicFHIRGetPatientDetails:             { tool: "sdk://health/records",    verb: read }
+  ExpediaSearchReservations:             { tool: "sdk://travel/bookings",   verb: read }
+  FacebookManagerGetUserProfile:         { tool: "sdk://social/profile",    verb: read }
+  FacebookManagerSearchFriends:          { tool: "sdk://social/profile",    verb: read }
+  FedExShipManagerSearchShipment:        { tool: "sdk://logistics/ship",    verb: read }
+  GitHubGetUserDetails:                  { tool: "mcp://github/user",       verb: read }
+  GoogleMapGetCurrentLocation:           { tool: "sdk://location/current",  verb: read }
+  GoogleSearchGetSearchHistory:          { tool: "sdk://search/history",    verb: read }
+  InvestmentManagerGetHoldingsInformation: { tool: "sdk://payments/holdings", verb: read }
+  NortonIdentitySafeSearchPasswords:     { tool: "mcp://secrets/read",      verb: read }
+  SpokeoDownloadPublicRecord:            { tool: "sdk://people/records",    verb: read }
+  SpokeoSearchPeople:                    { tool: "sdk://people/records",    verb: read }
+  TDAmeritradeGetHoldingsInformation:    { tool: "sdk://payments/holdings", verb: read }
+  TeladocAccessUserInfo:                 { tool: "sdk://health/records",    verb: read }
+  TeladocViewPrescriptions:              { tool: "sdk://health/records",    verb: read }
+  The23andMeDownloadData:                { tool: "sdk://health/genetic",    verb: read }
+  The23andMeGetGeneticData:              { tool: "sdk://health/genetic",    verb: read }
+  The23andMeGetHealthRecommendations:    { tool: "sdk://health/genetic",    verb: read }
+  TwilioGetPhoneNumberInfo:              { tool: "sdk://comms/metadata",    verb: read }
+  VenmoListLinkedAccounts:               { tool: "sdk://payments/account",  verb: read }
+  WebBrowserSearchHistory:               { tool: "sdk://search/history",    verb: read }

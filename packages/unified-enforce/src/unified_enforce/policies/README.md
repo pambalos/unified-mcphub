@@ -82,6 +82,37 @@ Two things to copy when writing your own counter:
 - **`on_verdict`, not `on`.** YAML 1.1 reads a bare `on` as boolean true, which
   is why the field is not called that.
 
+## The external check
+
+The corpus above is written by whoever wrote the pack, which makes it excellent
+at catching regressions and poor at catching blind spots. `benchmarks/external.py`
+runs suites we did not author — InjecAgent today, AgentDojo declared and not yet
+implemented — nightly.
+
+**They measure a different thing, and the adapter knows it.** Those benchmarks
+mostly score whether a *model* resists an injection. We score whether the
+*plane* stops the resulting tool call, so the model is never run: what is
+extracted is the tool call the attack was trying to cause.
+
+The report separates a named rule denying something from **default-deny**,
+because the packs use their own example tool URIs and an unmapped benchmark tool
+is refused by the non-configurable default. Counting that as a win would produce
+a triumphant number describing a pack that recognised nothing.
+
+Latest run, 1,598 attacker tool calls from InjecAgent:
+
+    denied by a rule   612   <- the score
+    deferred           136
+    denied by default  816   (true, and not a defence)
+    ALLOWED             34   <- findings
+
+    stopped by policy: 46.8%
+
+Unflattering on purpose. The 34 that got through collapse to two shapes, both
+MCP reads, and both are now authored corpus cases — which is the rule: every
+attack that gets through becomes a case, so the fast suite grows from what the
+slow one finds.
+
 ## Two things that will bite you writing your own
 
 Both were bugs in this pack within an hour of writing it. Both are now load

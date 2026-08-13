@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .action import Action
+from .attest import sign_evidence
 from .policy import Decision
 
 log = logging.getLogger("unified_enforce.evidence")
@@ -161,6 +162,7 @@ def summarise(
     decision: Decision,
     *,
     entry: dict[str, Any] | None = None,
+    signer: Any = None,
 ) -> dict[str, Any]:
     """The wire record: metadata only, by allowlist.
 
@@ -171,9 +173,17 @@ def summarise(
     `entry` is the chain entry this decision produced, when there is one. Its
     `seq` and `hash` are what let a receiver notice a missing range instead of
     assuming an agent was idle.
+
+    `signer` attests the record. Note what is signed: **this summary**, not the
+    chain entry. The chain signs an entry hash covering content that
+    deliberately never leaves the customer's environment, so a receiver holding
+    a summary could verify that signature and still have no reason to believe
+    the summary beside it describes that entry. Signing the summary means the
+    receiver's stored copy is checkable by anyone with the reporter's public
+    key — including against the receiver.
     """
     verdict = decision.verdict
-    return {
+    record = {
         "action_digest": action.digest(),
         "principal_id": action.principal.id,
         "tool": action.tool,
@@ -186,6 +196,7 @@ def summarise(
         "chain_hash": (entry or {}).get("hash"),
         "decided_at": action.ts,
     }
+    return sign_evidence(record, signer) if signer is not None else record
 
 
 class EvidenceShipper:
@@ -203,7 +214,18 @@ class EvidenceShipper:
         capacity: int = DEFAULT_CAPACITY,
         batch_size: int = DEFAULT_BATCH,
         interval_seconds: float = 5.0,
+        signer: Any = None,
     ) -> None:
+        #: The audit chain's signer, when this sidecar keeps a signed chain.
+        #:
+        #: Optional, and the gradient matters. A reporter without one is a
+        #: weaker deployment, not a hostile one, and refusing its evidence
+        #: would push people towards shipping none — but a receiver that has
+        #: been told this reporter signs must refuse unsigned records from it,
+        #: or an attacker holding a stolen credential simply stops signing.
+        #: That downgrade is closed at the receiver, against the key registered
+        #: at enrolment, rather than here.
+        self._signer = signer
         self._sink = sink
         self._batch_size = batch_size
         self._interval = interval_seconds
@@ -240,7 +262,7 @@ class EvidenceShipper:
         outage.
         """
         try:
-            self.submit(summarise(action, decision, entry=entry))
+            self.submit(summarise(action, decision, entry=entry, signer=self._signer))
         except Exception:
             log.exception("could not summarise evidence; the decision is unaffected")
 

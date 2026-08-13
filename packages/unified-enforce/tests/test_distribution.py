@@ -675,3 +675,64 @@ def test_a_replayed_revocation_list_is_refused(source, root, policy_key):
 
     assert not report.applied_revocations, "a replayed revocation list was accepted"
     assert report.alarming()
+
+
+# --- keys shared with the approval channel -------------------------------------
+
+
+def test_verified_keys_are_published_for_other_verifiers(source, root, policy_key):
+    """The approval channel checks signatures against these.
+
+    `RemoteApprovals(..., keys=distribution.verification_keys)` is the intended
+    wiring, so that rotating the decision key is a signed message rather than a
+    fleet-wide re-enrolment. Pinning a key of its own at enrolment would be a
+    second thing to rotate, which in practice means one that never is.
+    """
+    dist = make(source, root)
+    assert dist.verification_keys() == {}, "nothing is trusted before a key set verifies"
+
+    dist.refresh(now=NOW)
+
+    assert policy_key.kid in dist.verification_keys()
+
+
+def test_a_key_set_that_stops_verifying_drops_the_keys_it_authorised(source, root, policy_key):
+    """Approvals must stop being honoured, not keep being honoured on stale authority.
+
+    This is the quiet failure the whole key hierarchy exists to avoid. Keeping
+    the previous keys after a key set expires or fails to verify means a sidecar
+    goes on accepting signed decisions using authority that is no longer
+    vouched for — including, after a compromise, decisions signed by a key that
+    was supposed to have been rotated out. The visible consequence of dropping
+    them is that deferred actions deny, which is the correct direction.
+    """
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+    assert dist.verification_keys()
+
+    # Same document, read far enough in the future that it has expired.
+    report = dist.refresh(now=NOW + 30 * DAY)
+
+    assert report.alarming
+    assert dist.verification_keys() == {}, (
+        "a sidecar would keep honouring decisions on an expired key set"
+    )
+
+
+def test_an_unreachable_source_keeps_the_keys_it_already_trusts(source, root, policy_key):
+    """Brief unreachability is ordinary and must not disarm approvals.
+
+    The distinction from the test above is the whole point: a key set that
+    *failed to verify* is evidence something is wrong, while a source that
+    cannot be reached is evidence of nothing. Dropping keys on the second would
+    turn every network blip into an approval outage, and an outage that
+    ordinary conditions cause is one people route around.
+    """
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+
+    source.down = True
+    report = dist.refresh(now=NOW + timedelta(minutes=1))
+
+    assert report.unreachable
+    assert policy_key.kid in dist.verification_keys()

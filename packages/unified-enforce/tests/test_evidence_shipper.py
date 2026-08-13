@@ -94,6 +94,12 @@ def test_the_payload_is_an_allowlist():
     """A denylist would ship whatever gets added to `Action` next.
 
     And the field most likely to be added is another one carrying content.
+
+    Equality rather than a subset, so adding a field is a deliberate edit here
+    with a reason attached. `attestation` and `parent_id` were added that way:
+    both describe *how the identity was arrived at* rather than what the agent
+    did, which is the line this list draws. Neither can carry payload — one is
+    a three-value enum, the other a principal id that already ships above it.
     """
     assert set(summarise(action(), decision())) == {
         "action_digest",
@@ -106,6 +112,8 @@ def test_the_payload_is_an_allowlist():
         "source",
         "chain_seq",
         "chain_hash",
+        "attestation",
+        "parent_id",
         "decided_at",
     }
 

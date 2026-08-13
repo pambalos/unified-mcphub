@@ -751,7 +751,13 @@ def accept_resolution(
 
 #: The evidence payload version, inside the signature, so a change of shape is
 #: a change of meaning rather than a silent reinterpretation.
-EVIDENCE_VERSION = 1
+#:
+#: `v2` adds how the principal's identity was established. It has to be signed:
+#: an attacker able to rewrite `assigned` to `attested` would upgrade an
+#: identity's apparent trustworthiness after the fact, and the whole reason to
+#: record the distinction is that somebody will read it later and decide how
+#: much to believe.
+EVIDENCE_VERSION = 2
 
 #: Exactly what a reporter signs, in order. Named rather than derived from the
 #: record, because "sign whatever was in the dict" makes the signature's
@@ -767,6 +773,8 @@ EVIDENCE_FIELDS = (
     "source",
     "chain_seq",
     "chain_hash",
+    "attestation",
+    "parent_id",
 )
 
 

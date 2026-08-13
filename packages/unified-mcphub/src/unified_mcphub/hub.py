@@ -281,7 +281,17 @@ class Hub:
         # Canonical Action (unified.action/v1): the enforcement engine's identity
         # for this call. strict=False — MCP args are free-form JSON (may hold floats).
         action = Action.build(
-            principal=Principal(id=f"agent:{caller_id}"),
+            principal=Principal(
+                id=f"agent:{caller_id}",
+                # Two genuinely different strengths, and conflating them is what
+                # let "we enforce per agent" mean two things. A TCP caller is
+                # resolved from a bearer token this hub issued, so the identity
+                # is proven to the strength of that secret. A Unix-socket caller
+                # is taken from a header and trusted because of filesystem
+                # permissions -- which is a real control and is not the same
+                # claim.
+                attestation="derived" if caller_token_id else "assigned",
+            ),
             tool=tool_uri,
             verb="call",
             resource="*",

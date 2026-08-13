@@ -400,7 +400,15 @@ class HttpSink:
         timeout_seconds: float = 10.0,
         path: str = "/api/v1/evidence",
         field: str = "decisions",
+        channel: Any = None,
     ) -> None:
+        #: Binds each post to the key this sidecar registered, so a stolen
+        #: bearer token cannot report evidence in its name. Optional: a
+        #: deployment that has not enrolled a channel key still ships, and the
+        #: receiver refuses the downgrade only for credentials that registered
+        #: one.
+        self._channel = channel
+        self._path = path
         self._url = base_url.rstrip("/") + path
         self._credential = credential
         self._timeout = timeout_seconds
@@ -414,15 +422,15 @@ class HttpSink:
         import urllib.error
         import urllib.request
 
-        request = urllib.request.Request(
-            self._url,
-            data=_json.dumps({self._field: batch}).encode(),
-            headers={
-                "content-type": "application/json",
-                "authorization": f"Bearer {self._credential}",
-            },
-            method="POST",
-        )
+        body = _json.dumps({self._field: batch}).encode()
+        headers = {
+            "content-type": "application/json",
+            "authorization": f"Bearer {self._credential}",
+        }
+        if self._channel is not None:
+            headers.update(self._channel.headers("POST", self._path, body))
+
+        request = urllib.request.Request(self._url, data=body, headers=headers, method="POST")
 
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:

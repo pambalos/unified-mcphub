@@ -842,3 +842,154 @@ def accept_evidence(
         return _refuse(Reason.BAD_SIGNATURE, "evidence signature did not verify")
 
     return Verdict(ok=True, payload=dict(record))
+
+
+# --- binding a credential to the key that holds it ------------------------------
+#
+# The bearer credential is possession-is-identity: a stolen one works until it is
+# revoked or expires, and nothing ties it to the party it was issued to. mTLS is
+# the usual answer and is what UAI-154 originally asked for.
+#
+# **It does not fit where this actually runs.** The control plane sits behind a
+# TLS-terminating load balancer and the sidecars sit inside customer networks
+# with one outbound path. The application never sees a client certificate; it
+# would read a forwarded header — and trusting a header the proxy is supposed to
+# have stripped is exactly the UAI-137 failure, where route-level header removal
+# ran *after* the check that depended on it and nobody could tell by reading the
+# config. A binding whose correctness depends on a proxy behaving is a binding
+# that is silently absent in the deployment that got it wrong.
+#
+# So the binding is done here, where it works in every topology and depends on
+# nothing: the sidecar signs each request with a key it registered at enrolment.
+# A stolen bearer token is then not enough — the holder needs the private key
+# too, which never leaves the sidecar.
+#
+# What it covers is chosen so a captured proof is useless rather than merely
+# short-lived:
+#
+#   htm, htu   the method and path, so a proof captured from a GET cannot
+#              authorise a POST, and one for `/evidence` cannot resolve an
+#              approval
+#   bdg        a digest of the body, so the request it authorises cannot be
+#              rewritten in flight
+#   exp        sixty seconds, so a captured one dies quickly
+#   jti        distinguishes two otherwise identical requests
+#
+# mTLS at the edge remains worth having as defence in depth. It is no longer
+# what the binding *depends* on.
+
+#: The JWS `typ`, so a proof cannot be presented as an operator assertion or the
+#: reverse — the cross-protocol confusion that has broken many JWT deployments.
+PROOF_TYP = "unified-proof+jws"
+
+#: How long a proof may claim to be valid. A request is in flight for
+#: milliseconds; a minute is generous and still leaves nothing worth stealing.
+PROOF_MAX_LIFETIME = 60
+
+
+def body_digest(body: bytes | None) -> str | None:
+    """The digest a proof commits to, or None for a request with no body."""
+    return hashlib.sha256(body).hexdigest() if body else None
+
+
+def sign_request(
+    *,
+    signer: Any,
+    credential_id: str,
+    method: str,
+    path: str,
+    body: bytes | None,
+    now: int,
+) -> str:
+    """A compact-JWS proof that the holder of this credential made this request.
+
+    `signer` is the sidecar's channel key — `sign_bytes(bytes) -> str` and a
+    `key_id`, the same interface the chain signer has.
+    """
+    import base64
+    import uuid
+
+    header = b64u(json.dumps({"alg": ALG, "typ": PROOF_TYP}, separators=(",", ":")).encode())
+    claims = b64u(
+        json.dumps(
+            {
+                "iss": credential_id,
+                "htm": method.upper(),
+                "htu": path,
+                "bdg": body_digest(body),
+                "iat": now,
+                "exp": now + PROOF_MAX_LIFETIME,
+                "jti": uuid.uuid4().hex,
+            },
+            separators=(",", ":"),
+        ).encode()
+    )
+    raw = base64.b64decode(signer.sign_bytes(signing_input(header, claims)))
+    return f"{header}.{claims}.{b64u(raw)}"
+
+
+def accept_proof(
+    raw: str,
+    *,
+    public_key_b64: str,
+    credential_id: str,
+    method: str,
+    path: str,
+    body: bytes | None,
+    now: int,
+    skew: int = 30,
+) -> Verdict:
+    """Check a request proof. Returns a `Verdict` and never raises.
+
+    Verified before any claim is read, because anything decided from an
+    unverified payload is decided from attacker-controlled input.
+    """
+    parts = raw.strip().split(".")
+    if len(parts) != 3:
+        return _refuse(Reason.MALFORMED, "proof is not a compact JWS")
+
+    try:
+        header = json.loads(unb64u(parts[0]))
+        claims = json.loads(unb64u(parts[1]))
+        signature = unb64u(parts[2])
+    except Exception:  # noqa: BLE001 - hostile input arrives many ways
+        return _refuse(Reason.MALFORMED, "proof is not decodable")
+
+    if not isinstance(header, dict) or not isinstance(claims, dict):
+        return _refuse(Reason.MALFORMED, "proof segments are not objects")
+    if header.get("alg") != ALG:
+        return _refuse(Reason.BAD_ALGORITHM, f"alg {header.get('alg')!r} is not {ALG}")
+    if header.get("typ") != PROOF_TYP:
+        return _refuse(Reason.MALFORMED, "not a request proof")
+
+    try:
+        Ed25519PublicKey.from_public_bytes(unb64u(public_key_b64)).verify(
+            signature, signing_input(parts[0], parts[1])
+        )
+    except (InvalidSignature, ValueError, TypeError):
+        return _refuse(Reason.BAD_SIGNATURE, "proof signature did not verify")
+
+    if claims.get("iss") != credential_id:
+        return _refuse(Reason.MALFORMED, "proof was not issued by this credential")
+
+    issued, expires = claims.get("iat"), claims.get("exp")
+    if not isinstance(issued, int) or not isinstance(expires, int):
+        return _refuse(Reason.MALFORMED, "proof carries no integer timestamps")
+    if expires - issued > PROOF_MAX_LIFETIME:
+        return _refuse(Reason.EXPIRED, "proof claims a longer life than is permitted")
+    if expires + skew <= now:
+        return _refuse(Reason.EXPIRED, "proof has expired")
+    if issued - skew > now:
+        return _refuse(Reason.EXPIRED, "proof is not yet valid")
+
+    # Bound to this exact request. Without these a proof captured from any
+    # request would authorise any other, which is a bearer token again with
+    # extra steps.
+    if claims.get("htm") != method.upper():
+        return _refuse(Reason.WRONG_ACTION, f"proof is for {claims.get('htm')!r}, not {method!r}")
+    if claims.get("htu") != path:
+        return _refuse(Reason.WRONG_ACTION, f"proof is for {claims.get('htu')!r}, not {path!r}")
+    if claims.get("bdg") != body_digest(body):
+        return _refuse(Reason.WRONG_ACTION, "proof does not cover this body")
+
+    return Verdict(ok=True, payload=dict(claims))

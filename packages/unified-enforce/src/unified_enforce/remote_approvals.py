@@ -119,6 +119,7 @@ class RemoteApprovals:
         deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
         http_timeout: float = DEFAULT_HTTP_TIMEOUT,
         skew_ms: int = DEFAULT_SKEW_MS,
+        channel: Any = None,
     ) -> None:
         if keys is None and decision_key is None:
             raise ValueError(
@@ -128,6 +129,10 @@ class RemoteApprovals:
                 "deferred action would deny."
             )
 
+        #: Binds each request to the key this sidecar registered. Without it a
+        #: stolen bearer token could queue approvals and read decisions in this
+        #: sidecar's name.
+        self._channel = channel
         self._base = base_url.rstrip("/")
         self._credential = credential
         self._fleet = fleet_id
@@ -243,6 +248,9 @@ class RemoteApprovals:
     def _poll_once(self, approval_id: str) -> dict[str, Any]:
         return self._get(f"/api/v1/approvals/{approval_id}/decision")
 
+    def _proof(self, method: str, path: str, body: bytes | None) -> dict[str, str]:
+        return {} if self._channel is None else self._channel.headers(method, path, body)
+
     def _request(self, req: Any) -> dict[str, Any]:
         # Imported here rather than at module scope, matching `evidence.py`:
         # `urllib.request` drags in http.client, email and ssl, and this module
@@ -269,11 +277,12 @@ class RemoteApprovals:
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         import urllib.request
 
+        raw = json.dumps(body).encode()
         return self._request(
             urllib.request.Request(
                 self._base + path,
-                data=json.dumps(body).encode(),
-                headers={"content-type": "application/json"},
+                data=raw,
+                headers={"content-type": "application/json", **self._proof("POST", path, raw)},
                 method="POST",
             )
         )
@@ -281,7 +290,11 @@ class RemoteApprovals:
     def _get(self, path: str) -> dict[str, Any]:
         import urllib.request
 
-        return self._request(urllib.request.Request(self._base + path, method="GET"))
+        return self._request(
+            urllib.request.Request(
+                self._base + path, headers=self._proof("GET", path, None), method="GET"
+            )
+        )
 
 
 def _now_ms() -> int:

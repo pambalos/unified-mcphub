@@ -24,10 +24,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from unified_enforce.action import Action, Principal
 from unified_enforce.attest import b64u, key_id, sign_bytes
 from unified_enforce.distribution import (
+    ControlPlaneSource,
+    Poller,
     Distribution,
     Health,
     StaleAction,
 )
+from unified_enforce.policy import Verdict
 
 NOW = datetime(2026, 8, 12, 12, 0, tzinfo=UTC)
 DAY = timedelta(days=1)
@@ -736,3 +739,254 @@ def test_an_unreachable_source_keeps_the_keys_it_already_trusts(source, root, po
 
     assert report.unreachable
     assert policy_key.kid in dist.verification_keys()
+
+
+# --- the whole fleet -----------------------------------------------------------------
+
+
+def test_containing_the_fleet_contains_an_agent_never_named(source, root, policy_key):
+    """The button pressed when nobody knows yet which agent is the problem.
+
+    A per-principal list cannot express that: an incident responder would have
+    to enumerate agents they may not know about, and the one they miss is the
+    one that matters.
+    """
+    source.revocations_doc = revocations(
+        policy_key, version=2, entries=[{"principal_id": "*", "mode": "deny", "reason": "incident"}]
+    )
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+
+    forced = dist.gate(action(principal="agent:never-heard-of"))
+
+    assert forced is not None
+    assert forced.verdict is Verdict.DENY
+
+
+def test_a_narrower_rule_cannot_weaken_a_fleet_wide_stop(source, root, policy_key):
+    """Composition takes the strictest, and this is why.
+
+    A fleet-wide `deny` softened to `defer` by a per-principal entry somebody
+    set last week is not a kill switch — and that entry is invisible to whoever
+    is pressing the button.
+    """
+    source.revocations_doc = revocations(
+        policy_key,
+        version=2,
+        entries=[
+            {"principal_id": "*", "mode": "deny", "reason": "incident"},
+            {"principal_id": AGENT, "mode": "defer", "reason": "watch this one"},
+        ],
+    )
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+
+    forced = dist.gate(action(principal=AGENT))
+
+    assert forced.verdict is Verdict.DENY, "a stale per-principal rule weakened the kill switch"
+
+
+def test_a_narrower_rule_can_still_tighten(source, root, policy_key):
+    """The other direction is fine: containing the fleet to `defer` while one
+    known-bad agent is denied outright is exactly what an incident looks like
+    halfway through."""
+    source.revocations_doc = revocations(
+        policy_key,
+        version=2,
+        entries=[
+            {"principal_id": "*", "mode": "defer", "reason": "incident"},
+            {"principal_id": AGENT, "mode": "deny", "reason": "confirmed"},
+        ],
+    )
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+
+    assert dist.gate(action(principal=AGENT)).verdict is Verdict.DENY
+    assert dist.gate(action(principal="agent:other")).verdict is Verdict.DEFER
+
+
+def test_an_uncontained_fleet_is_unaffected(source, root):
+    """Pinned, so the wildcard cannot quietly start matching everything."""
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+
+    assert dist.gate(action(principal="agent:anyone")) is None
+
+
+# --- fetching it over HTTP, and continuing to ---------------------------------
+
+
+def _serve(handlers: dict[str, object]):
+    """A control plane that answers the three artifact routes and counts hits."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    hits: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server's interface
+            hits.append(self.path)
+            body = handlers.get(self.path)
+            if body is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            if isinstance(body, int):
+                self.send_response(body)
+                self.end_headers()
+                return
+            raw = _json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}", hits
+
+
+def test_the_http_source_reads_what_the_control_plane_serves(root, policy_key):
+    """Including the shape the revocations route actually returns.
+
+    That route wraps the signed envelope alongside a version — `{"version": 1,
+    "revocations": {...}}` — and `_apply_revocations` unwraps it. An earlier
+    version of this source unwrapped it *too*, so every list arrived as `None`
+    and was refused as malformed. Because an unusable revocation list escalates
+    rather than assuming nobody is contained, the symptom was a fleet denying
+    everything, which reads as a policy problem and not as a fetch that is
+    double-peeling one layer of JSON. Found by pointing this at a running
+    service; no unit test with a hand-built source would have.
+    """
+    server, base, _ = _serve(
+        {
+            "/api/v1/policy/keyset": keyset(root, policy_key),
+            "/api/v1/policy/bundle": bundle(policy_key),
+            # The helper already produces the route's wrapper shape.
+            "/api/v1/policy/revocations": revocations(policy_key),
+        }
+    )
+    try:
+        dist = Distribution(
+            ControlPlaneSource(base, "cred"), fleet_id=FLEET, root_public_key=root.public
+        )
+        report = dist.refresh(now=NOW)
+    finally:
+        server.shutdown()
+
+    assert not report.problems, report.problems
+    assert dist.snapshot.is_usable()
+    assert dist.gate(action()) is None
+
+
+def test_the_http_source_sends_the_credential_and_the_channel_binding(root, policy_key):
+    """A stolen bearer token alone should not read another fleet's policy."""
+    captured: list[tuple[str, str]] = []
+
+    class Channel:
+        def headers(self, method, path, body):
+            captured.append((method, path))
+            return {"x-unified-proof": "signed"}
+
+    server, base, _ = _serve({"/api/v1/policy/keyset": keyset(root, policy_key)})
+    try:
+        ControlPlaneSource(base, "cred", channel=Channel()).fetch_keyset()
+    finally:
+        server.shutdown()
+
+    assert captured == [("GET", "/api/v1/policy/keyset")]
+
+
+def test_an_unreachable_control_plane_is_a_refusal_the_poll_can_handle(root):
+    """`SourceUnavailable`, not an escaping `URLError` — `refresh()` promises
+    never to raise, and it can only keep that promise if the source is
+    predictable about how it fails."""
+    from unified_enforce.distribution import SourceUnavailable
+
+    server, base, _ = _serve({})
+    server.shutdown()
+    server.server_close()  # or the port stays open and the fetch hangs instead
+
+    with pytest.raises(SourceUnavailable):
+        ControlPlaneSource(base, "cred", http_timeout=1.0).fetch_keyset()
+
+
+async def test_the_poller_keeps_polling_after_a_refresh_raises(source, root):
+    """The failure this class exists to not have.
+
+    A poller that dies on one exception leaves a sidecar gating perfectly
+    against a snapshot from Tuesday, with every health check green, and
+    containment ordered afterwards never arriving. So the loop swallows, and
+    this test makes the first refresh explode to prove the second still runs.
+    """
+    import asyncio
+
+    dist = make(source, root)
+    calls = {"n": 0}
+    real = dist.refresh
+
+    def exploding(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("a refresh that should not have raised")
+        return real(*args, **kwargs)
+
+    dist.refresh = exploding  # type: ignore[method-assign]
+    poller = Poller(dist, interval_seconds=0.01)
+    await poller.start()
+    try:
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if calls["n"] >= 3:
+                break
+    finally:
+        await poller.stop()
+
+    assert calls["n"] >= 3, "the poller stopped at the first exception"
+
+
+async def test_containment_lands_within_one_poll(root, policy_key):
+    """The bound, measured rather than asserted, against a source that changes
+    underneath a running poller — the same thing the live measurement does, in
+    a form CI can run."""
+    import asyncio
+    import time
+
+    # Real clock, because the poller uses one: artifacts stamped at the
+    # module's fixed NOW are expired by the time anyone runs this.
+    live = datetime.now(UTC)
+    source = FakeSource(
+        keyset(root, policy_key, now=live),
+        bundle(policy_key, now=live),
+        revocations(policy_key, now=live),
+    )
+    dist = make(source, root)
+    poller = Poller(dist, interval_seconds=0.05)
+    await poller.start()
+    try:
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if dist.snapshot.is_usable():
+                break
+        assert dist.gate(action()) is None, "gated before anything was contained"
+
+        source.revocations_doc = revocations(
+            policy_key, version=2, entries=[{"principal_id": AGENT, "mode": "deny"}], now=live
+        )
+        pressed = time.monotonic()
+        for _ in range(200):
+            decision = dist.gate(action())
+            if decision is not None and decision.verdict is Verdict.DENY:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("containment never took effect")
+    finally:
+        await poller.stop()
+
+    assert time.monotonic() - pressed < 1.0

@@ -20,6 +20,7 @@ import pytest
 import yaml
 
 from unified_enforce import Action, PolicyEngine, PolicyError, Principal
+from unified_enforce.enforcer import Enforcer
 
 PACKS = Path(__file__).resolve().parents[2] / "src" / "unified_enforce" / "policies"
 CORPUS = Path(__file__).resolve().parents[1] / "corpus"
@@ -38,15 +39,37 @@ OWASP = "owasp-llm-top10"
 
 @pytest.mark.parametrize("case", _cases(OWASP), ids=lambda c: c["id"])
 def test_owasp_pack_decides_each_case_as_documented(case):
+    """One action, or a sequence of them when the claim is cumulative.
+
+    `repeat` and `sidecars` exist because a budget cannot be demonstrated by a
+    single call: "each of these is individually compliant and together they
+    drain the account" is a statement about a sequence. `sidecars: 2` splits
+    that sequence round-robin across independent enforcers, each with its own
+    totals, which is the only way to state the per-sidecar limitation as a test
+    instead of a paragraph.
+
+    The expectation applies to the **last** action. The ones before it are not
+    ignored — a budget rule that denied from the first call would fail the
+    paired legitimate case.
+    """
     spec = case["action"]
-    action = Action.build(
-        principal=Principal(id="agent:crew-1"),
-        tool=spec["tool"],
-        verb=spec.get("verb", "call"),
-        resource=spec.get("resource", "*"),
-        params=spec.get("params") or {},
-    )
-    decision = _engine(OWASP).decide(action)
+    fleet = [Enforcer(_engine(OWASP)) for _ in range(case.get("sidecars", 1))]
+
+    def once(index: int):
+        action = Action.build(
+            principal=Principal(id="agent:crew-1"),
+            tool=spec["tool"],
+            verb=spec.get("verb", "call"),
+            resource=spec.get("resource", "*"),
+            params=spec.get("params") or {},
+        )
+        return fleet[index % len(fleet)].enforce(action)
+
+    decision = None
+    for i in range(case.get("repeat", 1)):
+        decision = once(i)
+
+    assert decision is not None
     assert decision.verdict.value == case["expect"], (
         f"{case['id']} ({case['category']}, {case['intent']}): "
         f"expected {case['expect']}, got {decision.verdict.value} "
@@ -66,12 +89,15 @@ def test_the_corpus_covers_both_attacks_and_legitimate_traffic():
 
 
 def test_known_gaps_are_declared_in_the_corpus_not_only_in_prose():
-    """`many-small-refunds-each-pass` expects `allow`, deliberately.
+    """A declared gap is an attack the pack currently lets through.
 
-    The engine is stateless and cannot count, so a cumulative budget is not
-    enforceable today. Encoding that as a passing test with `known_gap: true`
-    keeps it visible in test output, and means the day budgets land this test
-    fails and someone has to change it on purpose.
+    The gap used to be that the engine could not count at all. It counts now
+    (UAI-147), and what remains is narrower and still real: the total is what
+    one sidecar saw, so a fleet can permit N times a budget until the control
+    plane's view catches up. Encoding that as a passing test with
+    `known_gap: true` keeps it in the test output, and means the day fleet
+    totals land this test fails and somebody changes it on purpose — which is
+    exactly what just happened to its predecessor.
     """
     gaps = [c for c in _cases(OWASP) if c.get("known_gap")]
     assert gaps, "no declared gaps — either the pack is perfect or the corpus is flattering it"

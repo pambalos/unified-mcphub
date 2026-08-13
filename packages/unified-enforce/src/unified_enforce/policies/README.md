@@ -25,7 +25,7 @@ rest as marketing.
 | LLM07 | System Prompt Leakage | ✗ | Inside the model context; we never see it. |
 | LLM08 | Vector/Embedding Weaknesses | ✗ | Retrieval layer. |
 | LLM09 | Misinformation | ✗ | Model output quality. |
-| LLM10 | Unbounded Consumption | **Partial** | Per-action caps only. **No rate limiting or cumulative budgets** — see below. |
+| LLM10 | Unbounded Consumption | **Partial** | Per-action caps and cumulative budgets. Totals are **per sidecar** — see below. |
 
 Four of ten are genuinely other layers' problems, and saying so is the point.
 An enforcement plane sits at the tool call; categories that live in the prompt,
@@ -48,16 +48,39 @@ E5 (taint propagation and intent binding) will strengthen this by catching an
 injection's *effect* through data flow, which is enforcement rather than
 detection.
 
-### LLM10: the gap, stated plainly
+### LLM10: what is enforced, and the boundary that remains
 
-A per-action cap is enforceable. A **cumulative** budget is not, because the
-engine is deliberately stateless — pure, sub-10 ms, no I/O on the decision
-path. An agent held to $500 per refund can still issue a thousand of them.
+Per-action caps and **cumulative budgets** both work now (UAI-147). An agent
+held to $500 per refund can no longer issue a thousand of them: the pack
+declares a `refund_spend` counter and `llm10-daily-refund-budget` reads it.
 
-The corpus asserts this as a **passing** case (`many-small-refunds-each-pass`,
-`known_gap: true`) rather than describing it in prose. It stays visible in test
-output, and when cumulative budgets land (UAI-147) the test fails and someone
-has to change it deliberately.
+The engine is still stateless. Totals are computed by the enforcer and handed
+to `decide()` as data, so the decision path acquired no I/O and no lookup that
+can hang — see `docs/adr-0026-cumulative-counters.md`, which is worth reading
+before writing a counter of your own.
+
+**The total is what one sidecar saw.** Ten sidecars enforcing a $5,000 day can
+permit $50,000 before the control plane's fleet view catches up and contains the
+principal (on a measured 30-second bound). That is a bounded window, not an
+unenforced budget, and the corpus asserts it as a **passing** case —
+`a-budget-is-per-sidecar-not-per-fleet`, `known_gap: true`, running the sequence
+across two independent enforcers. Its predecessor
+(`many-small-refunds-each-pass`) was the same kind of declared gap and now
+expects `deny`, which is exactly what a gap declared as a test is for.
+
+Two things to copy when writing your own counter:
+
+- **Count allows, not attempts.** `on_verdict: allow` — a refund that was denied
+  did not spend anything, and counting it lets a blocked agent exhaust its own
+  budget by being blocked.
+- **Scope the budget rule to actions that are otherwise permitted.** The rule
+  here checks `double(params.amount) <= 500.0` as well as the day total,
+  because without it a single $10,000 refund is denied outright instead of
+  going to the human review a floor already demanded. A cumulative budget
+  answers a question about a *sequence*; it should not quietly remove an
+  escalation path.
+- **`on_verdict`, not `on`.** YAML 1.1 reads a bare `on` as boolean true, which
+  is why the field is not called that.
 
 ## Two things that will bite you writing your own
 

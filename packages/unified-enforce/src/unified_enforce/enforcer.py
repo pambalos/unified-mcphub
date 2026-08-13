@@ -17,6 +17,7 @@ from __future__ import annotations
 from .action import Action
 from .approval import ApprovalOutcome, ApprovalRequest, Approvals, RecordedApproval
 from .audit import AuditChain
+from .counters import Counters
 from .distribution import Distribution
 from .evidence import EvidenceShipper
 from .shadow import ShadowEvaluator
@@ -34,6 +35,7 @@ class Enforcer:
         distribution: Distribution | None = None,
         evidence: EvidenceShipper | None = None,
         shadow: ShadowEvaluator | None = None,
+        counters: Counters | None = None,
     ) -> None:
         self._engine = engine
         self._chain = chain
@@ -42,6 +44,30 @@ class Enforcer:
         self._distribution = distribution
         self._evidence = evidence
         self._shadow = shadow
+        #: Cumulative totals (UAI-147). Lives here rather than in the engine
+        #: because it is state, and the engine's purity is what the latency
+        #: budget and the fail-closed story rest on. Created unconditionally:
+        #: a policy that declares no counters costs an empty dict lookup, and
+        #: making it optional would mean a deployment can load a policy with a
+        #: budget in it and silently not enforce the budget.
+        self.counters = counters or Counters()
+
+    def recover_counters(self) -> int:
+        """Rebuild cumulative totals from the audit chain. Call once, at start-up.
+
+        Without this a budget is reset by restarting the sidecar, which an
+        agent that can crash its own process does for free — and a daily limit
+        an attacker can re-arm on demand is not a limit. The chain is the right
+        source because it is signed, append-only, and already records every
+        decision along with what that decision added to each total.
+
+        Returns how many deltas were applied, so a deployment can log it. A
+        recovery that silently applies zero after a restart is indistinguishable
+        from one that worked, and it is the failure worth noticing.
+        """
+        if self._chain is None or not self._engine.counter_ids:
+            return 0
+        return self.counters.replay(self._chain.entries())
 
     def enforce(self, action: Action) -> Decision:
         """Distribution state first, then policy.
@@ -60,7 +86,13 @@ class Enforcer:
             forced = self._distribution.gate(action)
             if forced is not None:
                 return self.record(action, forced)
-        return self.record(action, self._engine.decide(action))
+
+        totals = (
+            self.counters.snapshot(action.principal.id, self._engine.counter_ids)
+            if self._engine.counter_ids
+            else None
+        )
+        return self.record(action, self._engine.decide(action, totals))
 
     def record(self, action: Action, decision: Decision) -> Decision:
         """Chain and trace a decision that did NOT come from the policy engine.
@@ -71,11 +103,20 @@ class Enforcer:
         or the evidence would show only the decisions the engine happened to
         make. `Decision.source` is what distinguishes them to a reader.
         """
+        # Before the chain write, and unconditionally. If the write then fails
+        # the caller aborts the action and this counted something that never
+        # happened -- over-counting, which restricts, and which ages out of the
+        # window on its own. The alternative ordering under-counts a spend that
+        # did happen, and that is a fail-open bought for nothing.
+        deltas = self._engine.deltas(action, decision)
+        for counter_id, value in deltas.items():
+            self.counters.add(action.principal.id, counter_id, value)
+
         audit_error: Exception | None = None
         entry: dict | None = None
         if self._chain is not None:
             try:
-                entry = self._chain.append_decision(action, decision)
+                entry = self._chain.append_decision(action, decision, counters=deltas)
             except Exception as exc:
                 audit_error = exc
         self._telemetry.record_decision(action, decision)

@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +31,9 @@ from typing import Any
 from .action import Action
 from .canonical import GENESIS_HASH, canonical_bytes, sha256_hex
 from .policy import Decision
+
+
+log = logging.getLogger("unified_enforce.audit")
 
 
 @dataclass
@@ -188,19 +192,43 @@ class HashChainWriter:
     # --- internals ---
 
     def _recover(self) -> None:
+        """Pick up the chain head from the last entry that parses.
+
+        Trailing garbage is skipped rather than raised on. `O_APPEND` makes each
+        write atomic, but a machine losing power mid-write still leaves a
+        partial final line -- and this used to raise, which meant an unclean
+        shutdown turned into a sidecar that could not start. Refusing to run
+        because the last line is half-written fails closed in the least useful
+        possible way: the agent is not protected, it is stopped, and so is
+        everything else it was doing.
+
+        Skipping it is not a way to hide a tampered chain. `verify()` reads
+        every line and reports the first unparseable one, so the damage stays
+        visible to an auditor; what changes is that it no longer takes the
+        service down before anyone can look. Logged at error level, because a
+        line that failed to parse is either a crash or somebody editing the
+        file, and both want attention.
+        """
         files = sorted(self._dir.glob("*.jsonl"))
         if not files:
             return
-        last_line: bytes | None = None
-        with files[-1].open("rb") as fh:
-            for raw in fh:
-                if raw.strip():
-                    last_line = raw
-        if last_line is None:
+        lines = [raw for raw in files[-1].read_bytes().splitlines() if raw.strip()]
+        for offset, raw in enumerate(reversed(lines)):
+            try:
+                entry = json.loads(raw)
+            except ValueError:
+                continue
+            if offset:
+                log.error(
+                    "%s: skipped %d unparseable trailing line(s) recovering the chain head. "
+                    "Run `AuditChain.verify` -- this is a crash or an edit, and the "
+                    "difference matters.",
+                    files[-1].name,
+                    offset,
+                )
+            self._head = entry["hash"]
+            self._last_entry = entry
             return
-        entry = json.loads(last_line)
-        self._head = entry["hash"]
-        self._last_entry = entry
 
     def _today(self) -> str:
         return self._clock().date().isoformat()
@@ -249,6 +277,34 @@ class AuditChain:
     def head(self) -> str:
         return self._writer.head
 
+    def entries(self, *, days: int = 2) -> Iterator[dict[str, Any]]:
+        """Read back what was written, newest files last. Off the hot path.
+
+        Two days by default rather than one: the longest counter window is a
+        day, and a day-long window at 00:05 spans two files. Reading only
+        today's would silently halve a budget every midnight -- once a day,
+        for five minutes, in a way that looks like the budget working.
+
+        Malformed lines are skipped rather than raised on. This is used to
+        recover state after a restart, and a chain with one truncated final
+        line -- which is what an unclean shutdown produces -- must not stop a
+        sidecar from starting.
+        """
+        files = sorted(self._dir.glob("*.jsonl"))[-days:]
+        for path in files:
+            try:
+                with path.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            yield json.loads(line)
+                        except ValueError:
+                            continue
+            except OSError:
+                continue
+
     # --- writers ---
 
     def append(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -267,11 +323,30 @@ class AuditChain:
             self._seq -= 1  # nothing was written; keep seq contiguous
             raise
 
-    def append_decision(self, action: Action, decision: Decision) -> dict[str, Any]:
+    def append_decision(
+        self,
+        action: Action,
+        decision: Decision,
+        *,
+        counters: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
         """The standard record: what was attempted, what was decided, and why.
 
         The digest always covers the full action; the stored copy is shaped by
-        the rule's audit_level (see redaction.py)."""
+        the rule's audit_level (see redaction.py).
+
+        `counters` values are stored as **strings**, like every other number
+        that crosses this boundary: canonical bytes refuse floats, because a
+        float's serialisation is not portable and the digest has to be
+        reproducible in another language. `Counters.replay` parses them back.
+
+        `counters` is what this action added to each cumulative total (UAI-147),
+        written down rather than left to be recomputed. Recomputing it would
+        mean re-reading `params` from the *stored* action, which redaction may
+        have removed -- so a payments policy that redacts amounts would rebuild
+        a budget of zero from a chain that recorded every spend correctly. It is
+        also the honest record: the entry says what this action cost.
+        """
         from .redaction import capture_action
 
         stored, redacted = capture_action(action.model_dump(mode="json"), decision.audit_level)
@@ -287,6 +362,10 @@ class AuditChain:
                 "redacted": redacted,
                 "reason": decision.reason,
                 "elapsed_us": int(decision.elapsed_ms * 1000),
+                # Omitted entirely when nothing was counted, so the common
+                # entry does not grow a `"counters": {}` that every reader has
+                # to learn to ignore.
+                **({"counters": {k: repr(v) for k, v in counters.items()}} if counters else {}),
             },
         )
 

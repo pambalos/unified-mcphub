@@ -58,6 +58,25 @@ rules:
       verb: read
     effect: allow
 
+  # Ordered before the per-action cap on purpose: within a tier the first match
+  # wins, so the cumulative check has to be asked first or a $499 refund is
+  # allowed by the rule below before anyone adds up the day.
+  - id: llm10-daily-refund-budget
+    reason: "LLM10: cumulative spend, not just per-action size"
+    match:
+      principal: "agent:*"
+      tool: "sdk://payments/refund"
+      verb: create
+    # Both halves are needed. Without the per-action clause this rule also
+    # catches a single $10,000 refund -- which does exceed the day, but which
+    # policy deliberately sends to a human rather than refusing outright. A
+    # cumulative budget must not quietly remove an escalation path that
+    # already existed; it answers a different question, about a sequence of
+    # individually-permitted calls.
+    when: 'double(params.amount) <= 500.0 && count.refund_spend.day + double(params.amount) > 5000.0'
+    effect: deny
+    audit_level: detailed
+
   - id: llm06-refunds-within-authority
     reason: "LLM06: bounded spend authority, enforced on the value not the intent"
     match:
@@ -98,13 +117,16 @@ rules:
     effect: allow
 
   # ---------------------------------------------------------------- LLM10
-  # Unbounded Consumption — PARTIAL, and the partiality is structural. A
-  # per-action cap is enforceable; a *cumulative* budget is not, because the
-  # engine is deliberately stateless (pure, sub-10ms, no I/O on the decision
-  # path). An agent held to $500 per refund can still issue a thousand of them.
-  # See README and UAI-147: this needs a stateful counter the engine does not
-  # currently have, and pretending otherwise in a pack would be the dangerous
-  # kind of wrong.
+  # Unbounded Consumption. A per-action cap and a cumulative budget are both
+  # enforceable now (UAI-147). The engine is still stateless: totals are
+  # computed by the enforcer and handed to `decide()` as data, so the decision
+  # path acquired no I/O and no lookup that can hang. See ADR-0026.
+  #
+  # The remaining limit, stated because a pack that overclaims is worse than
+  # one that underclaims: the total is what THIS sidecar saw. Ten sidecars
+  # enforcing this budget can permit ten times it before the control plane's
+  # fleet view catches up and contains the principal. The corpus declares that
+  # as a known gap rather than leaving it to a reader to work out.
 
   - id: llm10-cap-single-batch-size
     reason: "LLM10: one obviously-abusive request; NOT a rate limit"
@@ -162,3 +184,25 @@ floors:
     match:
       tool: "mcp://k8s/**"
       verb: write
+
+# ---------------------------------------------------------------------------
+# Counters — what to accumulate, so the rules above can ask cumulative
+# questions. Declared separately from the rule that reads them because the two
+# are not one-to-one: `refund_spend` is written by every allowed refund and
+# read by the budget rule, and `denies` is written by every denial and read by
+# nobody here — the control plane reads it as the rogue signal (UAI-167).
+counters:
+  - id: refund_spend
+    match:
+      principal: "agent:*"
+      tool: "sdk://payments/refund"
+      verb: create
+    value: 'double(params.amount)'
+    # Only what was allowed. A refund that was denied did not spend anything,
+    # and counting it would let a blocked agent exhaust its own budget.
+    on_verdict: allow
+
+  - id: denies
+    match:
+      principal: "agent:*"
+    on_verdict: deny

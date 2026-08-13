@@ -5,6 +5,13 @@ on your machine connects to, instead of each wiring up its own tool servers.
 Default-deny authz, an approval TUI, an append-only audit log, and a bundled
 tier of light/safe tool servers out of the box.
 
+
+> **Security:** the posture, the boundaries and the deliberate limits are
+> written up in [SECURITY.md](SECURITY.md) and [docs/threat-model.md](docs/threat-model.md).
+> The one to read before deploying: **the hub ships unsandboxed** — enforcement
+> governs what an agent may ask a server to do, and is not a sandbox for the
+> server itself.
+
 ## Layout
 
 A uv workspace of three packages:

@@ -12,6 +12,15 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
+# Least privilege by default, for every job in this file.
+#
+# Without this a workflow inherits the repository default, which on many
+# repositories is write — so for a public repository a pull request from a fork
+# would run with a token that can push. Jobs that genuinely need more opt up
+# individually and `test_public_repo_hygiene.py` requires a recorded reason.
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -55,6 +64,31 @@ jobs:
   # UAI-78. The repo was public for ~10 weeks before anyone checked its history
   # for credentials; a scan that only ever runs by hand is how that happens
   # again. fetch-depth: 0 because the point is the whole history, not the tip.
+  clean-clone:
+    name: clean clone (a stranger can build this)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          # No cache, deliberately. The whole question is whether a first-time
+          # clone resolves, and a warm cache is exactly what would hide a
+          # private dependency that only we can reach.
+          enable-cache: false
+
+      # `--frozen` against the committed lock, `--no-cache` so nothing is
+      # served from a previous run. If any dependency needs credentials or a
+      # private index, this is where it fails — loudly, and in a job whose name
+      # says what the failure means.
+      - name: Resolve every dependency from public indexes alone
+        run: uv sync --frozen --no-cache
+
+      - name: The suite runs on what a clean clone produced
+        run: uv run --no-cache pytest -q
+
   secret-scan:
     name: secret scan
     runs-on: ubuntu-latest

@@ -1,0 +1,132 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadOnlyDiscoveryAnywhere",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ec2:GetConsoleOutput",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CreateNetworkingOnlyInTheTestRegion",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateVpc",
+        "ec2:CreateSubnet",
+        "ec2:CreateInternetGateway",
+        "ec2:AttachInternetGateway",
+        "ec2:CreateRouteTable",
+        "ec2:CreateRoute",
+        "ec2:AssociateRouteTable",
+        "ec2:CreateSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:ModifyVpcAttribute",
+        "ec2:ModifySubnetAttribute"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "TearDownOnlyWhatThisHarnessTagged",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DeleteVpc",
+        "ec2:DeleteSubnet",
+        "ec2:DeleteInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:DeleteRouteTable",
+        "ec2:DeleteRoute",
+        "ec2:DisassociateRouteTable",
+        "ec2:DeleteSecurityGroup",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:TerminateInstances",
+        "ec2:StopInstances"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/unified-ai.purpose": "deployment-mode-test",
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "RunOnlyTinyInstances",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:us-east-1:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:InstanceType": [
+            "t4g.nano",
+            "t4g.micro",
+            "t3.micro"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "RunInstancesNeedsTheseSupportingResources",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:us-east-1:*:subnet/*",
+        "arn:aws:ec2:us-east-1:*:security-group/*",
+        "arn:aws:ec2:us-east-1:*:network-interface/*",
+        "arn:aws:ec2:us-east-1:*:volume/*",
+        "arn:aws:ec2:us-east-1::image/*",
+        "arn:aws:ec2:us-east-1:*:key-pair/*"
+      ]
+    },
+    {
+      "Sid": "TagOnlyDuringCreation",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": [
+            "CreateVpc",
+            "CreateSubnet",
+            "CreateInternetGateway",
+            "CreateRouteTable",
+            "CreateSecurityGroup",
+            "RunInstances",
+            "AuthorizeSecurityGroupEgress",
+            "AuthorizeSecurityGroupIngress"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AndDeleteThoseTags",
+      "Effect": "Allow",
+      "Action": "ec2:DeleteTags",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/unified-ai.purpose": "deployment-mode-test"
+        }
+      }
+    },
+    {
+      "Sid": "NeverTouchAnythingElse",
+      "Effect": "Deny",
+      "NotAction": [
+        "ec2:*",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

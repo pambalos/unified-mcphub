@@ -24,3 +24,9 @@ htmlcov/
 # graphify Part A scratch fixtures (not source)
 graphify-smoketest/
 graphify-out/
+
+# Deployment-mode test harness: local state and the resolved AMI id.
+deploy/test-harness/.terraform/
+deploy/test-harness/.terraform.lock.hcl
+deploy/test-harness/terraform.tfstate*
+deploy/test-harness/.ami-id

@@ -13,14 +13,21 @@ quietly covered one mode reads exactly like one that covered three.**
 |---|---|---|
 | hybrid | control plane unreachable ⇒ still enforcing, DEFERs fail closed, evidence backfills | **yes**, end to end |
 | hybrid | chain continuity across a restart | **yes** |
-| self-hosted / air-gapped | zero egress, by observation | no — needs an applied deployment |
+| self-hosted / air-gapped | zero egress, by observation | **yes**, out of band — `deploy/test-harness` |
+| any | teardown leaves nothing billable | **yes**, out of band — `deploy/test-harness/sweep.sh` |
 | BYOC | no action content crosses the boundary | partly: the *shape* is asserted here, the boundary is not |
-| any | teardown leaves nothing billable | no — needs an applied deployment |
+| any | chain continuity across a mode migration | no — needs two applied deployments |
 
-The uncovered rows need Terraform applied into a real account, which costs money
-and cannot run per-PR. They are not silently absent: `test_the_uncovered_modes_are_declared`
-fails if this table and the manifest below disagree, so the gap is visible in
-test output rather than in a reader's memory.
+Two rows are marked **out of band**: they are verified by `deploy/test-harness`,
+which applies real infrastructure and therefore cannot run per-PR. Its result is
+recorded in that directory's README with the date and the console output, so
+"verified" here means somebody can go and read what was observed rather than
+take this table's word for it.
+
+The rows still uncovered are not silently absent:
+`test_the_uncovered_modes_are_declared` fails if this table and the manifest
+below disagree, so the gap is visible in test output rather than in a reader's
+memory.
 
 **Why hybrid is the one worth having first.** It is the mode whose failure is a
 security failure rather than a deployment failure. If the control plane being
@@ -63,19 +70,10 @@ def _artifacts():
 #: declaration rather than an omission — the same discipline the corpus uses for
 #: `known_gap`.
 NOT_COVERED = {
-    "self-hosted-air-gap": (
-        "zero egress verified by observation needs an applied deployment and a "
-        "network we can watch. An air-gap claim backed by reading a security "
-        "group is not a verified air gap, so asserting it from HCL here would be "
-        "worse than declaring the gap."
-    ),
     "byoc-boundary": (
         "what actually crosses the customer boundary can only be observed with "
         "the deployment standing up. The evidence *shape* is asserted below; the "
         "boundary is not."
-    ),
-    "teardown-leaves-nothing-billable": (
-        "requires an account to leave clean, and a bill to read afterwards."
     ),
     "mode-migration-chain-continuity": (
         "needs two applied deployments and a migration between them. Continuity "
@@ -91,9 +89,7 @@ NOT_COVERED = {
 #: same vacuous-guard shape this project keeps finding, so the phrases here are
 #: long enough that containing one is evidence rather than coincidence.
 TABLE_PHRASES = {
-    "self-hosted-air-gap": "zero egress, by observation",
     "byoc-boundary": "no action content crosses the boundary",
-    "teardown-leaves-nothing-billable": "teardown leaves nothing billable",
     "mode-migration-chain-continuity": "across a migration is not",
 }
 
@@ -119,8 +115,11 @@ def test_the_uncovered_modes_are_declared():
             f"{mode} is declared uncovered but its explanation ({phrase!r}) is gone"
         )
 
-    assert "no — needs an applied deployment" in header, (
+    assert "needs two applied deployments" in header, (
         "the coverage table no longer states which rows need a real account"
+    )
+    assert "deploy/test-harness" in header, (
+        "the table no longer points at where the out-of-band results live"
     )
 
 

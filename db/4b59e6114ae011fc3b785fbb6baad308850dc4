@@ -1,0 +1,22 @@
+packages/unified-enforce/tests/unit/test_enforce_audit.py
+  s_d31028edbe4e78::t_63b493ba59db64 77-98
+packages/unified-enforce/src/unified_enforce/audit.py
+  s_d31028edbe4e78::t_93d3741b14530e 211-217,228-230
+  s_d31028edbe4e78::t_dc975c37d9b140 243-255
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "db4b59e6114ae011fc3b785fbb6baad308850dc4",
+  "prompts": {},
+  "sessions": {
+    "s_d31028edbe4e78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4ce99bc6-760b-492c-b500-42802c58576e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

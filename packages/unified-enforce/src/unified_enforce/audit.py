@@ -208,6 +208,13 @@ class HashChainWriter:
         service down before anyone can look. Logged at error level, because a
         line that failed to parse is either a crash or somebody editing the
         file, and both want attention.
+
+        A parseable last entry with no `hash` is different: the directory
+        predates the chain (logs written before the unified-enforce migration
+        are flat JSONL with no `prev_hash`/`hash`). That history cannot anchor
+        a chain, and leaving it in place would make `verify()` report it as
+        tampering forever, so it is moved whole into `legacy/` — nothing is
+        deleted — and the chain starts fresh from GENESIS.
         """
         files = sorted(self._dir.glob("*.jsonl"))
         if not files:
@@ -218,6 +225,9 @@ class HashChainWriter:
                 entry = json.loads(raw)
             except ValueError:
                 continue
+            if "hash" not in entry:
+                self._quarantine_legacy(files)
+                return
             if offset:
                 log.error(
                     "%s: skipped %d unparseable trailing line(s) recovering the chain head. "
@@ -229,6 +239,19 @@ class HashChainWriter:
             self._head = entry["hash"]
             self._last_entry = entry
             return
+
+    def _quarantine_legacy(self, files: list[Path]) -> None:
+        legacy = self._dir / "legacy"
+        legacy.mkdir(mode=0o700, exist_ok=True)
+        for path in files:
+            path.rename(legacy / path.name)
+        log.error(
+            "moved %d pre-chain audit file(s) to %s: they predate hash chaining "
+            "and cannot anchor a chain. They are preserved verbatim but no longer "
+            "tamper-checked; the chain restarts from GENESIS.",
+            len(files),
+            legacy,
+        )
 
     def _today(self) -> str:
         return self._clock().date().isoformat()

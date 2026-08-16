@@ -74,6 +74,28 @@ def test_restart_resumes_the_chain(tmp_path):
     assert AuditChain.verify(d).ok
 
 
+def test_pre_chain_legacy_logs_are_quarantined_not_fatal(tmp_path):
+    # Logs written before the unified-enforce migration are flat JSONL with no
+    # hash/prev_hash. Starting on top of them must not crash, must not delete
+    # them, and must leave a directory that verify() passes.
+    d = tmp_path / "audit"
+    d.mkdir()
+    legacy_line = json.dumps({"phase": "received", "seq": 41, "tool": "x"})
+    (d / "2026-08-14.jsonl").write_text(legacy_line + "\n")
+    (d / "2026-08-15.jsonl").write_text(legacy_line + "\n")
+
+    c = AuditChain(d)
+    c.start()
+    e = c.append("decision", {"n": 1})
+    c.stop()
+
+    assert e["prev_hash"] == GENESIS_HASH
+    moved = sorted(p.name for p in (d / "legacy").glob("*.jsonl"))
+    assert moved == ["2026-08-14.jsonl", "2026-08-15.jsonl"]
+    assert (d / "legacy" / "2026-08-15.jsonl").read_text() == legacy_line + "\n"
+    assert AuditChain.verify(d).ok
+
+
 def test_single_writer_lock(tmp_path, chain):
     other = AuditChain(chain._dir)
     with pytest.raises(RuntimeError, match="locked by another writer"):

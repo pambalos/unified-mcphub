@@ -22,7 +22,7 @@ keywords = ["mcp", "model-context-protocol", "graphify", "knowledge-graph", "cod
 # tiny `unified-mcp-servers` tier — it is built/run standalone via uvx.
 dependencies = [
     "graphifyy[mcp]==0.8.28",
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
 ]
 
 [project.optional-dependencies]

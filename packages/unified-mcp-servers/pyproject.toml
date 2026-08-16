@@ -20,7 +20,7 @@ keywords = ["mcp", "model-context-protocol", "tools", "filesystem", "shell", "fe
 # a stdlib fallback, so it is NOT a Python dependency. PDF/DOCX support is an
 # optional extra, lazy-imported by the documents server.
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
 ]
 
 [project.optional-dependencies]

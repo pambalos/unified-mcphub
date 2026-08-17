@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .extauthz import PRINCIPAL_HEADER, CheckInput, CheckResult, ExtAuthzCore
+from .extauthz import PRINCIPAL_HEADER, CheckInput, CheckResult, ConnInput, ExtAuthzCore
 from .protos import ext_authz_pb2 as pb
 
 SERVICE_NAME = "envoy.service.auth.v3.Authorization"
@@ -71,9 +71,44 @@ def _header_options(result: CheckResult) -> list[Any]:
     ]
 
 
+def _to_conn_input(request: Any, core: ExtAuthzCore) -> ConnInput:
+    """The network (L4) filter's CheckRequest: addresses, no HTTP request.
+
+    At L4 there is no principal header to consult — identity is the mTLS SAN
+    when the listener terminated TLS, else the sidecar's configured default
+    (identity by deployment position, exactly as in per-agent sidecar mode).
+    """
+    attrs = request.attributes
+    dest = attrs.destination.address.socket_address
+    src = attrs.source.address.socket_address
+    return ConnInput(
+        principal_id=core.principal_for(mtls=attrs.source.principal or None),
+        destination_address=dest.address,
+        destination_port=dest.port_value,
+        source_address=src.address or None,
+        sni=attrs.tls_session.sni or None,
+    )
+
+
 def check(core: ExtAuthzCore, request: Any) -> Any:
-    """One ext_authz decision: CheckRequest → CheckResponse."""
-    result = core.check(_to_check_input(request, core))
+    """One ext_authz decision: CheckRequest → CheckResponse.
+
+    The HTTP and network (L4) ext_authz filters call the same RPC; what
+    distinguishes them on the wire is that only the HTTP filter fills
+    `attributes.request.http`. An L4 check with no destination address is
+    denied by construction — it would mean deciding about a connection this
+    request never described.
+    """
+    http = request.attributes.request.http
+    if not http.method and not http.path:
+        conn = _to_conn_input(request, core)
+        if not conn.destination_address:
+            return pb.CheckResponse(
+                status=pb.Status(code=_PERMISSION_DENIED, message="no destination address")
+            )
+        result = core.check_connection(conn)
+    else:
+        result = core.check(_to_check_input(request, core))
     if result.allowed:
         return pb.CheckResponse(
             status=pb.Status(code=_OK),

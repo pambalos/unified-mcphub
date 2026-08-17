@@ -1,0 +1,89 @@
+# Envoy sidecar template — unified-enforce network (L4) ext_authz. E3.5.
+#
+# The HTTP templates govern what an agent may *ask*; this one governs what it
+# may *reach* on raw TCP — Postgres, Redis, queues, anything whose wire
+# protocol an HTTP filter never sees. The network ext_authz filter calls the
+# same envoy.service.auth.v3.Authorization servicer, and the engine decides
+# `tcp://<ip>:<port>` / verb `connect` for the sidecar's principal.
+#
+# The guarantee, stated exactly (measured against real Envoy, see the test):
+# **no client byte crosses without an ALLOW; a denied connection closes at
+# the first client write.** Envoy checks on the first downstream byte, not at
+# accept, so the upstream still observes a TCP open/close on a deny and a
+# server-first protocol's greeting (SMTP, SSH) reaches the denied client.
+# Client-first protocols — Postgres, Redis, HTTP — leak nothing. This is
+# connection-granularity enforcement, deliberately: statement-level
+# inspection is a protocol-aware proxy's job, tracked separately. What it
+# closes is the "raw socket around the HTTP gateway" bypass class.
+#
+# Point each listener at one upstream (tcp_proxy has no routing to abuse), or
+# use an original_dst listener behind an iptables REDIRECT so the destination
+# the engine sees is the address the agent actually dialled.
+#
+# Pair with an egress policy from deploy/egress/ — Envoy is only the lock if
+# the agent has no route around it.
+#
+# Validated against Envoy's real schema by
+# tests/integration/test_envoy_ext_authz_l4.py (needs Docker). Manually:
+#   docker run --rm -v "$PWD:/cfg" envoyproxy/envoy:v1.31-latest \
+#     envoy --mode validate -c /cfg/ext_authz-tcp.yaml
+
+static_resources:
+  listeners:
+    - name: agent_tcp_egress
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 10001 }
+      # Uncomment to capture SNI into the engine's params.sni for TLS
+      # destinations. The engine treats SNI as a matchable *claim*, never as
+      # the destination itself — a client controls its own ClientHello.
+      # listener_filters:
+      #   - name: envoy.filters.listener.tls_inspector
+      #     typed_config:
+      #       "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+      filter_chains:
+        - filters:
+            # MUST precede tcp_proxy: a filter after the proxy never runs.
+            - name: envoy.filters.network.ext_authz
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.ext_authz.v3.ExtAuthz
+                stat_prefix: tcp_authz
+                transport_api_version: V3
+                # The engine down must mean no connections, not all
+                # connections. Same stance as the HTTP templates.
+                failure_mode_allow: false
+                include_peer_certificate: true
+                grpc_service:
+                  envoy_grpc: { cluster_name: unified_enforce }
+            - name: envoy.filters.network.tcp_proxy
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+                stat_prefix: tcp_egress
+                cluster: tcp_upstream
+
+  clusters:
+    - name: unified_enforce
+      type: STRICT_DNS
+      connect_timeout: 2s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config: { http2_protocol_options: {} }
+      load_assignment:
+        cluster_name: unified_enforce
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 9001 }
+
+    # The one place this listener can forward to. Replace per deployment.
+    - name: tcp_upstream
+      type: STRICT_DNS
+      connect_timeout: 2s
+      load_assignment:
+        cluster_name: tcp_upstream
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 5432 }

@@ -84,6 +84,25 @@ class CheckInput:
 
 
 @dataclass
+class ConnInput:
+    """One intercepted TCP connection — the network (L4) filter's view. E3.5.
+
+    No method, no path, no headers: at L4 the observable facts are who is
+    connecting and where to. The destination is always the literal ip:port the
+    kernel saw; SNI, when a TLS inspector captured one, is the client's *claim*
+    of a hostname and rides in params where rules can match it — it never
+    replaces the address in the tool URI, because a client controls its own
+    ClientHello and a policy keyed on it alone would be keyed on attacker input.
+    """
+
+    principal_id: str
+    destination_address: str  # IP as Envoy saw it
+    destination_port: int
+    source_address: str | None = None
+    sni: str | None = None
+
+
+@dataclass
 class CheckResult:
     allowed: bool
     status_code: int  # 200 | 403
@@ -234,6 +253,55 @@ class ExtAuthzCore:
             status_code=200 if allowed else 403,
             headers=headers,
             body=body,
+            decision=decision,
+            action=action,
+        )
+
+    def check_connection(self, conn: ConnInput) -> CheckResult:
+        """Connection-level enforcement for traffic that is not HTTP. E3.5.
+
+        Agents talk to databases, caches and queues on their own wire
+        protocols, and an HTTP-only gateway leaves that whole class to the
+        network layer's blunt CIDR rules. This is the connection-granularity
+        answer: policy decides whether this principal may open a TCP
+        connection to this destination at all, and the verdict lands in the
+        chain like any other. What it deliberately does not see is what flows
+        afterwards — statement-level inspection is a protocol-aware proxy's
+        job, and pretending otherwise here would be an ALLOW dressed as
+        understanding.
+
+        The action shape keeps L4 rules unmistakably distinct from L7 ones:
+        tool `tcp://ip:port`, verb `connect`. A rule matching `https://*` can
+        never accidentally clear a raw socket to the same host.
+        """
+        extra: dict[str, Any] = {"transport": "tcp"}
+        if conn.source_address:
+            extra["source"] = conn.source_address
+        params: dict[str, Any] = {}
+        if conn.sni:
+            params["sni"] = conn.sni
+        action = Action.build(
+            principal=Principal(id=conn.principal_id, attestation="assigned"),
+            tool=f"tcp://{conn.destination_address}:{conn.destination_port}",
+            verb="connect",
+            resource="*",
+            params=params,
+            context=ActionContext(origin="gateway", extra=extra),
+        )
+        decision = self._enforcer.enforce(action)
+        allowed = decision.verdict is Verdict.ALLOW
+        headers = {
+            "x-unified-verdict": decision.verdict.value,
+            "x-unified-source": decision.source,
+            "x-unified-action-digest": action.digest(),
+        }
+        if decision.rule_id is not None:
+            headers["x-unified-rule"] = decision.rule_id
+        return CheckResult(
+            allowed=allowed,
+            status_code=200 if allowed else 403,
+            headers=headers,
+            body="" if allowed else f"unified-enforce: {decision.verdict.value}",
             decision=decision,
             action=action,
         )

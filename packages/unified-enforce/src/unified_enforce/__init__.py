@@ -30,6 +30,7 @@ from .extauthz import (
     BodyInspection,
     CheckInput,
     CheckResult,
+    ConnInput,
     ExtAuthzCore,
     create_http_service,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "RecordedApproval",
     "CanonicalizationError",
     "CheckInput",
+    "ConnInput",
     "CheckResult",
     "Decision",
     "Divergence",

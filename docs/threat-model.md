@@ -179,6 +179,34 @@ IPv6-loopback and cloud metadata endpoints across all ports, so a browser cannot
 be turned into a pivot onto the instance's credentials, while the open internet
 stays reachable.
 
+**IMDS, below the policy layer.** The deny list above governs tools the hub
+mediates; a compromised MCP server making its own HTTP requests is not behind
+it, and security groups do not govern link-local, so `169.254.169.254` sits
+inside every perimeter the network layer builds. This was measured, not
+assumed — the AWS harness's first real run reached IMDS from inside an
+otherwise verified air gap. The shipped answer is instance-level: IMDSv2
+tokens required and a response hop limit of 1, exported by the dataplane
+module as `required_metadata_options` and re-measured by the harness on every
+run. Honest scope: the hop limit stops workloads behind a routed hop
+(containers, network namespaces); an MCP server running as a plain host
+process shares the host's namespace and can still mint tokens. On such hosts
+the mitigation is no instance profile, or no IMDS at all where nothing boots
+by user_data.
+
+**Non-HTTP egress.** Agents speak to databases, caches and queues on their
+own wire protocols, and an HTTP-only gateway would leave that whole class to
+CIDR rules. The network (L4) ext_authz filter closes it at connection
+granularity: policy decides `tcp://ip:port` / `connect` per principal, the
+verdict lands in the chain, and — measured against real Envoy, not read from
+its docs — the guarantee is that **no client byte crosses without an ALLOW**,
+with a denied connection closed at the first client write. Envoy runs this
+check on the first downstream byte rather than at accept, so a denied
+connection still opens and closes a TCP session upstream, and a server-first
+protocol's greeting reaches the denied client; client-first protocols
+(Postgres, Redis, HTTP) leak nothing. Statement-level inspection — "SELECT
+but not DROP" — needs a protocol-aware proxy and is roadmap, stated as such
+wherever this layer is described.
+
 **Unbounded consumption.** Per-action caps and cumulative budgets. Counting
 happens outside the decision path — totals are computed by the enforcer and
 handed to a still-pure engine as data — so no lookup was added to a path whose

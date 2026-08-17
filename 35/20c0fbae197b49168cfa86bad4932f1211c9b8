@@ -1,0 +1,21 @@
+packages/unified-enforce/deploy/egress/verify-kubernetes-networkpolicy.sh
+  s_d31028edbe4e78::t_7e4b8cc9862de2 1-93
+packages/unified-enforce/deploy/egress/README.md
+  s_d31028edbe4e78::t_d7ad56c4a11392 57-74
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "3520c0fbae197b49168cfa86bad4932f1211c9b8",
+  "prompts": {},
+  "sessions": {
+    "s_d31028edbe4e78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4ce99bc6-760b-492c-b500-42802c58576e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

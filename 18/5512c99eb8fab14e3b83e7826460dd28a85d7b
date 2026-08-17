@@ -1,0 +1,41 @@
+packages/unified-enforce/tests/integration/test_envoy_ext_authz_l4.py
+  s_d31028edbe4e78::t_51f564f2c654f1 214-232,237,240-241,245,278-293,297-302,304-305
+  s_d31028edbe4e78::t_b383900b1b0f89 92-94,97-101,106,108-111,113,121
+  s_d31028edbe4e78::t_643e6d7a7286a9 1-5,19-26,28-30,32-42,44,52-53,75-91,95-96,102-105,107,112,114-120,122-197,199-213,233-236,238-239,242-244,246-277,294-296,303
+  s_d31028edbe4e78::t_c571300bb047ca 6-18
+  s_d31028edbe4e78::t_4e13fbf24d8a48 27,31,43,45-51,54-74
+  s_d31028edbe4e78::t_fd0d70bd250def 198
+packages/unified-enforce/src/unified_enforce/protos/ext_authz.proto
+  s_d31028edbe4e78::t_a2329c6cdd11c7 27-38,40,44-47
+  s_d31028edbe4e78::t_86385a91fa308c 72,74
+packages/unified-enforce/tests/unit/test_enforce_extauthz_l4.py
+  s_d31028edbe4e78::t_1fdb9938a1b160 1-109
+packages/unified-enforce/src/unified_enforce/extauthz_grpc.py
+  s_d31028edbe4e78::t_6c2fe97d91e7ab 34
+  s_d31028edbe4e78::t_97a1796a6e722f 74-92,94-111
+docs/threat-model.md
+  s_d31028edbe4e78::t_ec983b31eee2c3 182-195
+  s_d31028edbe4e78::t_63f75971fcd8f0 196-209
+packages/unified-enforce/deploy/envoy/ext_authz-tcp.yaml
+  s_d31028edbe4e78::t_71a0d46943d652 1-5,18-89
+  s_d31028edbe4e78::t_a8f5f1675520b9 6-17
+packages/unified-enforce/src/unified_enforce/extauthz.py
+  s_d31028edbe4e78::t_08a7fbb3efad23 260-308
+  s_d31028edbe4e78::t_8105a025de4a7f 87-104
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "185512c99eb8fab14e3b83e7826460dd28a85d7b",
+  "prompts": {},
+  "sessions": {
+    "s_d31028edbe4e78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4ce99bc6-760b-492c-b500-42802c58576e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

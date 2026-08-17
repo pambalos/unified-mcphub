@@ -34,6 +34,7 @@ from .extauthz import (
     ExtAuthzCore,
     create_http_service,
 )
+from .identity import OIDCValidator, VerifiedIdentity
 from .index import AuditIndex
 from .policy import Decision, Floor, Match, PolicyDoc, PolicyEngine, PolicyError, Rule, Verdict
 from .replay import Divergence, ReplayReport, replay
@@ -62,6 +63,8 @@ __all__ = [
     "CanonicalizationError",
     "CheckInput",
     "ConnInput",
+    "OIDCValidator",
+    "VerifiedIdentity",
     "CheckResult",
     "Decision",
     "Divergence",

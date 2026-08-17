@@ -31,7 +31,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .extauthz import PRINCIPAL_HEADER, CheckInput, CheckResult, ConnInput, ExtAuthzCore
+from .extauthz import (
+    PRINCIPAL_HEADER,
+    CheckInput,
+    CheckResult,
+    ConnInput,
+    ExtAuthzCore,
+    bearer_of,
+)
 from .protos import ext_authz_pb2 as pb
 
 SERVICE_NAME = "envoy.service.auth.v3.Authorization"
@@ -49,11 +56,15 @@ def _to_check_input(request: Any, core: ExtAuthzCore) -> CheckInput:
     # declared request size, or <= 0 when Envoy doesn't know it (e.g. chunked),
     # which is not the same as "the body is empty" — hence None for unknown.
     body = bytes(http.raw_body) or http.body.encode("utf-8")
+    principal_id, attestation, identity_problem = core.resolve_principal(
+        mtls=request.attributes.source.principal or None,
+        bearer=bearer_of(headers),
+        header=headers.get(PRINCIPAL_HEADER),
+    )
     return CheckInput(
-        principal_id=core.principal_for(
-            mtls=request.attributes.source.principal or None,
-            header=headers.get(PRINCIPAL_HEADER),
-        ),
+        principal_id=principal_id,
+        attestation=attestation,
+        identity_problem=identity_problem,
         method=http.method,
         host=http.host,
         path=http.path,
@@ -81,8 +92,10 @@ def _to_conn_input(request: Any, core: ExtAuthzCore) -> ConnInput:
     attrs = request.attributes
     dest = attrs.destination.address.socket_address
     src = attrs.source.address.socket_address
+    principal_id, attestation, _ = core.resolve_principal(mtls=attrs.source.principal or None)
     return ConnInput(
-        principal_id=core.principal_for(mtls=attrs.source.principal or None),
+        principal_id=principal_id,
+        attestation=attestation,
         destination_address=dest.address,
         destination_port=dest.port_value,
         source_address=src.address or None,

@@ -1,0 +1,31 @@
+deploy/test-harness/observe.sh
+  s_d31028edbe4e78::t_4aa1c87a5b6307 51-56,65-77,80-92
+  s_d31028edbe4e78::t_488c54d7c6a883 95-102
+  s_d31028edbe4e78::t_851dd6f0edb9b5 57-64
+deploy/terraform/modules/dataplane-aws/outputs.tf
+  s_d31028edbe4e78::t_2bdaf9a8e21bc1 20-37
+deploy/test-harness/README.md
+  s_d31028edbe4e78::t_a187577e675598 64-70,87-97
+  s_d31028edbe4e78::t_f4fcc1cae8ccd9 71-86
+deploy/terraform/modules/dataplane-aws/main.tf
+  s_d31028edbe4e78::t_3a91d1742a481d 16-21
+deploy/test-harness/main.tf
+  s_d31028edbe4e78::t_78237d57c90b6b 184-190,192-200
+  s_d31028edbe4e78::t_474fee7bc1ec12 216-228
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "ee411432f54c88866f34202670f3d359f79b7c14",
+  "prompts": {},
+  "sessions": {
+    "s_d31028edbe4e78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4ce99bc6-760b-492c-b500-42802c58576e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

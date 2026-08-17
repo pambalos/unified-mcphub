@@ -54,13 +54,24 @@ agent could reach neither the upstream nor its own sidecar. Fixed by matching
 on the loopback *destination*; pinned by a test that asserts the DROP counter
 does not move.
 
-The other two artifacts are **structurally** checked only
-(`test_egress_manifests.py`): the NetworkPolicy really declares `Egress` in
-`policyTypes` (omitting it silently restricts nothing) and permits DNS, and the
-Terraform passes `terraform validate`. Neither is proof of enforcement — a
-NetworkPolicy is inert without a CNI that enforces it, and `kubectl apply`
-against a non-enforcing CNI accepts it and ignores it. Real proof needs kind +
-Calico and a live AWS account, and belongs with design-partner deployment (G2).
+The Terraform is structurally checked (`test_egress_manifests.py` runs
+`terraform validate`) and its enforcement is proven by observation in a real
+AWS account by `deploy/test-harness` — two instances in one subnet, security
+group the only difference.
+
+The NetworkPolicy is structurally checked the same way (it really declares
+`Egress` in `policyTypes` — omitting it silently restricts nothing — and
+permits DNS), and **cluster-proven** by
+`verify-kubernetes-networkpolicy.sh`: it applies the shipped manifest
+verbatim to a real cluster and measures the differentials — a label-free
+CONTROL pod that must reach both the internet and the in-cluster upstream
+(so a broken network cannot masquerade as enforcement), an enforced agent
+pod for which only DNS survives, and a sidecar pod that reaches exactly the
+allowlisted namespace and nothing else. First proven 2026-08-17 on minikube
++ Calico (7/7), cluster created for the run and deleted after. The script
+needs any cluster whose CNI enforces NetworkPolicy — Calico, Cilium, k3s'
+default; **not** kind's default kindnet, where the manifest is decoration
+and the script will say so by failing.
 
 ## Air-gapped note
 

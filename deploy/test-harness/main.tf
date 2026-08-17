@@ -181,10 +181,23 @@ locals {
       fi
     done
 
-    if curl -s --max-time 8 -o /dev/null http://169.254.169.254/latest/meta-data/; then
-      say "imds-reached"
+    # Two IMDS measurements, not one. Tokenless v1 is the credential path a
+    # compromised MCP server would use; the token PUT is the path cloud-init
+    # used to fetch this very script, so if it reports failed the mitigation
+    # broke the boot contract and the fix is wrong, not the test.
+    code=$(curl -s -o /dev/null -w '%%{http_code}' --max-time 8 http://169.254.169.254/latest/meta-data/)
+    if [ "$code" = "200" ]; then
+      say "imdsv1-reached"
     else
-      say "imds-blocked"
+      say "imdsv1-blocked http-$code"
+    fi
+
+    token=$(curl -s --max-time 8 -X PUT http://169.254.169.254/latest/api/token \
+      -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+    if [ -n "$token" ]; then
+      say "imdsv2-host-token-ok"
+    else
+      say "imdsv2-host-token-failed"
     fi
 
     say "probe-done"
@@ -199,6 +212,19 @@ resource "aws_instance" "airgap_probe" {
   subnet_id              = aws_subnet.agent.id
   vpc_security_group_ids = [module.airgap_dataplane.agent_security_group_id]
   user_data              = local.probe
+
+  # The 2026-08-14 run measured that security groups do not govern link-local:
+  # both probes reached 169.254.169.254. This is the shipped answer, under the
+  # same observation. Tokens required kills the tokenless v1 path; hop limit 1
+  # means the response cannot cross a routed hop, so a containerised or
+  # namespaced MCP server never sees it. `disabled` would be stronger but is
+  # not honest here: cloud-init fetches user_data through this endpoint, so an
+  # instance that boots by user_data cannot also claim IMDS off at launch.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
 
   tags = { Name = "unified-test-airgap-probe" }
 }

@@ -61,7 +61,40 @@ This is exactly the kind of gap a configuration review does not produce, and it
 is why the ticket asked for observation. Mitigations are outside the security
 group: `http_endpoint = "disabled"` where the workload does not need it, or
 IMDSv2 with `http_put_response_hop_limit = 1`, which stops a container reaching
-it. Neither is in the shipped module today.
+it.
+
+### The remediation (2026-08-17)
+
+Shipped and folded back into the harness. The airgap probe now launches with
+`http_tokens = "required"` and `http_put_response_hop_limit = 1`, and the
+probe measures both halves: tokenless IMDSv1 must refuse on the hardened
+instance, and the host must still mint an IMDSv2 token — cloud-init fetched
+the probe script through that path, so a mitigation that kills it kills the
+boot contract. `observe.sh` additionally reads the applied `MetadataOptions`
+back from the EC2 API, because the hop limit itself cannot be measured from a
+bare host: it constrains the response crossing a routed hop, and the probe
+carries no container runtime.
+
+The verification run (2026-08-17) sharpened the original finding. Tokenless
+v1 refused on the **control** too: AL2023 AMIs default to tokens-required, so
+the 08-14 `imds-reached` was a 401 answering, not credentials moving. What
+the Terraform actually adds on such AMIs is the hop limit — the AMI default
+is 2, which is precisely one routed hop, i.e. a container reaches it — and
+the fact that both settings are pinned in configuration rather than inherited
+from an AMI default that a different image choice would silently lose. The
+liveness baseline in `observe.sh` is therefore the control's token mint, not
+tokenless v1.
+
+Full `http_endpoint = "disabled"` remains the stronger setting where the
+workload does not boot by user_data and holds no role; the dataplane module
+exports the required settings as `required_metadata_options` so customer
+launch templates attach them alongside the security groups.
+
+What hop limit 1 does **not** cover, stated so nobody oversells it: an MCP
+server running as a plain host process shares the host's network namespace and
+can still mint tokens. On such hosts the answer is no instance profile, or no
+IMDS. The containerised-upstreams work (M0.5, SEC-MCP-5) is what moves MCP
+servers behind the hop.
 
 ## Cost
 

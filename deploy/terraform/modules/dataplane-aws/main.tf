@@ -13,6 +13,12 @@
 # or task definition to attach. A module that also created the compute would be
 # rewritten by every adopter.
 #
+# One thing security groups cannot do, and the compute owner must: harden IMDS.
+# Link-local traffic is not governed by egress rules, so 169.254.169.254 sits
+# inside every perimeter this module builds. Attach the module's
+# `required_metadata_options` output to the same instances that attach these
+# groups — the harness (deploy/test-harness) measures both halves.
+#
 # On a single host where agent and sidecar share a network namespace, security
 # groups do not filter loopback and this module is the wrong tool — use
 # deploy/egress/iptables-sidecar.sh, which is executed and tested by

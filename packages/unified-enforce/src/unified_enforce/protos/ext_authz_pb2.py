@@ -4,65 +4,62 @@
 # source: ext_authz.proto
 # Protobuf Python Version: 7.35.1
 """Generated protocol buffer code."""
+
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import descriptor_pool as _descriptor_pool
 from google.protobuf import runtime_version as _runtime_version
 from google.protobuf import symbol_database as _symbol_database
 from google.protobuf.internal import builder as _builder
+
 _runtime_version.ValidateProtobufRuntimeVersion(
-    _runtime_version.Domain.PUBLIC,
-    7,
-    35,
-    1,
-    '',
-    'ext_authz.proto'
+    _runtime_version.Domain.PUBLIC, 7, 35, 1, "", "ext_authz.proto"
 )
 # @@protoc_insertion_point(imports)
 
 _sym_db = _symbol_database.Default()
 
 
-
-
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0f\x65xt_authz.proto\x12\x1bunified_enforce.extauthz.v1\"4\n\rSocketAddress\x12\x0f\n\x07\x61\x64\x64ress\x18\x02 \x01(\t\x12\x12\n\nport_value\x18\x03 \x01(\r\"M\n\x07\x41\x64\x64ress\x12\x42\n\x0esocket_address\x18\x01 \x01(\x0b\x32*.unified_enforce.extauthz.v1.SocketAddress\"P\n\x04Peer\x12\x35\n\x07\x61\x64\x64ress\x18\x01 \x01(\x0b\x32$.unified_enforce.extauthz.v1.Address\x12\x11\n\tprincipal\x18\x04 \x01(\t\"\x19\n\nTLSSession\x12\x0b\n\x03sni\x18\x01 \x01(\t\"\xef\x01\n\x0bHttpRequest\x12\x0e\n\x06method\x18\x02 \x01(\t\x12\x46\n\x07headers\x18\x03 \x03(\x0b\x32\x35.unified_enforce.extauthz.v1.HttpRequest.HeadersEntry\x12\x0c\n\x04path\x18\x04 \x01(\t\x12\x0c\n\x04host\x18\x05 \x01(\t\x12\x0e\n\x06scheme\x18\x06 \x01(\t\x12\x0c\n\x04size\x18\t \x01(\x03\x12\x0c\n\x04\x62ody\x18\x0b \x01(\t\x12\x10\n\x08raw_body\x18\x0c \x01(\x0c\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"A\n\x07Request\x12\x36\n\x04http\x18\x02 \x01(\x0b\x32(.unified_enforce.extauthz.v1.HttpRequest\"\xf2\x01\n\x10\x41ttributeContext\x12\x31\n\x06source\x18\x01 \x01(\x0b\x32!.unified_enforce.extauthz.v1.Peer\x12\x36\n\x0b\x64\x65stination\x18\x02 \x01(\x0b\x32!.unified_enforce.extauthz.v1.Peer\x12\x35\n\x07request\x18\x04 \x01(\x0b\x32$.unified_enforce.extauthz.v1.Request\x12<\n\x0btls_session\x18\x0c \x01(\x0b\x32\'.unified_enforce.extauthz.v1.TLSSession\"Q\n\x0c\x43heckRequest\x12\x41\n\nattributes\x18\x01 \x01(\x0b\x32-.unified_enforce.extauthz.v1.AttributeContext\")\n\x0bHeaderValue\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\"M\n\x11HeaderValueOption\x12\x38\n\x06header\x18\x01 \x01(\x0b\x32(.unified_enforce.extauthz.v1.HeaderValue\"\x1a\n\nHttpStatus\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\"\'\n\x06Status\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\x12\x0f\n\x07message\x18\x02 \x01(\t\"Q\n\x0eOkHttpResponse\x12?\n\x07headers\x18\x02 \x03(\x0b\x32..unified_enforce.extauthz.v1.HeaderValueOption\"\x9c\x01\n\x12\x44\x65niedHttpResponse\x12\x37\n\x06status\x18\x01 \x01(\x0b\x32\'.unified_enforce.extauthz.v1.HttpStatus\x12?\n\x07headers\x18\x02 \x03(\x0b\x32..unified_enforce.extauthz.v1.HeaderValueOption\x12\x0c\n\x04\x62ody\x18\x03 \x01(\t\"\xd0\x01\n\rCheckResponse\x12\x33\n\x06status\x18\x01 \x01(\x0b\x32#.unified_enforce.extauthz.v1.Status\x12H\n\x0f\x64\x65nied_response\x18\x02 \x01(\x0b\x32/.unified_enforce.extauthz.v1.DeniedHttpResponse\x12@\n\x0bok_response\x18\x03 \x01(\x0b\x32+.unified_enforce.extauthz.v1.OkHttpResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
+    b'\n\x0f\x65xt_authz.proto\x12\x1bunified_enforce.extauthz.v1"4\n\rSocketAddress\x12\x0f\n\x07\x61\x64\x64ress\x18\x02 \x01(\t\x12\x12\n\nport_value\x18\x03 \x01(\r"M\n\x07\x41\x64\x64ress\x12\x42\n\x0esocket_address\x18\x01 \x01(\x0b\x32*.unified_enforce.extauthz.v1.SocketAddress"P\n\x04Peer\x12\x35\n\x07\x61\x64\x64ress\x18\x01 \x01(\x0b\x32$.unified_enforce.extauthz.v1.Address\x12\x11\n\tprincipal\x18\x04 \x01(\t"\x19\n\nTLSSession\x12\x0b\n\x03sni\x18\x01 \x01(\t"\xef\x01\n\x0bHttpRequest\x12\x0e\n\x06method\x18\x02 \x01(\t\x12\x46\n\x07headers\x18\x03 \x03(\x0b\x32\x35.unified_enforce.extauthz.v1.HttpRequest.HeadersEntry\x12\x0c\n\x04path\x18\x04 \x01(\t\x12\x0c\n\x04host\x18\x05 \x01(\t\x12\x0e\n\x06scheme\x18\x06 \x01(\t\x12\x0c\n\x04size\x18\t \x01(\x03\x12\x0c\n\x04\x62ody\x18\x0b \x01(\t\x12\x10\n\x08raw_body\x18\x0c \x01(\x0c\x1a.\n\x0cHeadersEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01"A\n\x07Request\x12\x36\n\x04http\x18\x02 \x01(\x0b\x32(.unified_enforce.extauthz.v1.HttpRequest"\xf2\x01\n\x10\x41ttributeContext\x12\x31\n\x06source\x18\x01 \x01(\x0b\x32!.unified_enforce.extauthz.v1.Peer\x12\x36\n\x0b\x64\x65stination\x18\x02 \x01(\x0b\x32!.unified_enforce.extauthz.v1.Peer\x12\x35\n\x07request\x18\x04 \x01(\x0b\x32$.unified_enforce.extauthz.v1.Request\x12<\n\x0btls_session\x18\x0c \x01(\x0b\x32\'.unified_enforce.extauthz.v1.TLSSession"Q\n\x0c\x43heckRequest\x12\x41\n\nattributes\x18\x01 \x01(\x0b\x32-.unified_enforce.extauthz.v1.AttributeContext")\n\x0bHeaderValue\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t"M\n\x11HeaderValueOption\x12\x38\n\x06header\x18\x01 \x01(\x0b\x32(.unified_enforce.extauthz.v1.HeaderValue"\x1a\n\nHttpStatus\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05"\'\n\x06Status\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\x12\x0f\n\x07message\x18\x02 \x01(\t"Q\n\x0eOkHttpResponse\x12?\n\x07headers\x18\x02 \x03(\x0b\x32..unified_enforce.extauthz.v1.HeaderValueOption"\x9c\x01\n\x12\x44\x65niedHttpResponse\x12\x37\n\x06status\x18\x01 \x01(\x0b\x32\'.unified_enforce.extauthz.v1.HttpStatus\x12?\n\x07headers\x18\x02 \x03(\x0b\x32..unified_enforce.extauthz.v1.HeaderValueOption\x12\x0c\n\x04\x62ody\x18\x03 \x01(\t"\xd0\x01\n\rCheckResponse\x12\x33\n\x06status\x18\x01 \x01(\x0b\x32#.unified_enforce.extauthz.v1.Status\x12H\n\x0f\x64\x65nied_response\x18\x02 \x01(\x0b\x32/.unified_enforce.extauthz.v1.DeniedHttpResponse\x12@\n\x0bok_response\x18\x03 \x01(\x0b\x32+.unified_enforce.extauthz.v1.OkHttpResponseb\x06proto3'
+)
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
-_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'ext_authz_pb2', _globals)
+_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, "ext_authz_pb2", _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
-  DESCRIPTOR._loaded_options = None
-  _globals['_HTTPREQUEST_HEADERSENTRY']._loaded_options = None
-  _globals['_HTTPREQUEST_HEADERSENTRY']._serialized_options = b'8\001'
-  _globals['_SOCKETADDRESS']._serialized_start=48
-  _globals['_SOCKETADDRESS']._serialized_end=100
-  _globals['_ADDRESS']._serialized_start=102
-  _globals['_ADDRESS']._serialized_end=179
-  _globals['_PEER']._serialized_start=181
-  _globals['_PEER']._serialized_end=261
-  _globals['_TLSSESSION']._serialized_start=263
-  _globals['_TLSSESSION']._serialized_end=288
-  _globals['_HTTPREQUEST']._serialized_start=291
-  _globals['_HTTPREQUEST']._serialized_end=530
-  _globals['_HTTPREQUEST_HEADERSENTRY']._serialized_start=484
-  _globals['_HTTPREQUEST_HEADERSENTRY']._serialized_end=530
-  _globals['_REQUEST']._serialized_start=532
-  _globals['_REQUEST']._serialized_end=597
-  _globals['_ATTRIBUTECONTEXT']._serialized_start=600
-  _globals['_ATTRIBUTECONTEXT']._serialized_end=842
-  _globals['_CHECKREQUEST']._serialized_start=844
-  _globals['_CHECKREQUEST']._serialized_end=925
-  _globals['_HEADERVALUE']._serialized_start=927
-  _globals['_HEADERVALUE']._serialized_end=968
-  _globals['_HEADERVALUEOPTION']._serialized_start=970
-  _globals['_HEADERVALUEOPTION']._serialized_end=1047
-  _globals['_HTTPSTATUS']._serialized_start=1049
-  _globals['_HTTPSTATUS']._serialized_end=1075
-  _globals['_STATUS']._serialized_start=1077
-  _globals['_STATUS']._serialized_end=1116
-  _globals['_OKHTTPRESPONSE']._serialized_start=1118
-  _globals['_OKHTTPRESPONSE']._serialized_end=1199
-  _globals['_DENIEDHTTPRESPONSE']._serialized_start=1202
-  _globals['_DENIEDHTTPRESPONSE']._serialized_end=1358
-  _globals['_CHECKRESPONSE']._serialized_start=1361
-  _globals['_CHECKRESPONSE']._serialized_end=1569
+    DESCRIPTOR._loaded_options = None
+    _globals["_HTTPREQUEST_HEADERSENTRY"]._loaded_options = None
+    _globals["_HTTPREQUEST_HEADERSENTRY"]._serialized_options = b"8\001"
+    _globals["_SOCKETADDRESS"]._serialized_start = 48
+    _globals["_SOCKETADDRESS"]._serialized_end = 100
+    _globals["_ADDRESS"]._serialized_start = 102
+    _globals["_ADDRESS"]._serialized_end = 179
+    _globals["_PEER"]._serialized_start = 181
+    _globals["_PEER"]._serialized_end = 261
+    _globals["_TLSSESSION"]._serialized_start = 263
+    _globals["_TLSSESSION"]._serialized_end = 288
+    _globals["_HTTPREQUEST"]._serialized_start = 291
+    _globals["_HTTPREQUEST"]._serialized_end = 530
+    _globals["_HTTPREQUEST_HEADERSENTRY"]._serialized_start = 484
+    _globals["_HTTPREQUEST_HEADERSENTRY"]._serialized_end = 530
+    _globals["_REQUEST"]._serialized_start = 532
+    _globals["_REQUEST"]._serialized_end = 597
+    _globals["_ATTRIBUTECONTEXT"]._serialized_start = 600
+    _globals["_ATTRIBUTECONTEXT"]._serialized_end = 842
+    _globals["_CHECKREQUEST"]._serialized_start = 844
+    _globals["_CHECKREQUEST"]._serialized_end = 925
+    _globals["_HEADERVALUE"]._serialized_start = 927
+    _globals["_HEADERVALUE"]._serialized_end = 968
+    _globals["_HEADERVALUEOPTION"]._serialized_start = 970
+    _globals["_HEADERVALUEOPTION"]._serialized_end = 1047
+    _globals["_HTTPSTATUS"]._serialized_start = 1049
+    _globals["_HTTPSTATUS"]._serialized_end = 1075
+    _globals["_STATUS"]._serialized_start = 1077
+    _globals["_STATUS"]._serialized_end = 1116
+    _globals["_OKHTTPRESPONSE"]._serialized_start = 1118
+    _globals["_OKHTTPRESPONSE"]._serialized_end = 1199
+    _globals["_DENIEDHTTPRESPONSE"]._serialized_start = 1202
+    _globals["_DENIEDHTTPRESPONSE"]._serialized_end = 1358
+    _globals["_CHECKRESPONSE"]._serialized_start = 1361
+    _globals["_CHECKRESPONSE"]._serialized_end = 1569
 # @@protoc_insertion_point(module_scope)

@@ -48,12 +48,56 @@ elif grep -q "egress-blocked" <<<"$airgap_out"; then
   echo "PASS: egress blocked by the security group, with the internet one hop away."
 fi
 
-# Recorded rather than asserted. Link-local is not governed by security-group
-# egress rules, so this is a limit of the mode rather than a regression — see
-# the README. It is printed every run so it cannot quietly become normal.
-if grep -q "imds-reached" <<<"$airgap_out"; then
-  echo "NOTE: IMDS was reachable. Security groups do not govern link-local, so"
-  echo "      'nothing leaves the perimeter' does not cover 169.254.169.254."
+# Asserted since the 2026-08-14 finding. Link-local is not governed by
+# security-group egress rules, so the probe carries its own IMDS hardening
+# (tokens required, hop limit 1) and this checks it held: v1 dead on the probe,
+# alive on the control (proving the check can see it), and the host token path
+# intact (cloud-init fetched this probe through it — a fix that kills it kills
+# the boot contract).
+# The liveness baseline is the token path, not tokenless v1: AL2023 AMIs
+# default to tokens-required, so v1 is refused on the *control* too (measured
+# 2026-08-17 — the 08-14 "imds-reached" was a 401 answering, not credentials
+# moving). A control that can mint a token proves IMDS is alive and the
+# refusals below are enforcement rather than a broken endpoint.
+if ! grep -q "imdsv2-host-token-ok" <<<"$control_out"; then
+  echo "FAIL: the control could not mint an IMDSv2 token. IMDS itself is not"
+  echo "      answering here, so the refusals below prove nothing."
+  fail=1
 fi
+
+if grep -q "imdsv1-reached" <<<"$airgap_out"; then
+  echo "FAIL: tokenless IMDSv1 answered on the hardened instance."
+  fail=1
+elif grep -q "imdsv1-blocked" <<<"$airgap_out"; then
+  echo "PASS: tokenless IMDSv1 refused on the hardened instance."
+fi
+
+if grep -q "imdsv2-host-token-failed" <<<"$airgap_out"; then
+  echo "NOTE: the host could not mint an IMDSv2 token, yet this output arrived,"
+  echo "      so user_data was delivered. Something is odd — look before trusting."
+fi
+
+# The hop limit cannot be measured from a bare host (it constrains the response
+# crossing a routed hop, and the probe has no container runtime), so observe the
+# applied configuration from outside the instance instead of trusting the plan.
+mo_tokens=$(aws ec2 describe-instances --instance-ids "$airgap" \
+  --query 'Reservations[0].Instances[0].MetadataOptions.HttpTokens' --output text)
+mo_hops=$(aws ec2 describe-instances --instance-ids "$airgap" \
+  --query 'Reservations[0].Instances[0].MetadataOptions.HttpPutResponseHopLimit' --output text)
+if [ "$mo_tokens" = "required" ] && [ "$mo_hops" = "1" ]; then
+  echo "PASS: applied MetadataOptions are HttpTokens=required, HopLimit=1."
+else
+  echo "FAIL: applied MetadataOptions are HttpTokens=$mo_tokens, HopLimit=$mo_hops"
+  echo "      — the IMDS hardening did not reach the instance."
+  fail=1
+fi
+
+# The visible delta on AL2023, printed every run: the AMI default hop limit is
+# 2 (one routed hop — a container — still reaches IMDS), and tokens-required
+# is the AMI's choice rather than ours. The hardened instance pins both, so a
+# different AMI cannot silently take them away.
+ctl_hops=$(aws ec2 describe-instances --instance-ids "$control" \
+  --query 'Reservations[0].Instances[0].MetadataOptions.HttpPutResponseHopLimit' --output text)
+echo "note: control (AMI defaults) hop limit is $ctl_hops; the hardened instance pins 1."
 
 exit "$fail"

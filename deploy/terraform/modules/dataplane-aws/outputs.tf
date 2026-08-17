@@ -17,6 +17,24 @@ output "reaches_control_plane" {
   value       = length(var.control_plane_cidrs) > 0
 }
 
+output "required_metadata_options" {
+  description = <<-EOT
+    Merge into the metadata_options of every instance or launch template that
+    attaches these security groups. Security groups do not govern link-local
+    traffic, so nothing this module provisions stands between a compromised
+    MCP server and 169.254.169.254 — on a profiled instance, a credential
+    endpoint (measured, not assumed: deploy/test-harness, 2026-08-14 run).
+    Tokens-required kills tokenless IMDSv1; hop limit 1 keeps responses from
+    crossing a routed hop, so containerised workloads never see them. Set
+    http_endpoint = "disabled" instead wherever the workload does not boot by
+    user_data and holds no role worth stealing.
+  EOT
+  value = {
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+}
+
 output "egress_summary" {
   description = "Every destination this data plane may reach, for review and evidence."
   value = {

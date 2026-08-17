@@ -1,0 +1,22 @@
+packages/unified-enforce/src/unified_enforce/extauthz.py
+  s_d31028edbe4e78::t_ac5f37e13c64ef 207-208
+packages/unified-enforce/src/unified_enforce/identity.py
+  s_d31028edbe4e78::t_502ad271a7f86f 80-84
+  s_d31028edbe4e78::t_7e455226a277de 110-111,113-114,117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "257b8355cb3d02559da1c405ac857f050267dae4",
+  "prompts": {},
+  "sessions": {
+    "s_d31028edbe4e78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4ce99bc6-760b-492c-b500-42802c58576e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

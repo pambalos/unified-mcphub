@@ -42,9 +42,10 @@ def _utcnow_iso() -> str:
 #:               a bearer token it issued, or a sidecar's own enrolment
 #:               credential. Proven to the strength of that secret.
 #: `attested`  — from a workload attestation: a SPIFFE SVID, an mTLS client
-#:               certificate, a cloud instance identity document. Nothing
-#:               produces this yet, and the value exists so that adding it later
-#:               is a change of *value* rather than a change of shape.
+#:               certificate, a cloud instance identity document. Produced by
+#:               the gateway when the principal came from an mTLS SAN
+#:               (ExtAuthzCore.resolve_principal); a verified OIDC bearer is
+#:               `derived` — a JWT is a bearer secret, not a channel.
 Attestation = Literal["assigned", "derived", "attested"]
 
 

@@ -31,6 +31,10 @@ otel = [
     "opentelemetry-sdk>=1.25.0",
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
 ]
+identity = [
+    "pyjwt>=2.8.0",        # OIDC bearer verification (integrate with identity vendors)
+    "cryptography>=42.0.0",
+]
 gateway = [
     "fastapi>=0.110.0",   # ext_authz HTTP transport (E3)
     "uvicorn>=0.28.0",

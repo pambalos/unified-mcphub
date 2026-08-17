@@ -24,8 +24,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from .action import Action, ActionContext, Principal
+from .action import Action, ActionContext, Attestation, Principal
 from .enforcer import Enforcer
+from .identity import OIDCValidator
 from .policy import Decision, Verdict
 
 PRINCIPAL_HEADER = "x-unified-principal"
@@ -71,7 +72,7 @@ class BodyInspection:
 class CheckInput:
     """The attributes of one intercepted request, however the transport got them."""
 
-    principal_id: str  # from mTLS SAN, sidecar identity, or PRINCIPAL_HEADER
+    principal_id: str  # from mTLS SAN, OIDC subject, sidecar identity, or PRINCIPAL_HEADER
     method: str
     host: str
     path: str  # includes query string if any
@@ -81,6 +82,11 @@ class CheckInput:
     # Envoy's declared full request size. None when the transport cannot know
     # it; a value larger than len(body) means Envoy truncated the body.
     body_size: int | None = None
+    # How principal_id was established — resolve_principal() fills both. A
+    # non-None identity_problem means a credential was PRESENTED and failed
+    # verification, which is a structural deny, not a fall-through.
+    attestation: Attestation = "assigned"
+    identity_problem: str | None = None
 
 
 @dataclass
@@ -100,6 +106,7 @@ class ConnInput:
     destination_port: int
     source_address: str | None = None
     sni: str | None = None
+    attestation: Attestation = "assigned"  # "attested" when the id is an mTLS SAN
 
 
 @dataclass
@@ -115,6 +122,13 @@ class CheckResult:
 def _trace_ids(headers: dict[str, str]) -> tuple[str | None, str | None]:
     m = _TRACEPARENT.match(headers.get("traceparent", ""))
     return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def bearer_of(headers: dict[str, str]) -> str | None:
+    """The bearer token from an `authorization` header, if one is present."""
+    value = headers.get("authorization", "")
+    scheme, _, token = value.partition(" ")
+    return token.strip() or None if scheme.lower() == "bearer" else None
 
 
 class ExtAuthzCore:
@@ -141,24 +155,61 @@ class ExtAuthzCore:
         default_principal: str = "agent:unknown",
         trust_principal_header: bool = True,
         body_inspection: BodyInspection | None = None,
+        oidc: OIDCValidator | None = None,
     ) -> None:
         self._enforcer = enforcer
         self._default_principal = default_principal
         self._trust_principal_header = trust_principal_header
         self._body = body_inspection
+        self._oidc = oidc
 
     def principal_for(self, *, mtls: str | None = None, header: str | None = None) -> str:
-        """Resolve the acting principal: mTLS identity > header > default.
+        """Back-compat shim over resolve_principal — id only, provenance dropped."""
+        return self.resolve_principal(mtls=mtls, header=header)[0]
 
-        An mTLS SAN (e.g. `spiffe://cluster.local/ns/prod/sa/crew-1`) is passed
-        through verbatim — policy globs match SPIFFE paths directly, and any
-        rewrite here would be lossy guesswork.
+    def resolve_principal(
+        self,
+        *,
+        mtls: str | None = None,
+        bearer: str | None = None,
+        header: str | None = None,
+    ) -> tuple[str, Attestation, str | None]:
+        """Resolve the acting principal and how it was established.
+
+        Returns (id, attestation, problem). Precedence is by strength of
+        proof, not by configuration order:
+
+        - mTLS SAN → `attested`. Possession of a channel; a SPIFFE ID (e.g.
+          `spiffe://cluster.local/ns/prod/sa/crew-1`) passes through verbatim —
+          policy globs match SPIFFE paths directly, and any rewrite here would
+          be lossy guesswork.
+        - OIDC bearer, verified → `derived`. Proven to the strength of a
+          bearer secret — real proof, weaker than a channel, which is why the
+          SAN outranks it even when both are present.
+        - PRINCIPAL_HEADER / default → `assigned`. Deployment position.
+
+        `problem` is non-None when a bearer was PRESENTED and failed
+        verification (or was presented with no validator configured). That is
+        not a fall-through to the weaker identities: a caller waving a bad
+        credential must not end up quietly enforced as `agent:unknown` — the
+        caller records a structural deny with the problem string instead.
         """
         if mtls:
-            return mtls
+            return mtls, "attested", None
+        if bearer:
+            if self._oidc is None:
+                return (
+                    self._default_principal,
+                    "assigned",
+                    "bearer presented but no oidc configured",
+                )
+            identity, problem = self._oidc.verify(bearer)
+            if identity is None:
+                return self._default_principal, "assigned", problem or "token invalid"
+            return identity.principal_id, "derived", None
         if header and self._trust_principal_header:
-            return header
-        return self._default_principal
+            return header, "assigned", None
+        return self._default_principal, "assigned", None
 
     def _read_body(self, req: CheckInput) -> tuple[dict[str, Any], str | None]:
         """Parse the request body into params. Returns (params, problem).
@@ -206,15 +257,17 @@ class ExtAuthzCore:
         claimed = req.headers.get(CORRELATION_HEADER)
         if claimed and _DIGEST.match(claimed):
             extra["sdk_action_claimed"] = claimed
+        if req.identity_problem is not None:
+            extra["identity"] = req.identity_problem
         action = Action.build(
             principal=Principal(
                 id=req.principal_id,
-                # Stamped by the gateway from deployment position. UAI-137 made
-                # sure an agent cannot set this header itself, which stops it
-                # *asserting* an identity and does not *establish* one: the
-                # claim is exactly as good as the customer's pod topology, and
-                # several agents behind one sidecar necessarily share it.
-                attestation="assigned",
+                # From resolve_principal(): "attested" for an mTLS SAN,
+                # "derived" for a verified OIDC bearer, "assigned" for a
+                # stamped header or deployment default. UAI-137 stops an agent
+                # *asserting* an identity, which is not the same as
+                # establishing one — this field records which happened.
+                attestation=req.attestation,
             ),
             tool=f"{req.scheme}://{req.host}{req.path}",
             verb=req.method.lower(),
@@ -224,7 +277,21 @@ class ExtAuthzCore:
                 origin="gateway", trace_id=trace_id, span_id=span_id, extra=extra
             ),
         )
-        if problem is not None and self._body is not None and self._body.on_unreadable == "deny":
+        if req.identity_problem is not None:
+            # A presented credential that fails verification must not fall
+            # through to be enforced as the weaker identity it fell back to —
+            # that would let an expired token quietly become agent:unknown's
+            # rules. Recorded through the enforcer like every other verdict.
+            decision = self._enforcer.record(
+                action,
+                Decision(
+                    verdict=Verdict.DENY,
+                    rule_id=None,
+                    source="identity_invalid",
+                    reason=req.identity_problem,
+                ),
+            )
+        elif problem is not None and self._body is not None and self._body.on_unreadable == "deny":
             # Short-circuit: params-dependent rules cannot be evaluated, so no
             # ALLOW here would be trustworthy. Recorded through the enforcer so
             # it is chained and traced exactly like a policy verdict.
@@ -281,7 +348,7 @@ class ExtAuthzCore:
         if conn.sni:
             params["sni"] = conn.sni
         action = Action.build(
-            principal=Principal(id=conn.principal_id, attestation="assigned"),
+            principal=Principal(id=conn.principal_id, attestation=conn.attestation),
             tool=f"tcp://{conn.destination_address}:{conn.destination_port}",
             verb="connect",
             resource="*",
@@ -329,9 +396,14 @@ def create_http_service(core: ExtAuthzCore) -> Any:
         if request.url.query:
             full_path += "?" + request.url.query
         body = await request.body()
+        principal_id, attestation, identity_problem = core.resolve_principal(
+            bearer=bearer_of(headers), header=headers.get(PRINCIPAL_HEADER)
+        )
         result = core.check(
             CheckInput(
-                principal_id=core.principal_for(header=headers.get(PRINCIPAL_HEADER)),
+                principal_id=principal_id,
+                attestation=attestation,
+                identity_problem=identity_problem,
                 method=request.method,
                 host=headers.get("x-forwarded-host") or headers.get("host", ""),
                 path=full_path,

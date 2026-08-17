@@ -1,0 +1,36 @@
+packages/unified-enforce/src/unified_enforce/extauthz.py
+  s_d31028edbe4e78::t_8425c375fa8ff2 351
+  s_d31028edbe4e78::t_edafb287dadcaf 27,29
+  s_d31028edbe4e78::t_b3de61ef901b98 399-401,404-406
+  s_d31028edbe4e78::t_e118133b20752a 109
+  s_d31028edbe4e78::t_fe8336a9f7f94d 158,164,167-168,170-195,198-200,202-203,206-209,211-212
+  s_d31028edbe4e78::t_20c0e49f58f0a8 127-133
+  s_d31028edbe4e78::t_de2d8261e32afa 260-261,265-270,280-294
+  s_d31028edbe4e78::t_bee2db69f982e0 75,85-89
+packages/unified-enforce/tests/unit/test_enforce_identity.py
+  s_d31028edbe4e78::t_b6e83fda743ea9 1-188
+packages/unified-enforce/src/unified_enforce/action.py
+  s_d31028edbe4e78::t_0b35749da2b071 45-48
+packages/unified-enforce/src/unified_enforce/identity.py
+  s_d31028edbe4e78::t_5ef3195cad2da2 1-143
+packages/unified-enforce/src/unified_enforce/extauthz_grpc.py
+  s_d31028edbe4e78::t_271410079ff4a4 34-41
+  s_d31028edbe4e78::t_f15b845105a830 59-63,65-67
+  s_d31028edbe4e78::t_2995e3260985c3 95,97-98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "4a0d93a1e2a171371a9493e02f0e08b4680a92f5",
+  "prompts": {},
+  "sessions": {
+    "s_d31028edbe4e78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4ce99bc6-760b-492c-b500-42802c58576e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

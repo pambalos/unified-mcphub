@@ -77,10 +77,11 @@ class OIDCValidator:
         self._static_keys: dict[str, Any] | None = None
         self._jwks_client: Any = None
         if jwks is not None:
-            if isinstance(jwks, (str, Path)):
-                jwks = json.loads(Path(jwks).read_text())
-            self._static_keys = self._index_jwks(jwks)
-        else:
+            jwks_dict: dict[str, Any] = (
+                json.loads(Path(jwks).read_text()) if isinstance(jwks, (str, Path)) else jwks
+            )
+            self._static_keys = self._index_jwks(jwks_dict)
+        elif jwks_uri is not None:
             from jwt import PyJWKClient
 
             # Constructed eagerly so the first fetch happens at startup, where
@@ -106,12 +107,14 @@ class OIDCValidator:
 
         if self._jwks_client is not None:
             return self._jwks_client.get_signing_key_from_jwt(token).key
+        keys = self._static_keys
+        assert keys is not None  # ctor guarantees exactly one key source
         kid = jwt.get_unverified_header(token).get("kid")
-        key = self._static_keys.get(kid) if kid else None
-        if key is None and len(self._static_keys) == 1:
+        key = keys.get(kid) if kid else None
+        if key is None and len(keys) == 1:
             # A single-key JWKS may serve tokens with no kid; ambiguity only
             # exists when there is more than one key to be ambiguous between.
-            key = next(iter(self._static_keys.values()))
+            key = next(iter(keys.values()))
         if key is None:
             raise jwt.InvalidTokenError(f"no key for kid={kid!r}")
         return key.key

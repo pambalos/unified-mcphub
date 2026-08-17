@@ -204,8 +204,8 @@ class ExtAuthzCore:
                     "bearer presented but no oidc configured",
                 )
             identity, problem = self._oidc.verify(bearer)
-            if problem is not None:
-                return self._default_principal, "assigned", problem
+            if identity is None:
+                return self._default_principal, "assigned", problem or "token invalid"
             return identity.principal_id, "derived", None
         if header and self._trust_principal_header:
             return header, "assigned", None

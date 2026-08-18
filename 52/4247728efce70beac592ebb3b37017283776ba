@@ -1,0 +1,29 @@
+packages/unified-enforce/src/unified_enforce/policy.py
+  s_282789b416b827::t_3d5c5fc1db8c63 16-17
+  s_282789b416b827::t_0bb8a995f13675 144-150
+  s_282789b416b827::t_7db4fad742dbd8 299-304
+  s_282789b416b827::t_5d6aa10ff5f3a4 372
+packages/unified-mcphub/src/unified_mcphub/authz.py
+  s_282789b416b827::t_33cd4069a43385 173-178
+  s_282789b416b827::t_c43170e0bbcdcc 43
+  s_282789b416b827::t_2cdfa48a3e19b7 143
+  s_282789b416b827::t_520be4386206f6 44-78
+packages/unified-mcphub/tests/unit/test_deployment_profile.py
+  s_282789b416b827::t_e9b3b8b0731248 1-176
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "524247728efce70beac592ebb3b37017283776ba",
+  "prompts": {},
+  "sessions": {
+    "s_282789b416b827": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "04876425-0a75-444e-9d0a-3bd7a976f4d3",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

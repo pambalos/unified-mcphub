@@ -499,7 +499,23 @@ class Hub:
             return
         # Cancellation on stop() propagates out of awatch and ends this task cleanly.
         async for _ in awatch(*watched):
-            await self._reload()
+            # Deployment security profile (UAI-216): only `hot` reload auto-applies
+            # a policy file change. Under `manual`/`approval` (the default in a
+            # `locked` deployment) a detected change is NOT silently applied — the
+            # enforcement plane must not be edited into an open door in production.
+            # The pending change is logged; an operator applies it out-of-band
+            # (restart, or an explicit reload signal / approval — follow-up work).
+            mode = self.config.hub.deployment.effective_reload_mode()
+            if mode == "hot":
+                await self._reload()
+            else:
+                logger.warning(
+                    "policy/config change detected but not applied "
+                    "(deployment.reload_mode=%s, policy_protection=%s); "
+                    "restart or an explicit reload is required to apply it",
+                    mode,
+                    self.config.hub.deployment.policy_protection,
+                )
 
     async def _reload(self) -> None:
         try:

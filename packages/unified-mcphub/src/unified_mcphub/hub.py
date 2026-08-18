@@ -635,9 +635,7 @@ class Hub:
         old_rules = list(self.config.workspace.authz.rules)
         ok = await self._reload()
         after = _config_hash(self.config)
-        broadening = (
-            policy_broadening(old_rules, self.config.workspace.authz.rules) if ok else []
-        )
+        broadening = policy_broadening(old_rules, self.config.workspace.authz.rules) if ok else []
         if broadening:
             # Surfaced, not buried: the reviewer sees exactly what this reload
             # granted that was not granted before (UAI-216).

@@ -47,6 +47,7 @@ from .config import (
     mcphub_home,
     workspace_local_path,
 )
+from .policy_diff import policy_broadening
 from .redaction import Redactor
 from .secrets import SecretsKeyError, SecretsStore
 from .supervisor import SupervisedServer
@@ -58,6 +59,43 @@ from .util import now_iso, secure_write
 logger = logging.getLogger(__name__)
 
 BUILTIN_SERVER = "built-in"
+
+
+class PolicyDirWritableError(RuntimeError):
+    """Raised at boot when `deployment.require_protected_config_dir` is set and
+    the policy directory is writable by the account the servers run as."""
+
+
+def _euid_label() -> str:
+    """The effective uid as a string, or a portable placeholder off POSIX.
+
+    `os.geteuid` does not exist on Windows; the permission check itself
+    (`os.access`) is cross-platform, so only this diagnostic needs guarding.
+    """
+    getter = getattr(os, "geteuid", None)
+    return f"uid {getter()}" if getter is not None else "this process's account"
+
+
+def check_policy_dir_permissions(deployment, home) -> None:
+    """Report — or, when asked, refuse — a locked deployment whose policy dir the
+    account the servers run as can still write. Module-level so it is testable
+    without standing up a hub. See `Hub._check_policy_dir_permissions`.
+    """
+    if not deployment.is_locked or not os.access(home, os.W_OK):
+        return
+    detail = (
+        f"policy_protection=locked but {home} is writable by {_euid_label()}, the account "
+        "the MCP servers also run as; the policy-layer protections are defence in depth and "
+        "a symlink race or a shell redirection can still get through. Run the servers as a "
+        "separate account or mount this directory read-only for them "
+        "(docs/deployment-security.md)."
+    )
+    if deployment.require_protected_config_dir:
+        # Opt-in: the operator declared the OS boundary a precondition, so a
+        # writable dir is a misconfiguration to fix before serving, not a
+        # warning to serve through.
+        raise PolicyDirWritableError(detail)
+    logger.warning(detail)
 
 
 def _config_hash(config: Config) -> str:
@@ -193,7 +231,7 @@ class Hub:
 
     async def start(self) -> None:
         mcphub_home().mkdir(parents=True, exist_ok=True)
-        self._warn_if_policy_dir_is_agent_writable()
+        self._check_policy_dir_permissions()
         self.audit.start()
         self.builtins.load_user_tools(mcphub_home() / "tools")
         self._gate_secrets()
@@ -521,8 +559,9 @@ class Hub:
             # a policy file change. Under `manual`/`approval` (the default in a
             # `locked` deployment) a detected change is NOT silently applied — the
             # enforcement plane must not be edited into an open door in production.
-            # The pending change is logged; an operator applies it out-of-band
-            # (restart, or an explicit reload signal / approval — follow-up work).
+            # The pending change is logged; an operator applies it explicitly with
+            # `unified-mcphub reload` (the POST /reload control endpoint), which is
+            # the human-in-the-loop step `approval` names.
             mode = self.config.hub.deployment.effective_reload_mode()
             if mode == "hot":
                 await self._reload()
@@ -530,14 +569,14 @@ class Hub:
                 logger.warning(
                     "policy/config change detected but not applied "
                     "(deployment.reload_mode=%s, policy_protection=%s); "
-                    "restart or an explicit reload is required to apply it",
+                    "run `unified-mcphub reload` to apply it once you have reviewed it",
                     mode,
                     self.config.hub.deployment.policy_protection,
                 )
 
-    def _warn_if_policy_dir_is_agent_writable(self) -> None:
-        """In `locked`, say so when the policy directory is still writable by
-        the account the servers run as.
+    def _check_policy_dir_permissions(self) -> None:
+        """In `locked`, report — or, when asked, refuse — a policy directory the
+        account the servers run as can still write.
 
         The constitutional denies and reload-gating are checks on a path
         *string*, decided before the write and inspected again by the kernel
@@ -547,23 +586,14 @@ class Hub:
         is filesystem permissions: run the servers as an account that cannot
         write this directory, or mount it read-only into their namespace.
 
-        Advisory, not fatal. Refusing to boot would strand every deployment
-        that is locked and correct in every other respect, and a hub that will
-        not start protects nothing. See docs/deployment-security.md.
+        Advisory by default: refusing to boot would strand a deployment that is
+        locked and correct in every other respect, and a hub that will not start
+        protects nothing. A deployment that wants the OS boundary treated as a
+        hard precondition sets `deployment.require_protected_config_dir: true`,
+        which turns the warning into a boot refusal. See
+        docs/deployment-security.md.
         """
-        if not self.config.hub.deployment.is_locked:
-            return
-        home = mcphub_home()
-        if os.access(home, os.W_OK):
-            logger.warning(
-                "policy_protection=locked but %s is writable by uid %s, the account the "
-                "MCP servers also run as; the policy-layer protections are defence in depth "
-                "and a symlink race or a shell redirection can still get through. Run the "
-                "servers as a separate account or mount this directory read-only for them "
-                "(docs/deployment-security.md).",
-                home,
-                os.geteuid(),
-            )
+        check_policy_dir_permissions(self.config.hub.deployment, mcphub_home())
 
     def _canonical_path_args(self, server_name: str, args: dict) -> dict:
         """Rewrite a server's declared path arguments to their canonical form.
@@ -591,12 +621,43 @@ class Hub:
                     out[name] = resolved
         return out
 
-    async def _reload(self) -> None:
+    async def reload_now(self) -> dict:
+        """Apply the on-disk config now, on an operator's explicit command.
+
+        This is the sanctioned way to apply a policy change in a `locked`
+        deployment without a restart (UAI-216): file-watch reload is gated to
+        never auto-apply under `manual`/`approval`, but an operator who has
+        reviewed the change triggers it here — the human-in-the-loop step the
+        `approval` mode names. The deployment profile is still pinned at boot;
+        this re-reads everything else. Returns a small summary of the result.
+        """
+        before = _config_hash(self.config)
+        old_rules = list(self.config.workspace.authz.rules)
+        ok = await self._reload()
+        after = _config_hash(self.config)
+        broadening = policy_broadening(old_rules, self.config.workspace.authz.rules) if ok else []
+        if broadening:
+            # Surfaced, not buried: the reviewer sees exactly what this reload
+            # granted that was not granted before (UAI-216).
+            logger.warning(
+                "reload broadens policy — %d new allow grant(s): %s",
+                len(broadening),
+                ", ".join(f"{b.tool} for {b.callers or 'any principal'}" for b in broadening),
+            )
+        return {
+            "applied": ok,
+            "changed": ok and before != after,
+            "servers": list(self.servers),
+            "reload_mode": self.config.hub.deployment.effective_reload_mode(),
+            "broadening": [b.as_dict() for b in broadening],
+        }
+
+    async def _reload(self) -> bool:
         try:
             new = load_config(self.config.workspace_name)
         except Exception as exc:  # noqa: BLE001 - spec §8: any validation failure keeps prior config
             logger.error("config reload failed; keeping prior config: %s", exc)
-            return
+            return False
         # The deployment security profile is fixed at boot and is NOT re-read
         # here (UAI-216). It describes how this process was deployed, not what
         # the config file currently says — otherwise the one control protecting
@@ -625,6 +686,7 @@ class Hub:
         self._write_canonical_truth()
         self._publish_discovery()
         logger.info("config reloaded: servers=%s", list(self.servers))
+        return True
 
     async def _apply_server_diff(self, desired: dict) -> None:
         # A disabled server is treated like an absent one: stop it if running,

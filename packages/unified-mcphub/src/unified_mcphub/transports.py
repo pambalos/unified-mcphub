@@ -103,6 +103,19 @@ def build_app(hub) -> Starlette:
 
         return StreamingResponse(events(), media_type="text/event-stream")
 
+    async def reload_endpoint(request: Request) -> Response:
+        # Operator control surface, localhost-only like the approval routes. In a
+        # `locked` deployment this is how a reviewed policy change is applied
+        # without a restart (UAI-216): file-watch never auto-applies under
+        # manual/approval, and this is the explicit human trigger. An agent
+        # gains nothing by reaching it — in `locked` it cannot write the policy
+        # file in the first place, so there is no staged change of its own to apply.
+        caller, _ = _authenticate(request, hub)
+        if caller is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        result = await hub.reload_now()
+        return JSONResponse(result)
+
     async def approvals_decision(request: Request) -> Response:
         caller, _ = _authenticate(request, hub)
         if caller is None:
@@ -128,6 +141,7 @@ def build_app(hub) -> Starlette:
             Route("/approvals/pending", approvals_pending, methods=["GET"]),
             Route("/approvals/stream", approvals_stream, methods=["GET"]),
             Route("/approvals/decision", approvals_decision, methods=["POST"]),
+            Route("/reload", reload_endpoint, methods=["POST"]),
         ]
     )
 

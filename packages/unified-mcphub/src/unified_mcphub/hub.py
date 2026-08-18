@@ -558,8 +558,9 @@ class Hub:
             # a policy file change. Under `manual`/`approval` (the default in a
             # `locked` deployment) a detected change is NOT silently applied — the
             # enforcement plane must not be edited into an open door in production.
-            # The pending change is logged; an operator applies it out-of-band
-            # (restart, or an explicit reload signal / approval — follow-up work).
+            # The pending change is logged; an operator applies it explicitly with
+            # `unified-mcphub reload` (the POST /reload control endpoint), which is
+            # the human-in-the-loop step `approval` names.
             mode = self.config.hub.deployment.effective_reload_mode()
             if mode == "hot":
                 await self._reload()
@@ -567,7 +568,7 @@ class Hub:
                 logger.warning(
                     "policy/config change detected but not applied "
                     "(deployment.reload_mode=%s, policy_protection=%s); "
-                    "restart or an explicit reload is required to apply it",
+                    "run `unified-mcphub reload` to apply it once you have reviewed it",
                     mode,
                     self.config.hub.deployment.policy_protection,
                 )
@@ -619,12 +620,32 @@ class Hub:
                     out[name] = resolved
         return out
 
-    async def _reload(self) -> None:
+    async def reload_now(self) -> dict:
+        """Apply the on-disk config now, on an operator's explicit command.
+
+        This is the sanctioned way to apply a policy change in a `locked`
+        deployment without a restart (UAI-216): file-watch reload is gated to
+        never auto-apply under `manual`/`approval`, but an operator who has
+        reviewed the change triggers it here — the human-in-the-loop step the
+        `approval` mode names. The deployment profile is still pinned at boot;
+        this re-reads everything else. Returns a small summary of the result.
+        """
+        before = _config_hash(self.config)
+        ok = await self._reload()
+        after = _config_hash(self.config)
+        return {
+            "applied": ok,
+            "changed": ok and before != after,
+            "servers": list(self.servers),
+            "reload_mode": self.config.hub.deployment.effective_reload_mode(),
+        }
+
+    async def _reload(self) -> bool:
         try:
             new = load_config(self.config.workspace_name)
         except Exception as exc:  # noqa: BLE001 - spec §8: any validation failure keeps prior config
             logger.error("config reload failed; keeping prior config: %s", exc)
-            return
+            return False
         # The deployment security profile is fixed at boot and is NOT re-read
         # here (UAI-216). It describes how this process was deployed, not what
         # the config file currently says — otherwise the one control protecting
@@ -653,6 +674,7 @@ class Hub:
         self._write_canonical_truth()
         self._publish_discovery()
         logger.info("config reloaded: servers=%s", list(self.servers))
+        return True
 
     async def _apply_server_diff(self, desired: dict) -> None:
         # A disabled server is treated like an absent one: stop it if running,

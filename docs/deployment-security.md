@@ -82,9 +82,13 @@ is writable by the account the servers run as — for an operator who would rath
 fail to start than serve with the real boundary missing. Off by default, for the
 reason above.
 
+Under `manual`/`approval`, a detected change is logged and an operator applies
+it with `unified-mcphub reload` (the `POST /reload` control endpoint) once they
+have reviewed it — the human-in-the-loop step `approval` names, without a
+restart. The deployment profile itself is still pinned at boot and is not
+re-read even by an explicit reload.
+
 ## Still open
 
-- `manual`/`approval` reload currently log the pending change; wiring an
-  explicit reload signal and an approval-queue application is follow-up work.
 - Self-broadening *content* analysis — an agent that may propose policy but not
   grant itself allow — belongs with the Layer-2 policy-diff detector.

@@ -256,6 +256,39 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reload(args: argparse.Namespace) -> int:
+    """Apply the on-disk config to the running hub without a restart.
+
+    In a `locked` deployment, file-watch never auto-applies a policy change
+    under manual/approval; this is the explicit operator apply (UAI-216). Talks
+    to the hub over its trusted unix socket, so it needs no token.
+    """
+    import httpx
+
+    from unified_mcphub.endpoints import socket_path
+
+    sock = socket_path(load_hub_config())
+    if sock is None or not sock.exists():
+        print(f"hub is not running (no control socket at {sock})", file=sys.stderr)
+        return 1
+    try:
+        with httpx.Client(transport=httpx.HTTPTransport(uds=str(sock))) as client:
+            resp = client.post("http://localhost/reload", headers={"X-Caller-Id": "cli"})
+    except httpx.HTTPError as exc:
+        print(f"cannot reach the hub: {exc}", file=sys.stderr)
+        return 1
+    if resp.status_code != 200:
+        print(f"reload refused ({resp.status_code}): {resp.text}", file=sys.stderr)
+        return 1
+    result = resp.json()
+    if not result.get("applied"):
+        print("reload failed; the hub kept its prior config (see hub logs)", file=sys.stderr)
+        return 1
+    state = "changes applied" if result.get("changed") else "already up to date"
+    print(f"reloaded: {state}; servers={result.get('servers')}")
+    return 0
+
+
 def cmd_audit(args: argparse.Namespace) -> int:
     directory = audit_dir()
     cmd = args.audit_command
@@ -486,6 +519,12 @@ def build_parser() -> argparse.ArgumentParser:
         ("list-packs", "list rule packs"),
     ):
         sub.add_parser(name, help=help_text).set_defaults(func=cmd_list)
+
+    sub.add_parser(
+        "reload",
+        help="apply the on-disk config to the running hub without a restart "
+        "(locked deployments: apply a reviewed policy change)",
+    ).set_defaults(func=cmd_reload)
 
     p_audit = sub.add_parser("audit", help="audit log")
     aud_sub = p_audit.add_subparsers(dest="audit_command", required=True)

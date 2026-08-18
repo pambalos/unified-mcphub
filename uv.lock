@@ -14,6 +14,7 @@ members = [
     "unified-mcp-client",
     "unified-mcp-servers",
     "unified-mcphub",
+    "unified-paths",
     "unified-sdk",
 ]
 
@@ -4091,6 +4092,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-ulid" },
     { name = "pyyaml" },
+    { name = "unified-paths" },
 ]
 
 [package.optional-dependencies]
@@ -4121,6 +4123,7 @@ requires-dist = [
     { name = "pyjwt", marker = "extra == 'identity'", specifier = ">=2.8.0" },
     { name = "python-ulid", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
+    { name = "unified-paths", editable = "packages/unified-paths" },
     { name = "uvicorn", marker = "extra == 'gateway'", specifier = ">=0.28.0" },
 ]
 provides-extras = ["otel", "identity", "gateway"]
@@ -4155,6 +4158,7 @@ version = "0.0.1"
 source = { editable = "packages/unified-mcp-servers" }
 dependencies = [
     { name = "mcp" },
+    { name = "unified-paths" },
 ]
 
 [package.optional-dependencies]
@@ -4172,6 +4176,7 @@ requires-dist = [
     { name = "pypdf", marker = "extra == 'documents'", specifier = ">=4.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.0" },
     { name = "python-docx", marker = "extra == 'documents'", specifier = ">=1.0.0" },
+    { name = "unified-paths", editable = "packages/unified-paths" },
 ]
 provides-extras = ["documents", "dev"]
 
@@ -4231,6 +4236,20 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.28.0" },
     { name = "watchfiles", specifier = ">=0.21.0" },
 ]
+provides-extras = ["dev"]
+
+[[package]]
+name = "unified-paths"
+version = "0.0.1"
+source = { editable = "packages/unified-paths" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.0" }]
 provides-extras = ["dev"]
 
 [[package]]

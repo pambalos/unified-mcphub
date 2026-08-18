@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import unified_mcp_servers.filesystem as fs
@@ -81,3 +82,33 @@ def test_find_files_content_only(tmp_path):
     (tmp_path / "f.txt").write_text("alpha\nSSRF\n")
     r = fs.find_files(content="SSRF", directory=str(tmp_path))
     assert r["strategy"] == "content_only" and r["result_count"] == 1
+
+
+# --- the blocklist is canonical containment, not a string prefix -------------
+
+
+def test_restricted_paths_are_not_reachable_through_a_symlink(tmp_path):
+    """`~/.ssh/id_rsa` was refused while a symlink to the same file went
+    straight through, because the comparison never resolved the link. The
+    blocklist is only worth something if it names files, not strings."""
+    from unified_mcp_servers._safety import is_path_safe
+
+    secret = os.path.expanduser("~/.ssh/id_rsa")
+    assert not is_path_safe(secret)
+
+    link = tmp_path / "ssh"
+    link.symlink_to(os.path.expanduser("~/.ssh"))
+    assert not is_path_safe(str(link / "id_rsa"))
+
+
+def test_ordinary_paths_are_still_allowed(tmp_path):
+    from unified_mcp_servers._safety import is_path_safe
+
+    assert is_path_safe(str(tmp_path / "notes.txt"))
+    assert is_path_safe("notes.txt")  # relative, resolved against the cwd
+
+
+def test_an_unparseable_path_is_refused_rather_than_guessed_at():
+    from unified_mcp_servers._safety import is_path_safe
+
+    assert not is_path_safe("\0")

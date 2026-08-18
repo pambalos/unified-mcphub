@@ -230,6 +230,12 @@ class Upstream(BaseModel):
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    #: Working directory for a stdio server. Declared rather than inherited: a
+    #: relative path argument means nothing without knowing the directory the
+    #: process opening it sits in, and "whatever the hub happened to be started
+    #: from" is an assumption that holds until someone changes it. None keeps
+    #: today's behaviour (inherit the hub's), now as a stated default.
+    cwd: str | None = None
     url: str | None = None
     image: str | None = None
 
@@ -262,6 +268,12 @@ class ServerSpec(BaseModel):
     # (e.g. it only ships `@latest` or a git ref). Mirrors the `allow_blocked`
     # fetch override: a deliberate escape hatch, not a default.
     allow_unpinned: bool = False
+    #: Argument names this server interprets as filesystem paths. The hub
+    #: canonicalises these before deciding and forwards the canonical form, so
+    #: the path the policy authorised is the path the server opens. Empty by
+    #: default: `path` on some other server may mean a URL path or an object
+    #: key, and rewriting that would corrupt the call.
+    path_args: list[str] = Field(default_factory=list)
 
 
 class Rule(BaseModel):

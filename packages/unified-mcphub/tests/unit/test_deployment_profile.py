@@ -250,3 +250,97 @@ def test_locked_may_still_be_manual_or_approval():
 def test_open_with_hot_is_fine():
     cfg = DeploymentConfig(policy_protection="open", reload_mode="hot")
     assert cfg.effective_reload_mode() == "hot"
+
+
+# --- indeterminate paths fail closed, per rule direction ---------------------
+
+
+def _engine(effect: str):
+    doc = PolicyDoc(
+        version=1,
+        constitutional=[
+            EngineRule(
+                id="c",
+                match=EngineMatch(
+                    tool="mcp://filesystem/edit_file",
+                    args={"path": {"path_under": ["/protected"]}},
+                ),
+                effect=effect,
+            )
+        ]
+        if effect == "deny"
+        else [],
+        rules=[
+            EngineRule(
+                id="r",
+                match=EngineMatch(
+                    tool="mcp://filesystem/edit_file",
+                    args={"path": {"path_under": ["/protected"]}},
+                ),
+                effect=effect,
+            )
+        ]
+        if effect != "deny"
+        else [],
+    )
+    return PolicyEngine(doc)
+
+
+def _decide(engine, path: str):
+    """The full decision: the engine defaults to deny when nothing matches, so
+    the verdict alone cannot tell "the rule fired" from "nothing did"."""
+    return engine.decide(
+        Action.build(
+            principal=Principal(id="agent:a"),
+            tool="mcp://filesystem/edit_file",
+            verb="call",
+            resource="*",
+            params={"path": path},
+        )
+    )
+
+
+def test_a_deny_rule_matches_an_unresolvable_path():
+    """A relative path names no single location. A deny rule cannot let that
+    through, or the protection is bypassed by dropping the leading slash."""
+    for path in ("../protected/config.yaml", ""):
+        d = _decide(_engine("deny"), path)
+        assert d.verdict == Verdict.DENY and d.rule_id == "c", path
+
+
+def test_a_deny_rule_still_ignores_a_resolvable_path_elsewhere():
+    """It falls through to the engine's default rather than being caught by the
+    rule — the fail-closed arm must not swallow every path."""
+    d = _decide(_engine("deny"), "/somewhere/else.txt")
+    assert d.rule_id != "c"
+
+
+def test_an_allow_rule_withholds_on_an_unresolvable_path():
+    """The safe direction for an allow rule is the opposite one: no grant."""
+    assert _decide(_engine("allow"), "relative/path.txt").verdict != Verdict.ALLOW
+    assert _decide(_engine("allow"), "/protected/x.txt").verdict == Verdict.ALLOW
+
+
+def test_a_rule_naming_a_relative_directory_is_a_load_error():
+    """It could never match anything meaningful, so it fails at load rather
+    than sitting in the policy looking like a protection."""
+    with pytest.raises(Exception, match="absolute directory"):
+        PolicyEngine(
+            PolicyDoc(
+                version=1,
+                rules=[
+                    EngineRule(
+                        id="r",
+                        match=EngineMatch(tool="x", args={"path": {"path_under": ["rel/dir"]}}),
+                        effect="deny",
+                    )
+                ],
+            )
+        )
+
+
+def test_a_symlink_into_the_protected_dir_is_denied(tmp_path):
+    """Resolution happens on the real path, so a link is not a way around it."""
+    link = tmp_path / "shortcut"
+    link.symlink_to(str(mcphub_home()))
+    assert _effect(_resolver(), str(link / "config.yaml")) == "deny"

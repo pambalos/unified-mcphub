@@ -21,6 +21,9 @@ keywords = ["mcp", "model-context-protocol", "tools", "filesystem", "shell", "fe
 # optional extra, lazy-imported by the documents server.
 dependencies = [
     "mcp>=1.0.0,<2",
+    # The only internal dependency, and the point of it is that this server
+    # and the policy engine that authorises it resolve a path identically.
+    "unified-paths",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +34,10 @@ documents = [
 dev = [
     "pytest>=8.4.0",
 ]
+
+# Resolve the shared path canonicalisation from the workspace member.
+[tool.uv.sources]
+unified-paths = { workspace = true }
 
 [tool.setuptools.packages.find]
 where = ["src"]

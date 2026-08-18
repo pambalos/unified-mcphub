@@ -17,6 +17,7 @@ keywords = ["ai", "agents", "authorization", "policy", "audit", "enforcement", "
 # Policy-path deps must be synchronous, local, allocation-cheap (technologies.md).
 # No network clients, no framework deps — the engine embeds anywhere.
 dependencies = [
+    "unified-paths",         # one canonicalisation, shared with the servers it authorises
     "pydantic>=2.0.0",       # Action + policy models (JSON Schema export)
     "pyyaml>=6.0.0",         # policy files
     "cel-python>=0.2.0",     # rule conditions (compiled once at policy load)
@@ -57,6 +58,10 @@ asyncio_mode = "auto"
 markers = [
     "integration: needs external services (Docker/Envoy); excluded from the default run",
 ]
+
+# Resolve the shared path canonicalisation from the workspace member.
+[tool.uv.sources]
+unified-paths = { workspace = true }
 
 [tool.ruff]
 line-length = 100

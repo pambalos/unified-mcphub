@@ -33,7 +33,6 @@ Fail closed, always:
 from __future__ import annotations
 
 import logging
-import os
 import re
 import time
 from dataclasses import dataclass
@@ -45,6 +44,8 @@ from typing import Any, Literal
 import celpy
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
+
+from unified_paths import canonical, is_under
 
 from .action import Action
 
@@ -199,34 +200,6 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
 _ARGS_OPERATORS = ("equals", "starts_with", "matches", "path_under")
 
 
-def _canonical_path(value: str) -> str:
-    """Absolute, symlink- and `..`-resolved form of a path argument.
-
-    `realpath` resolves `..` segments *and* symlinks on the parts that exist,
-    and makes a relative path absolute against the process cwd, so the result
-    is a single definite location. It does not require the path to exist, which
-    matters because the thing being authorised is usually a file about to be
-    created. Never raises for ordinary input; the fallback keeps a pathological
-    value (embedded NUL, over-long) from taking the engine down.
-    """
-    try:
-        return os.path.realpath(os.path.expanduser(value))
-    except (OSError, ValueError):
-        return os.path.normpath(value)
-
-
-def _is_under(child: str, parent: str) -> bool:
-    """True when `child` is `parent` itself or lies inside it.
-
-    The separator is what makes this a directory test rather than a string
-    test: without it `/srv/app-backup` reads as living under `/srv/app`, which
-    both over-denies a deny rule and over-grants an allow rule.
-    """
-    if child == parent:
-        return True
-    return child.startswith(parent.rstrip(os.sep) + os.sep)
-
-
 def _compile_args(args_map: ArgsMap, owner_id: str) -> dict[str, list[tuple[str, list[Any]]]]:
     """Validate operators and precompile `matches` regexes. Unknown operators and
     bad regexes are load errors (policy.v2.md: stricter than the hub, which left
@@ -242,8 +215,19 @@ def _compile_args(args_map: ArgsMap, owner_id: str) -> dict[str, list[tuple[str,
                 )
             if op == "path_under":
                 # Canonicalise the rule side once at load, so evaluation is a
-                # comparison of two already-normalised absolute paths.
-                ops.append((op, [_canonical_path(v) for v in values]))
+                # comparison of two already-normalised absolute paths. A rule
+                # that names a relative directory cannot be resolved against
+                # anything meaningful, so it is a load error rather than a rule
+                # that silently never matches.
+                resolved = []
+                for v in values:
+                    c = canonical(v)
+                    if c is None:
+                        raise PolicyError(
+                            f"rule {owner_id!r}: path_under needs an absolute directory, got {v!r}"
+                        )
+                    resolved.append(c)
+                ops.append((op, resolved))
             elif op == "matches":
                 try:
                     ops.append((op, [re.compile(v) for v in values]))
@@ -255,9 +239,23 @@ def _compile_args(args_map: ArgsMap, owner_id: str) -> dict[str, list[tuple[str,
     return compiled
 
 
-def _args_match(compiled: dict[str, list[tuple[str, list[Any]]]], params: dict[str, Any]) -> bool:
+def _args_match(
+    compiled: dict[str, list[tuple[str, list[Any]]]],
+    params: dict[str, Any],
+    effect: Verdict = Verdict.DENY,
+) -> bool:
     """Arg names AND'd; operators per arg AND'd; value lists OR'd.
-    A missing argument compares as "" (so it won't match a non-empty target)."""
+    A missing argument compares as "" (so it won't match a non-empty target).
+
+    `effect` is the verdict of the rule being tested, and it decides only one
+    thing: what an *indeterminate* comparison means. `path_under` can fail to
+    reduce an argument to a single location — a relative path with no known
+    base, a value the filesystem refuses to parse. Guessing there is how a
+    protection gets walked around, so the answer resolves in whichever
+    direction is safe for this rule: a deny rule treats it as a match (the
+    write is refused), an allow rule as a miss (the grant is withheld). Either
+    way the uncertain case fails closed instead of silently choosing one.
+    """
     for arg, ops in compiled.items():
         actual = str(params.get(arg, ""))
         for op, values in ops:
@@ -268,10 +266,13 @@ def _args_match(compiled: dict[str, list[tuple[str, list[Any]]]], params: dict[s
                 if not any(actual.startswith(v) for v in values):
                     return False
             elif op == "path_under":  # real containment, not a string prefix
-                if not actual:
+                resolved = canonical(actual) if actual else None
+                if resolved is None:
+                    # Indeterminate. Fail closed in this rule's direction.
+                    if effect is Verdict.DENY:
+                        continue
                     return False
-                resolved = _canonical_path(actual)
-                if not any(_is_under(resolved, v) for v in values):
+                if not any(is_under(resolved, v) for v in values):
                     return False
             else:  # matches — regex search ((?i) for case-insensitivity)
                 if not any(p.search(actual) for p in values):
@@ -424,7 +425,7 @@ class PolicyEngine:
                     and c.resource.fullmatch(action.resource)
                 ):
                     continue
-                if c.args is not None and not _args_match(c.args, action.params):
+                if c.args is not None and not _args_match(c.args, action.params, c.effect):
                     continue
                 if c.condition is not None:
                     if activation is None:
@@ -480,7 +481,9 @@ class PolicyEngine:
                 and compiled.resource.fullmatch(action.resource)
             ):
                 continue
-            if compiled.args is not None and not _args_match(compiled.args, action.params):
+            if compiled.args is not None and not _args_match(
+                compiled.args, action.params, compiled.effect
+            ):
                 continue
 
             if compiled.condition is None:

@@ -1,0 +1,31 @@
+packages/unified-mcphub/src/unified_mcphub/cli.py
+  s_282789b416b827::t_580d4e9d490b82 523-528
+  s_282789b416b827::t_719e8222115842 259-291
+packages/unified-mcphub/tests/e2e/test_m0_reload_endpoint.py
+  s_282789b416b827::t_7a9890602c5576 1-89
+docs/deployment-security.md
+  s_282789b416b827::t_f1ee659d5c32c7 85-90
+packages/unified-mcphub/src/unified_mcphub/hub.py
+  s_282789b416b827::t_ce19be463b45ad 623-643,648
+  s_282789b416b827::t_5561c249176071 677
+  s_282789b416b827::t_bc19082fed29dc 561-563,571
+packages/unified-mcphub/src/unified_mcphub/transports.py
+  s_282789b416b827::t_f3d5c6fc7d0ef5 106-118
+  s_282789b416b827::t_bc7ea208c02e5f 144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "e2b7814ce83c69ffa73ed23a33ef52b8c4e7b02d",
+  "prompts": {},
+  "sessions": {
+    "s_282789b416b827": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "04876425-0a75-444e-9d0a-3bd7a976f4d3",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

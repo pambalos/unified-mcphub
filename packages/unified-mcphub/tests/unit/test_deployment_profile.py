@@ -41,8 +41,14 @@ def test_locked_derives_approval_reload():
 
 
 def test_explicit_reload_mode_wins_over_derivation():
-    assert DeploymentConfig(policy_protection="locked", reload_mode="manual").effective_reload_mode() == "manual"
-    assert DeploymentConfig(policy_protection="open", reload_mode="approval").effective_reload_mode() == "approval"
+    assert (
+        DeploymentConfig(policy_protection="locked", reload_mode="manual").effective_reload_mode()
+        == "manual"
+    )
+    assert (
+        DeploymentConfig(policy_protection="open", reload_mode="approval").effective_reload_mode()
+        == "approval"
+    )
 
 
 @pytest.mark.parametrize("bad", ["prod", "on", "", "OPEN"])
@@ -70,7 +76,11 @@ def test_open_injects_nothing():
 
 def test_locked_injects_config_dir_write_denies():
     rules = _constitutional_rules(DeploymentConfig(policy_protection="locked"))
-    assert {r.id for r in rules} == {"const-fs-create_file", "const-fs-edit_file", "const-fs-delete_file"}
+    assert {r.id for r in rules} == {
+        "const-fs-create_file",
+        "const-fs-edit_file",
+        "const-fs-delete_file",
+    }
     assert all(r.effect == "deny" for r in rules)
     home = str(mcphub_home())
     for r in rules:
@@ -95,9 +105,7 @@ def test_locked_denies_policy_dir_write_even_with_allow_rule():
     deny — that is the whole point of the tier."""
     policy_file = str(mcphub_home() / "workspaces" / "default.local.yaml")
     # Workspace explicitly allows filesystem edits (the permissive local setup).
-    ws = Workspace(
-        authz=Authz(rules=[Rule(tool="mcp://filesystem/edit_file", effect="allow")])
-    )
+    ws = Workspace(authz=Authz(rules=[Rule(tool="mcp://filesystem/edit_file", effect="allow")]))
     resolver = AuthzResolver(
         ws, DangerousCommands(), deployment=DeploymentConfig(policy_protection="locked")
     )
@@ -112,9 +120,7 @@ def test_locked_denies_policy_dir_write_even_with_allow_rule():
 
 
 def test_locked_allows_writes_outside_config_dir():
-    ws = Workspace(
-        authz=Authz(rules=[Rule(tool="mcp://filesystem/edit_file", effect="allow")])
-    )
+    ws = Workspace(authz=Authz(rules=[Rule(tool="mcp://filesystem/edit_file", effect="allow")]))
     resolver = AuthzResolver(
         ws, DangerousCommands(), deployment=DeploymentConfig(policy_protection="locked")
     )
@@ -130,9 +136,7 @@ def test_locked_allows_writes_outside_config_dir():
 def test_open_allows_policy_dir_write():
     """Open mode is the desired local behavior — policy is freely editable."""
     policy_file = str(mcphub_home() / "workspaces" / "default.local.yaml")
-    ws = Workspace(
-        authz=Authz(rules=[Rule(tool="mcp://filesystem/edit_file", effect="allow")])
-    )
+    ws = Workspace(authz=Authz(rules=[Rule(tool="mcp://filesystem/edit_file", effect="allow")]))
     resolver = AuthzResolver(ws, DangerousCommands(), deployment=DeploymentConfig())
     d = resolver.resolve(
         "mcp://filesystem/edit_file",
@@ -149,9 +153,7 @@ def test_open_allows_policy_dir_write():
 def test_constitutional_tier_outranks_exact_rule():
     doc = PolicyDoc(
         version=1,
-        constitutional=[
-            EngineRule(id="c", match=EngineMatch(tool="mcp://x/y"), effect="deny")
-        ],
+        constitutional=[EngineRule(id="c", match=EngineMatch(tool="mcp://x/y"), effect="deny")],
         rules=[EngineRule(id="r", match=EngineMatch(tool="mcp://x/y"), effect="allow")],
     )
     eng = PolicyEngine(doc)

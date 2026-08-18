@@ -111,8 +111,10 @@ class Hub:
         self.builtins = BuiltinRegistry()
         self.telemetry = _build_telemetry(config.hub.otel)
         self.authz = AuthzResolver(
-            config.workspace, config.dangerous,
-            telemetry=self.telemetry, deployment=config.hub.deployment,
+            config.workspace,
+            config.dangerous,
+            telemetry=self.telemetry,
+            deployment=config.hub.deployment,
         )
         self.redactor = Redactor(config.workspace.redact)
         approval_cfg = config.hub.approval
@@ -437,8 +439,10 @@ class Hub:
         # Immediate effect: prepend in-memory so the next call sees it before reload.
         self.config.workspace.authz.rules.insert(0, rule)
         self.authz = AuthzResolver(
-            self.config.workspace, self.config.dangerous,
-            telemetry=self.telemetry, deployment=self.config.hub.deployment,
+            self.config.workspace,
+            self.config.dangerous,
+            telemetry=self.telemetry,
+            deployment=self.config.hub.deployment,
         )
         # Persist to the machine-managed `.local.yaml` (ADR-0024). The curated
         # workspace file is never rewritten by the hub, so a plain YAML dump of a
@@ -529,8 +533,10 @@ class Hub:
             return
         self.config = new
         self.authz = AuthzResolver(
-            new.workspace, new.dangerous,
-            telemetry=self.telemetry, deployment=new.hub.deployment,
+            new.workspace,
+            new.dangerous,
+            telemetry=self.telemetry,
+            deployment=new.hub.deployment,
         )
         self.redactor = Redactor(new.workspace.redact)
         self.approval.enabled = new.hub.approval.enabled

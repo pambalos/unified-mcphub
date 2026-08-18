@@ -108,3 +108,58 @@ async def test_reload_keeps_prior_config_on_invalid_yaml(hub_home):
         assert hub.config.workspace.authz.rules == before
     finally:
         await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_reload_does_not_change_the_deployment_profile(hub_home):
+    """The deployment security profile is fixed at boot (UAI-216).
+
+    It describes how this process was deployed, not what the config file
+    currently says. Re-reading it would let the one control that protects
+    policy from tampering be switched off by editing the very file it
+    protects, so `locked` -> `open` must not survive a reload.
+    """
+    config = hub_home / "config.yaml"
+    config.write_text(
+        textwrap.dedent(
+            """
+            deployment:
+              policy_protection: locked
+            """
+        ).strip()
+        + "\n"
+    )
+    hub = Hub(load_config())
+    await hub.start()
+    try:
+        assert hub.config.hub.deployment.is_locked
+        policy_file = str(hub_home / "config.yaml")
+        assert (
+            hub.authz.resolve(
+                "mcp://filesystem/edit_file", {"path": policy_file}, "claude-code"
+            ).effect
+            is Effect.DENY
+        )
+
+        # An agent (or anyone) edits the profile back to open and a reload runs.
+        config.write_text(
+            textwrap.dedent(
+                """
+                deployment:
+                  policy_protection: open
+                """
+            ).strip()
+            + "\n"
+        )
+        await hub._reload()
+
+        # Still locked, and the config dir is still not agent-writable.
+        assert hub.config.hub.deployment.is_locked
+        assert (
+            hub.authz.resolve(
+                "mcp://filesystem/edit_file", {"path": policy_file}, "claude-code"
+            ).effect
+            is Effect.DENY
+        )
+    finally:
+        await hub.stop()

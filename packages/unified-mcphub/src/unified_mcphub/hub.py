@@ -110,7 +110,12 @@ class Hub:
         self.servers: dict[str, SupervisedServer] = {}
         self.builtins = BuiltinRegistry()
         self.telemetry = _build_telemetry(config.hub.otel)
-        self.authz = AuthzResolver(config.workspace, config.dangerous, telemetry=self.telemetry)
+        self.authz = AuthzResolver(
+            config.workspace,
+            config.dangerous,
+            telemetry=self.telemetry,
+            deployment=config.hub.deployment,
+        )
         self.redactor = Redactor(config.workspace.redact)
         approval_cfg = config.hub.approval
         self.approval_events = ApprovalEventBroadcaster()
@@ -434,7 +439,10 @@ class Hub:
         # Immediate effect: prepend in-memory so the next call sees it before reload.
         self.config.workspace.authz.rules.insert(0, rule)
         self.authz = AuthzResolver(
-            self.config.workspace, self.config.dangerous, telemetry=self.telemetry
+            self.config.workspace,
+            self.config.dangerous,
+            telemetry=self.telemetry,
+            deployment=self.config.hub.deployment,
         )
         # Persist to the machine-managed `.local.yaml` (ADR-0024). The curated
         # workspace file is never rewritten by the hub, so a plain YAML dump of a
@@ -499,7 +507,23 @@ class Hub:
             return
         # Cancellation on stop() propagates out of awatch and ends this task cleanly.
         async for _ in awatch(*watched):
-            await self._reload()
+            # Deployment security profile (UAI-216): only `hot` reload auto-applies
+            # a policy file change. Under `manual`/`approval` (the default in a
+            # `locked` deployment) a detected change is NOT silently applied — the
+            # enforcement plane must not be edited into an open door in production.
+            # The pending change is logged; an operator applies it out-of-band
+            # (restart, or an explicit reload signal / approval — follow-up work).
+            mode = self.config.hub.deployment.effective_reload_mode()
+            if mode == "hot":
+                await self._reload()
+            else:
+                logger.warning(
+                    "policy/config change detected but not applied "
+                    "(deployment.reload_mode=%s, policy_protection=%s); "
+                    "restart or an explicit reload is required to apply it",
+                    mode,
+                    self.config.hub.deployment.policy_protection,
+                )
 
     async def _reload(self) -> None:
         try:
@@ -507,8 +531,28 @@ class Hub:
         except Exception as exc:  # noqa: BLE001 - spec §8: any validation failure keeps prior config
             logger.error("config reload failed; keeping prior config: %s", exc)
             return
+        # The deployment security profile is fixed at boot and is NOT re-read
+        # here (UAI-216). It describes how this process was deployed, not what
+        # the config file currently says — otherwise the one control protecting
+        # policy from tampering could be switched off by editing the very file
+        # it protects. Changing `locked`/`open` takes a restart, in both
+        # directions, exactly like any other deployment property.
+        booted = self.config.hub.deployment
+        if new.hub.deployment != booted:
+            logger.warning(
+                "deployment profile change ignored on reload "
+                "(running policy_protection=%s, file says %s); a restart is required",
+                booted.policy_protection,
+                new.hub.deployment.policy_protection,
+            )
+        new.hub.deployment = booted
         self.config = new
-        self.authz = AuthzResolver(new.workspace, new.dangerous, telemetry=self.telemetry)
+        self.authz = AuthzResolver(
+            new.workspace,
+            new.dangerous,
+            telemetry=self.telemetry,
+            deployment=booted,
+        )
         self.redactor = Redactor(new.workspace.redact)
         self.approval.enabled = new.hub.approval.enabled
         await self._apply_server_diff(new.workspace.servers)

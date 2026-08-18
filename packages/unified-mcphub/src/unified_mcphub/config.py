@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .util import secure_write
 
@@ -140,12 +140,81 @@ class SecretsConfig(BaseModel):
     key_file: str | None = None
 
 
+_VALID_PROTECTION = {"open", "locked"}
+_VALID_RELOAD = {"hot", "manual", "approval"}
+
+
+class DeploymentConfig(BaseModel):
+    """Deployment security profile (UAI-216). Bundles the policy-protection
+    controls behind one toggle so a local/dev deployment stays fully open —
+    edit and hot-reload policy freely, the current behavior — while a prod
+    deployment locks policy against agent tampering.
+
+    The enforcement plane must not be its own bypass: in `open` the operator
+    (or an assisting agent) may edit and hot-reload policy at will; in `locked`
+    the policy/config dir is write-protected from agent-reachable tools, policy
+    file changes do not auto-apply, and constitutional rules the workspace
+    cannot override are installed. Everything degrades to today's open behavior
+    when `policy_protection` is `open`.
+    """
+
+    # open (dev; edit + hot-reload freely) | locked (prod; policy is protected)
+    policy_protection: str = "open"
+    # hot (apply on file change) | manual (reload only on explicit signal) |
+    # approval (staged, applied only after human approval). None → derived from
+    # policy_protection: open→hot, locked→approval.
+    reload_mode: str | None = None
+
+    @property
+    def is_locked(self) -> bool:
+        return self.policy_protection == "locked"
+
+    def effective_reload_mode(self) -> str:
+        """Resolve `reload_mode`, defaulting from the protection profile."""
+        if self.reload_mode is not None:
+            return self.reload_mode
+        return "approval" if self.is_locked else "hot"
+
+    @field_validator("policy_protection")
+    @classmethod
+    def _check_protection(cls, v: str) -> str:
+        if v not in _VALID_PROTECTION:
+            raise ValueError(f"policy_protection must be one of {sorted(_VALID_PROTECTION)}")
+        return v
+
+    @field_validator("reload_mode")
+    @classmethod
+    def _check_reload(cls, v: str | None) -> str | None:
+        if v is not None and v not in _VALID_RELOAD:
+            raise ValueError(f"reload_mode must be one of {sorted(_VALID_RELOAD)} or null")
+        return v
+
+    @model_validator(mode="after")
+    def _check_combination(self) -> "DeploymentConfig":
+        """`locked` + `hot` is refused rather than quietly honoured.
+
+        Reload-gating is the primary control this profile exists to provide;
+        asking for `locked` and then hot-reloading cancels it, leaving a
+        deployment that reads as protected in the config file and is not. The
+        two ways to mean it are spelled differently: leave `reload_mode` unset
+        (locked defaults to `approval`), or say `policy_protection: open`.
+        """
+        if self.is_locked and self.reload_mode == "hot":
+            raise ValueError(
+                "policy_protection: locked with reload_mode: hot cancels reload-gating, "
+                "the control that makes a locked deployment locked; "
+                "omit reload_mode (locked defaults to approval) or use policy_protection: open"
+            )
+        return self
+
+
 class HubConfig(BaseModel):
     listen: ListenConfig = Field(default_factory=ListenConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     secrets: SecretsConfig = Field(default_factory=SecretsConfig)
     otel: OtelConfig = Field(default_factory=OtelConfig)
+    deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
     active_workspace: str = "default"
     # Supply-chain safety floor: refuse to stand up an unpinned fetch-and-run
     # upstream (`npx -y pkg`, bare `uvx pkg`). A *drift guard* — it stops silent

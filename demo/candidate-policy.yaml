@@ -1,0 +1,44 @@
+# The candidate — somebody proposes raising the hard cap to $60,000.
+#
+# This file exists to be measured, not deployed: `replay()` re-decides the
+# recorded history against it and reports exactly which past verdicts change.
+# The demo shows the $48,000 wire that was DENIED becoming a DEFER — visible
+# before the change ships, not discovered after the money moves.
+
+version: 1
+
+rules:
+  - id: no-vault-for-agents
+    reason: "an agent that can read the vault can exfiltrate every other control"
+    match:
+      principal: "agent:*"
+      tool: "mcp://vault/**"
+    effect: deny
+
+  - id: wires-above-hard-cap
+    reason: "proposed: raise the no-approval-path cap from $25,000 to $60,000"
+    match:
+      principal: "agent:*"
+      tool: "sdk://payments/wire_transfer"
+      verb: create
+    when: "double(params.amount) > 60000.0"
+    effect: deny
+    audit_level: detailed
+
+  - id: wires-above-review-line
+    reason: "$5,000–$60,000 is a human's call, made before the money moves"
+    match:
+      principal: "agent:*"
+      tool: "sdk://payments/wire_transfer"
+      verb: create
+    when: "double(params.amount) > 5000.0"
+    effect: defer
+    audit_level: detailed
+
+  - id: ledger-reads-are-the-job
+    reason: "read-only ledger and market data is what this agent is for"
+    match:
+      principal: "agent:*"
+      tool: "mcp://ledger/**"
+      verb: read
+    effect: allow

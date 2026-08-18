@@ -1,0 +1,24 @@
+packages/unified-mcphub/src/unified_mcphub/config.py
+  s_282789b416b827::t_97f2ef9e9ea5b9 18
+  s_282789b416b827::t_3f813fbaf3ddde 186-187,193-194
+  s_282789b416b827::t_77399f7c059e34 143-146
+  s_282789b416b827::t_a9140b82fa84df 147-185,188-192,195-197,204
+packages/unified-mcphub/src/unified_mcphub/hub.py
+  s_282789b416b827::t_1fbb75a70b5b7d 502-518
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "40eb702bf3695e5faa9603ea9d990e9686a9e239",
+  "prompts": {},
+  "sessions": {
+    "s_282789b416b827": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "04876425-0a75-444e-9d0a-3bd7a976f4d3",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

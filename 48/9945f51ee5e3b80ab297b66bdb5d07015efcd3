@@ -1,0 +1,29 @@
+packages/unified-mcphub/src/unified_mcphub/policy_diff.py
+  s_282789b416b827::t_40b58b47e03d16 63-66,72
+  s_282789b416b827::t_1720abe680a87b 1-62,67-71,73-74
+packages/unified-mcphub/src/unified_mcphub/hub.py
+  s_282789b416b827::t_8f1737a220cd2b 635,638-648,654
+  s_282789b416b827::t_41ff2968ef8357 50
+packages/unified-mcphub/src/unified_mcphub/cli.py
+  s_282789b416b827::t_54015aca63146d 289-294
+packages/unified-mcphub/tests/unit/test_policy_diff.py
+  s_282789b416b827::t_07bb5ab9f463ff 32-33,37
+  s_282789b416b827::t_34c122516bf3ce 1-31,34-36,38-44,47,56-81
+  s_282789b416b827::t_6b27d0578b3780 45-46,48-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "489945f51ee5e3b80ab297b66bdb5d07015efcd3",
+  "prompts": {},
+  "sessions": {
+    "s_282789b416b827": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "04876425-0a75-444e-9d0a-3bd7a976f4d3",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

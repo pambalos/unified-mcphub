@@ -1,0 +1,19 @@
+product.md
+  s_282789b416b827::t_3729604180f829 1,5-84,88-91,93,95-96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "a0163bbc77270b7f54783a7ef29b802ef0e6671d",
+  "prompts": {},
+  "sessions": {
+    "s_282789b416b827": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "04876425-0a75-444e-9d0a-3bd7a976f4d3",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

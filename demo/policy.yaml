@@ -1,0 +1,44 @@
+# The demo policy — a finance agent with real authority and real limits.
+#
+# Three tiers on one tool, ordered so the first match within the tier wins:
+# a hard cap no human can waive (deny), a review line (defer), and the job
+# itself (allow). Everything unmatched falls to the non-configurable
+# default-deny — the demo never shows an implicit allow because there isn't one.
+
+version: 1
+
+rules:
+  - id: no-vault-for-agents
+    reason: "an agent that can read the vault can exfiltrate every other control"
+    match:
+      principal: "agent:*"
+      tool: "mcp://vault/**"
+    effect: deny
+
+  - id: wires-above-hard-cap
+    reason: "no agent moves more than $25,000 in one wire — the cap has no approval path"
+    match:
+      principal: "agent:*"
+      tool: "sdk://payments/wire_transfer"
+      verb: create
+    when: "double(params.amount) > 25000.0"
+    effect: deny
+    audit_level: detailed
+
+  - id: wires-above-review-line
+    reason: "$5,000–$25,000 is a human's call, made before the money moves"
+    match:
+      principal: "agent:*"
+      tool: "sdk://payments/wire_transfer"
+      verb: create
+    when: "double(params.amount) > 5000.0"
+    effect: defer
+    audit_level: detailed
+
+  - id: ledger-reads-are-the-job
+    reason: "read-only ledger and market data is what this agent is for"
+    match:
+      principal: "agent:*"
+      tool: "mcp://ledger/**"
+      verb: read
+    effect: allow

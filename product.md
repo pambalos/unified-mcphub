@@ -1,82 +1,96 @@
-# Unified AI — Product Definition
+# Unified AI — Product & Repository Map
 
 > The enforcement plane for AI agents — self-hosted, cross-platform, and able to say no.
 
-Locked 2026-08-11 alongside [technologies.md](technologies.md). Linear project:
-[Unified AI — Enforcement Plane](https://linear.app/personal-work-bj/project/unified-ai-enforcement-plane-d92891715251).
-Source positioning: the Aug 2026 concept brief (one-pager) and https://unified-ai.app.
+This file exists in every active product repo. It states **what this repo owns** and gives
+**short descriptions of the others**, so anyone can see at a glance which repo owns which part
+of the product. Keep it current when scope moves between repos.
 
-## The problem
+Fuller company positioning lives at [unified-ai.app](https://unified-ai.app) and in
+`unified-ai-docs`. Technology choices for this repo are locked in
+[technologies.md](technologies.md); architecture decisions continue as ADRs under `specs/`.
 
-Enterprises deploy AI agents faster than they can control them. Agents read email, query
-databases, move money, and merge code — yet most governance tooling only *observes*
-(traces, scores, alerts). Almost none of it can stop an agent mid-action, and the vendors
-that do enforce are cloud-tethered SaaS — unusable for banks, health systems, and defense
-programs that need governance inside their own perimeter.
+---
 
-## The product
+## This repo owns — `unified-mcphub` (open-core, MIT)
 
-Unified AI is a **runtime authorization layer** between every agent and everything it
-touches. Each tool call, API request, and data operation is:
+The **engine and open data plane** — the half of the open-core split that ships MIT and must
+always build and run clean with no commercial component.
 
-1. **Canonicalized** into a signed, replayable `Action`
-   `{principal, tool, verb, resource, params, context}`
-2. **Decided** deterministically against policy-as-code in **<10 ms** —
-   `ALLOW` / `DENY` / `DEFER` (to a human)
-3. **Recorded** in an append-only, hash-chained audit log with full reasoning context —
-   replayable offline for auditors and incident response
+- **`packages/unified-enforce` — the engine.** Action canonicalization
+  (`{principal, tool, verb, resource, params, context}`), policy-as-code evaluation
+  (`ALLOW` / `DENY` / `DEFER`-to-human) with a constitutional > exact > floor > wildcard
+  precedence model, the hash-chained tamper-evident audit log with offline `verify`/`replay`,
+  the approval contract, OTel decision spans, and the Envoy **ext_authz gateway** (gRPC + HTTP)
+  with mTLS and egress-lockdown templates (the no-bypass guarantee). Measured p99 3.6–8.4 ms
+  in-process.
+- **`packages/unified-mcphub` — the MCP hub.** The first integration of the engine: one
+  audited, policy-gated MCP server that every AI harness connects to instead of wiring up its
+  own tool servers. Default-deny authz, an approval TUI, an append-only audit log, the
+  **deployment security profile** (`policy_protection: open|locked`, reload-gating, constitutional
+  config-dir protection, operator `reload`), and per-agent identity ingestion (mTLS SAN / OIDC /
+  SPIFFE).
+- **`packages/unified-sdk` — the optional SDK.** Client library that annotates actions with
+  business semantics (a refund vs. a lookup) for finer-grained policy. "The proxy is the lock;
+  the SDK is the label."
+- **`packages/unified-mcp-servers`** — first-party light/safe MCP servers (filesystem, shell,
+  fetch, python, documents). **`packages/unified-mcp-client`** — the async MCP client the hub
+  uses upstream. **`packages/unified-paths`** — shared path canonicalization the decider and the
+  actor both import. **`packages/unified-mcp-graphify`** — optional code-knowledge-graph server.
+- **`deploy/terraform`** — data-plane IaC (agent/sidecar security groups, egress allowlists;
+  BYOC / self-hosted / hybrid). *There is no control plane in this repo.*
 
-Framework-agnostic (LangChain, CrewAI, MCP, homegrown) and platform-agnostic
-(Bedrock, Vertex, Azure, on-prem). BYO compute / policies / storage / datasets.
+The engine never depends on the control plane. Policies flow down, evidence flows up, over a
+versioned API.
 
-**The proxy is the lock; the SDK is the label.** Network-layer interposition plus egress
-policy means agents have no route to tools except through the plane — enforcement is
-mandatory, not best-effort. The optional SDK adds business semantics (a refund vs. a
-lookup) for finer-grained policy.
+---
 
-## Components
+## Repository map
 
-| Component | What it is | Where it lives | License |
-|---|---|---|---|
-| **Engine** | Action canonicalization, policy evaluation (ALLOW/DENY/DEFER), hash-chained audit, approval contract | this repo, `packages/unified-enforce` (new) | MIT (public at Public Release milestone) |
-| **MCP hub** | First integration of the engine: aggregates MCP servers behind one governed endpoint | this repo, `packages/unified-mcphub` | MIT |
-| **Gateway** | Envoy-based data plane; engine answers over ext_authz. Egress policy = the no-bypass guarantee | this repo (Envoy configs + ext_authz server in `unified-enforce`) | MIT |
-| **SDK** | Optional client lib annotating actions with intent/amounts/data classes | this repo, `packages/unified-sdk` (new); TypeScript SDK later | MIT |
-| **Control plane** | Fleet policy mgmt + versioning, dashboards, web approval queue, SSO/RBAC, evidence reports, SIEM/SOAR export | **separate private repo** (`unified-control-plane`) | Proprietary |
-| **Marketing site** | unified-ai.app | `unified-web` repo | — |
-| **Chat app** | chat.unified-ai.app (pre-pivot product, kept running) | `unified-fe` / `unified-be` repos | — |
+**The product (enforcement plane):**
 
-The engine never depends on the control plane. Policies flow down, evidence flows up,
-over a versioned API. The OSS repo must always build and run clean without any
-commercial component.
+| Repo | Owns | License |
+|---|---|---|
+| **`unified-mcphub`** ← *this repo* | Engine (`unified-enforce`), MCP hub, SDK, Envoy gateway/egress, first-party MCP servers, shared libs, data-plane IaC | **MIT (open-core)** |
+| **`unified-control-plane`** | The commercial control plane: fleet policy distribution (signed bundles), evidence ingestion + court-grade audit checkpoints, the human approval/DEFER queue, containment/kill-switch + signed revocation lists, the **Guardian** (detect→propose→confirm, enterprise-gated), operator identity/RBAC/sessions, and the Next.js **console** (`web/`). Multi-tenant-safe data layer. | Proprietary |
+| **`unified-ai-docs`** | Single source of truth: ADRs, specs, roadmap, plans, reviews (referenced by ADR number); GTM/outreach materials; Guardian capstone design. | — |
+| **`unified-web`** | Marketing site (`unified-ai.app`), `/investors` page, one-pager PDF. Vercel git-integration deploy. | — |
+
+**Legacy (pre-pivot, superseded — not part of the current product):**
+
+- **`unified-be`** — old "LLM chat platform" backend (BYOB storage, agentic cloud).
+- **`unified-fe`** — old multi-mode AI chat frontend (was `chat.unified-ai.app`, now delinked).
+- **`unified-orchestrator`** — the original monorepo the current repos were extracted from.
+
+**Unrelated (not the product):**
+
+- **`toon`** — Token-Oriented Object Notation, a separate open-source format project.
+- **`unified-tracking`** — a personal LLM-cost tracking tool (DuckDB over JSONL).
+
+---
+
+## Open-core & tiering
+
+- **Open-core split:** the engine/hub/SDK/gateway are **MIT** (this repo); the control plane is
+  **proprietary** (`unified-control-plane`).
+- **Tiers (enforced by a signed, offline-verifiable license — no phone-home):**
+  - *Free / self-hosted* fully **enforces** — allow/deny/defer, hash-chained signed audit, kill
+    switch, single-fleet console.
+  - *Paid — self-hostable or cloud* adds the **operate/aggregate/report** layer: the Guardian
+    (Detect), multi-fleet management, SSO/SCIM/RBAC, SIEM/SOAR export, compliance evidence reports,
+    HSM/per-tenant keys. Paid features run air-gapped too; the moat is "you pay," not "we hold your
+    data."
+- **Cloud multi-tenant** (vendor-run, shared-DB default + dedicated-instance premium) is in design
+  — see the Linear **"Cloud & Enterprise Offering"** project.
 
 ## Wedge and expansion
 
-1. **Enforce** — action authorization (the moat) ← everything above
-2. **Observe** — traces, evals, continuous monitoring (seeded by the Observability Stack milestone)
-3. **Test** — pre-release sandbox: replay recorded actions against candidate policies/models; red-teaming (seeded by audit replay)
-4. **Align** — safety datasets for open-weight models from action corpora + verdicts
+1. **Enforce** — action authorization (the moat) ← this repo + the control plane
+2. **Detect** — compromised agents & anomalies, contained via the plane (the Guardian, enterprise)
+3. **Test** — pre-release replay of recorded actions against candidate policies/models; red-teaming
+4. **Align** — policy packs & evaluation datasets (BYO or co-built)
 
-## Deployment modes
+---
 
-- **Managed SaaS** — fastest start
-- **Customer VPC** — data never leaves
-- **Fully air-gapped** — zero egress; defense / critical infrastructure
-
-## Roadmap (Linear milestones)
-
-- **Phase 0 — outreach**: W1 website (done 2026-08-11: marketing site at unified-ai.app,
-  chat app at chat.unified-ai.app) · G1 design-partner outreach (3–5 security/platform
-  teams in regulated industries; 45-min calls; lifetime preferred pricing)
-- **Phase 1 — engine**: M0.75 supply chain · M0.8 remote approvals · E1 Action model +
-  policy engine v0.1 (the doc partners critique) · E2 court-grade audit ·
-  E3 gateway/egress · E4 SDK v0 · M0.5 security hardening · M0.5 observability ·
-  Public Release (MIT)
-- **Phase 2 — commercial**: C1 control plane MVP · C2 compliance evidence + SIEM ·
-  C3 deployment modes
-- **Phase 3 — land**: G2 first design-partner deployment · X1–X3 expansion pillars
-
-## Decisions
-
-Technology choices and their rationale are locked in [technologies.md](technologies.md).
-Architecture decisions continue as ADRs under `specs/`.
+*Keep this accurate: when a component moves repos, or a new repo joins the product, update the
+"This repo owns" and "Repository map" sections here and in the sibling `product.md` files.*

@@ -1,0 +1,21 @@
+packages/unified-mcphub/tests/e2e/test_m0_reload.py
+  s_d31028edbe4e78::t_8a1a018a9e0ad1 12
+  s_d31028edbe4e78::t_8675f97895b97b 147
+  s_d31028edbe4e78::t_ef81a2984d4167 123-125,127-133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "04d3ca8e86f86416252665e768c8e61f31726233",
+  "prompts": {},
+  "sessions": {
+    "s_d31028edbe4e78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4ce99bc6-760b-492c-b500-42802c58576e",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

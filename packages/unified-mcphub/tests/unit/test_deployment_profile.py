@@ -6,6 +6,9 @@ that a constitutional deny cannot be overridden by a workspace rule.
 
 from __future__ import annotations
 
+import logging
+import os
+
 import pytest
 
 from unified_enforce import Action, Principal
@@ -13,6 +16,7 @@ from unified_enforce.policy import PolicyDoc, PolicyEngine, Verdict
 from unified_enforce.policy import Match as EngineMatch
 from unified_enforce.policy import Rule as EngineRule
 from unified_mcphub.authz import AuthzResolver, _constitutional_rules
+from unified_mcphub.hub import PolicyDirWritableError, _euid_label, check_policy_dir_permissions
 from unified_mcphub.config import (
     Authz,
     DangerousCommands,
@@ -364,3 +368,50 @@ def test_a_symlink_into_the_protected_dir_is_denied(tmp_path):
     link = tmp_path / "shortcut"
     link.symlink_to(str(mcphub_home()))
     assert _effect(_resolver(), str(link / "config.yaml")) == "deny"
+
+
+# --- C7: config-dir permission enforcement ----------------------------------
+
+
+def test_require_protected_config_dir_defaults_off():
+    assert DeploymentConfig(policy_protection="locked").require_protected_config_dir is False
+
+
+def test_writable_dir_only_warns_by_default(tmp_path, caplog):
+    """Advisory by default: a writable policy dir warns but does not stop boot."""
+    with caplog.at_level(logging.WARNING):
+        check_policy_dir_permissions(DeploymentConfig(policy_protection="locked"), tmp_path)
+    assert any("writable" in r.message for r in caplog.records)
+
+
+def test_writable_dir_refused_when_required(tmp_path):
+    """With the opt-in flag, a writable policy dir is a boot refusal."""
+    dep = DeploymentConfig(policy_protection="locked", require_protected_config_dir=True)
+    with pytest.raises(PolicyDirWritableError, match="writable"):
+        check_policy_dir_permissions(dep, tmp_path)
+
+
+def test_readonly_dir_passes_when_required(tmp_path):
+    """A dir the account cannot write satisfies the precondition — no raise."""
+    ro = tmp_path / "locked_dir"
+    ro.mkdir()
+    os.chmod(ro, 0o500)
+    try:
+        dep = DeploymentConfig(policy_protection="locked", require_protected_config_dir=True)
+        # If the test runs as root, os.access(W_OK) is always True; skip the
+        # assertion there rather than assert a guarantee the OS does not give.
+        if os.access(ro, os.W_OK):
+            pytest.skip("running as root: W_OK is unconditionally true")
+        check_policy_dir_permissions(dep, ro)  # must not raise
+    finally:
+        os.chmod(ro, 0o700)
+
+
+def test_open_never_checks(tmp_path):
+    """`open` mode is unaffected — a writable dir is the whole point locally."""
+    dep = DeploymentConfig(policy_protection="open", require_protected_config_dir=True)
+    check_policy_dir_permissions(dep, tmp_path)  # must not raise, even required+writable
+
+
+def test_euid_label_is_a_string():
+    assert isinstance(_euid_label(), str) and _euid_label()

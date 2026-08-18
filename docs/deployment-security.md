@@ -75,6 +75,13 @@ The hub logs a warning at startup when `policy_protection: locked` is set and
 the policy directory is still writable by the account it runs as. It is advisory
 rather than fatal: a hub that refuses to boot protects nothing.
 
+A deployment that wants the OS boundary treated as a hard precondition sets
+`deployment.require_protected_config_dir: true`. In `locked`, that turns the
+warning into a boot refusal (`PolicyDirWritableError`) when the policy directory
+is writable by the account the servers run as — for an operator who would rather
+fail to start than serve with the real boundary missing. Off by default, for the
+reason above.
+
 ## Still open
 
 - `manual`/`approval` reload currently log the pending change; wiring an

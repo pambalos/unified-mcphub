@@ -164,6 +164,14 @@ class DeploymentConfig(BaseModel):
     # approval (staged, applied only after human approval). None → derived from
     # policy_protection: open→hot, locked→approval.
     reload_mode: str | None = None
+    # When True in `locked`, refuse to boot if the policy/config dir is writable
+    # by the account the MCP servers run as — turning the advisory warning into
+    # a hard precondition. Off by default on purpose: the policy-layer controls
+    # are defence in depth and the real boundary is filesystem permissions, but
+    # refusing to boot would strand a deployment that is locked and correct in
+    # every other respect, so enforcing the OS boundary stays opt-in. See
+    # docs/deployment-security.md.
+    require_protected_config_dir: bool = False
 
     @property
     def is_locked(self) -> bool:

@@ -60,6 +60,43 @@ logger = logging.getLogger(__name__)
 BUILTIN_SERVER = "built-in"
 
 
+class PolicyDirWritableError(RuntimeError):
+    """Raised at boot when `deployment.require_protected_config_dir` is set and
+    the policy directory is writable by the account the servers run as."""
+
+
+def _euid_label() -> str:
+    """The effective uid as a string, or a portable placeholder off POSIX.
+
+    `os.geteuid` does not exist on Windows; the permission check itself
+    (`os.access`) is cross-platform, so only this diagnostic needs guarding.
+    """
+    getter = getattr(os, "geteuid", None)
+    return f"uid {getter()}" if getter is not None else "this process's account"
+
+
+def check_policy_dir_permissions(deployment, home) -> None:
+    """Report — or, when asked, refuse — a locked deployment whose policy dir the
+    account the servers run as can still write. Module-level so it is testable
+    without standing up a hub. See `Hub._check_policy_dir_permissions`.
+    """
+    if not deployment.is_locked or not os.access(home, os.W_OK):
+        return
+    detail = (
+        f"policy_protection=locked but {home} is writable by {_euid_label()}, the account "
+        "the MCP servers also run as; the policy-layer protections are defence in depth and "
+        "a symlink race or a shell redirection can still get through. Run the servers as a "
+        "separate account or mount this directory read-only for them "
+        "(docs/deployment-security.md)."
+    )
+    if deployment.require_protected_config_dir:
+        # Opt-in: the operator declared the OS boundary a precondition, so a
+        # writable dir is a misconfiguration to fix before serving, not a
+        # warning to serve through.
+        raise PolicyDirWritableError(detail)
+    logger.warning(detail)
+
+
 def _config_hash(config: Config) -> str:
     blob = json.dumps(config.model_dump(), sort_keys=True, default=str).encode()
     return "sha256:" + hashlib.sha256(blob).hexdigest()[:16]
@@ -193,7 +230,7 @@ class Hub:
 
     async def start(self) -> None:
         mcphub_home().mkdir(parents=True, exist_ok=True)
-        self._warn_if_policy_dir_is_agent_writable()
+        self._check_policy_dir_permissions()
         self.audit.start()
         self.builtins.load_user_tools(mcphub_home() / "tools")
         self._gate_secrets()
@@ -535,9 +572,9 @@ class Hub:
                     self.config.hub.deployment.policy_protection,
                 )
 
-    def _warn_if_policy_dir_is_agent_writable(self) -> None:
-        """In `locked`, say so when the policy directory is still writable by
-        the account the servers run as.
+    def _check_policy_dir_permissions(self) -> None:
+        """In `locked`, report — or, when asked, refuse — a policy directory the
+        account the servers run as can still write.
 
         The constitutional denies and reload-gating are checks on a path
         *string*, decided before the write and inspected again by the kernel
@@ -547,23 +584,14 @@ class Hub:
         is filesystem permissions: run the servers as an account that cannot
         write this directory, or mount it read-only into their namespace.
 
-        Advisory, not fatal. Refusing to boot would strand every deployment
-        that is locked and correct in every other respect, and a hub that will
-        not start protects nothing. See docs/deployment-security.md.
+        Advisory by default: refusing to boot would strand a deployment that is
+        locked and correct in every other respect, and a hub that will not start
+        protects nothing. A deployment that wants the OS boundary treated as a
+        hard precondition sets `deployment.require_protected_config_dir: true`,
+        which turns the warning into a boot refusal. See
+        docs/deployment-security.md.
         """
-        if not self.config.hub.deployment.is_locked:
-            return
-        home = mcphub_home()
-        if os.access(home, os.W_OK):
-            logger.warning(
-                "policy_protection=locked but %s is writable by uid %s, the account the "
-                "MCP servers also run as; the policy-layer protections are defence in depth "
-                "and a symlink race or a shell redirection can still get through. Run the "
-                "servers as a separate account or mount this directory read-only for them "
-                "(docs/deployment-security.md).",
-                home,
-                os.geteuid(),
-            )
+        check_policy_dir_permissions(self.config.hub.deployment, mcphub_home())
 
     def _canonical_path_args(self, server_name: str, args: dict) -> dict:
         """Rewrite a server's declared path arguments to their canonical form.

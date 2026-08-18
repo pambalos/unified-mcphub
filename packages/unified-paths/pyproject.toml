@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unified-paths"
+version = "0.0.1"
+description = "One answer to 'which file does this string mean' — shared by the policy engine and the servers it authorises."
+requires-python = ">=3.12"
+# Deliberately empty. This package exists so that the component deciding
+# whether a path is allowed and the component opening it cannot disagree, and
+# that guarantee is worth nothing if the two ends can drift apart over a
+# dependency. Standard library only, forever.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.4.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+unified_paths = ["py.typed"]

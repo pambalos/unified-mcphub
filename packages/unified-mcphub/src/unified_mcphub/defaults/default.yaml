@@ -12,6 +12,10 @@
 servers:
   filesystem:
     enabled: true
+    # Arguments this server reads as filesystem paths. The hub canonicalises
+    # these before deciding and forwards the canonical form, so the file the
+    # policy authorised is the file the server opens.
+    path_args: ["path", "directory"]
     upstream:
       command: python
       # --delete-mode soft (move to trash) is the default; switch to `hard` to unlink.

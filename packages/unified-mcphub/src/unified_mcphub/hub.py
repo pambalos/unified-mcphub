@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -23,6 +24,7 @@ from ulid import ULID
 from watchfiles import awatch
 
 from unified_enforce import Action, ActionContext, Principal, Telemetry
+from unified_paths import canonical
 
 from . import audit as audit_mod
 from . import discovery
@@ -191,6 +193,7 @@ class Hub:
 
     async def start(self) -> None:
         mcphub_home().mkdir(parents=True, exist_ok=True)
+        self._warn_if_policy_dir_is_agent_writable()
         self.audit.start()
         self.builtins.load_user_tools(mcphub_home() / "tools")
         self._gate_secrets()
@@ -281,6 +284,13 @@ class Hub:
             return _err(req_id, -32602, f"tool name must be '<server>__<tool>': {full_name!r}")
 
         tool_uri = f"mcp://{server_name}/{tool}"
+        # Canonicalise path arguments BEFORE the Action is built, so the value
+        # the policy is evaluated against, the value recorded in the audit
+        # digest, and the value forwarded upstream are all the same string. The
+        # engine used to canonicalise privately for the decision and then hand
+        # the server the agent's original text, which left the server free to
+        # resolve it differently and open a different file.
+        args = self._canonical_path_args(server_name, args)
         request_id = str(ULID())
         trace_id, span_id = audit_mod.new_trace_id(), audit_mod.new_span_id()
         # Canonical Action (unified.action/v1): the enforcement engine's identity
@@ -524,6 +534,62 @@ class Hub:
                     mode,
                     self.config.hub.deployment.policy_protection,
                 )
+
+    def _warn_if_policy_dir_is_agent_writable(self) -> None:
+        """In `locked`, say so when the policy directory is still writable by
+        the account the servers run as.
+
+        The constitutional denies and reload-gating are checks on a path
+        *string*, decided before the write and inspected again by the kernel
+        after it. Between those two moments a symlink can be repointed, and no
+        amount of matching closes that; a shell redirection carries no path
+        argument to match in the first place. The boundary that actually holds
+        is filesystem permissions: run the servers as an account that cannot
+        write this directory, or mount it read-only into their namespace.
+
+        Advisory, not fatal. Refusing to boot would strand every deployment
+        that is locked and correct in every other respect, and a hub that will
+        not start protects nothing. See docs/deployment-security.md.
+        """
+        if not self.config.hub.deployment.is_locked:
+            return
+        home = mcphub_home()
+        if os.access(home, os.W_OK):
+            logger.warning(
+                "policy_protection=locked but %s is writable by uid %s, the account the "
+                "MCP servers also run as; the policy-layer protections are defence in depth "
+                "and a symlink race or a shell redirection can still get through. Run the "
+                "servers as a separate account or mount this directory read-only for them "
+                "(docs/deployment-security.md).",
+                home,
+                os.geteuid(),
+            )
+
+    def _canonical_path_args(self, server_name: str, args: dict) -> dict:
+        """Rewrite a server's declared path arguments to their canonical form.
+
+        Only the argument names the server itself declares (`path_args`): on
+        another server `path` may be a URL path or an object key, and rewriting
+        that would corrupt the call. Relative paths resolve against the
+        server's declared `cwd`, falling back to the hub's own directory —
+        which is what a stdio child inherits when no cwd is set, so the base is
+        the one the process opening the file will actually use.
+
+        A value that does not reduce to a single location is left untouched;
+        the engine sees it as indeterminate and fails closed on it.
+        """
+        spec = self.config.workspace.servers.get(server_name)
+        if spec is None or not spec.path_args:
+            return args
+        base = spec.upstream.cwd or os.getcwd()
+        out = dict(args)
+        for name in spec.path_args:
+            value = out.get(name)
+            if isinstance(value, str) and value:
+                resolved = canonical(value, base=base)
+                if resolved is not None:
+                    out[name] = resolved
+        return out
 
     async def _reload(self) -> None:
         try:

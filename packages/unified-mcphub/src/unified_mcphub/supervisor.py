@@ -98,7 +98,7 @@ def build_connection(
     up = spec.upstream
     if up.command:
         command = sys.executable if up.command in ("python", "python3") else up.command
-        return StdioConnection(command, up.args, up.env or None)
+        return StdioConnection(command, up.args, up.env or None, cwd=up.cwd)
     if up.url:
         return HttpConnection(up.url, headers=dict(auth_headers or {}))
     if up.image:

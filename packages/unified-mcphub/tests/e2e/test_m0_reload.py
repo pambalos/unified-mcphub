@@ -9,6 +9,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 
 from unified_mcphub.authz import Effect
 from unified_mcphub.config import load_config
@@ -119,16 +120,17 @@ async def test_reload_does_not_change_the_deployment_profile(hub_home):
     policy from tampering be switched off by editing the very file it
     protects, so `locked` -> `open` must not survive a reload.
     """
+    # Merge into the seeded config rather than overwrite it: the fixture's
+    # `listen:` block (unix socket, TCP off) is what keeps this test from
+    # binding the real hub's default port.
     config = hub_home / "config.yaml"
-    config.write_text(
-        textwrap.dedent(
-            """
-            deployment:
-              policy_protection: locked
-            """
-        ).strip()
-        + "\n"
-    )
+
+    def set_policy_protection(mode: str) -> None:
+        data = yaml.safe_load(config.read_text())
+        data["deployment"] = {"policy_protection": mode}
+        config.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    set_policy_protection("locked")
     hub = Hub(load_config())
     await hub.start()
     try:
@@ -142,15 +144,7 @@ async def test_reload_does_not_change_the_deployment_profile(hub_home):
         )
 
         # An agent (or anyone) edits the profile back to open and a reload runs.
-        config.write_text(
-            textwrap.dedent(
-                """
-                deployment:
-                  policy_protection: open
-                """
-            ).strip()
-            + "\n"
-        )
+        set_policy_protection("open")
         await hub._reload()
 
         # Still locked, and the config dir is still not agent-writable.

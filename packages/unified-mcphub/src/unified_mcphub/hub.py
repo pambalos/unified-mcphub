@@ -47,6 +47,7 @@ from .config import (
     mcphub_home,
     workspace_local_path,
 )
+from .policy_diff import policy_broadening
 from .redaction import Redactor
 from .secrets import SecretsKeyError, SecretsStore
 from .supervisor import SupervisedServer
@@ -631,13 +632,26 @@ class Hub:
         this re-reads everything else. Returns a small summary of the result.
         """
         before = _config_hash(self.config)
+        old_rules = list(self.config.workspace.authz.rules)
         ok = await self._reload()
         after = _config_hash(self.config)
+        broadening = (
+            policy_broadening(old_rules, self.config.workspace.authz.rules) if ok else []
+        )
+        if broadening:
+            # Surfaced, not buried: the reviewer sees exactly what this reload
+            # granted that was not granted before (UAI-216).
+            logger.warning(
+                "reload broadens policy — %d new allow grant(s): %s",
+                len(broadening),
+                ", ".join(f"{b.tool} for {b.callers or 'any principal'}" for b in broadening),
+            )
         return {
             "applied": ok,
             "changed": ok and before != after,
             "servers": list(self.servers),
             "reload_mode": self.config.hub.deployment.effective_reload_mode(),
+            "broadening": [b.as_dict() for b in broadening],
         }
 
     async def _reload(self) -> bool:

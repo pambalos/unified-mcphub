@@ -286,6 +286,12 @@ def cmd_reload(args: argparse.Namespace) -> int:
         return 1
     state = "changes applied" if result.get("changed") else "already up to date"
     print(f"reloaded: {state}; servers={result.get('servers')}")
+    broadening = result.get("broadening") or []
+    if broadening:
+        print(f"\n⚠ this reload granted {len(broadening)} new allow(s):", file=sys.stderr)
+        for b in broadening:
+            who = b.get("callers") or "any principal"
+            print(f"  - {b['tool']} for {who} ({b['note']})", file=sys.stderr)
     return 0
 
 

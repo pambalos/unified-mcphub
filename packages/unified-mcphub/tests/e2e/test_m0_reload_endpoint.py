@@ -87,3 +87,38 @@ async def test_reload_applies_even_under_manual_mode(hub_home):
         assert len(hub.config.workspace.authz.rules) == before + 1
     finally:
         await hub.stop()
+
+
+def _append_allow(hub_home) -> None:
+    wf = hub_home / "workspaces" / "default.yaml"
+    wf.write_text(wf.read_text() + '    - tool: "mcp://anything/danger"\n      effect: allow\n')
+
+
+@pytest.mark.asyncio
+async def test_reload_surfaces_a_broadening_change(hub_home):
+    """A reload that adds an allow rule reports it, so the operator applying it
+    sees exactly what was granted (Enh B5)."""
+    hub, sock = await _started_hub(hub_home)
+    try:
+        _append_allow(hub_home)
+        async with _client(sock) as c:
+            body = (await c.post("/reload", headers={"X-Caller-Id": "cli"})).json()
+        assert body["applied"] is True
+        broadening = body["broadening"]
+        assert len(broadening) == 1
+        assert broadening[0]["tool"] == "mcp://anything/danger"
+        assert broadening[0]["note"] == "new allow rule"
+    finally:
+        await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_benign_reload_reports_no_broadening(hub_home):
+    hub, sock = await _started_hub(hub_home)
+    try:
+        _append_rule(hub_home)  # a deny rule — narrows, does not broaden
+        async with _client(sock) as c:
+            body = (await c.post("/reload", headers={"X-Caller-Id": "cli"})).json()
+        assert body["broadening"] == []
+    finally:
+        await hub.stop()

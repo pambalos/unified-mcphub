@@ -85,8 +85,28 @@ def test_locked_injects_config_dir_write_denies():
     home = str(mcphub_home())
     for r in rules:
         # `path_under`, not `starts_with`: the protected dir is matched by real
-        # containment so traversal and symlinks cannot walk around it.
+        # containment so traversal and symlinks cannot walk around it. Each rule
+        # guards exactly the arg its tool writes through (`path` today).
         assert r.match.args["path"]["path_under"] == [home]
+
+
+def test_a_write_without_the_guarded_arg_is_not_swept_up():
+    """The fail-closed footgun, pinned: `path_under` on a DENY rule treats an
+    *absent* arg as a match, so a config-dir deny must guard only the arg its
+    tool actually writes through. A write that omits that arg and targets
+    elsewhere must still be allowed — otherwise every edit would be denied."""
+    resolver = AuthzResolver(
+        Workspace(authz=Authz(rules=[Rule(tool="mcp://filesystem/edit_file", effect="allow")])),
+        DangerousCommands(),
+        deployment=DeploymentConfig(policy_protection="locked"),
+    )
+    d = resolver.resolve(
+        "mcp://filesystem/edit_file",
+        {"path": "/tmp/project/main.py", "old_string": "x", "new_string": "y"},
+        "claude-code",
+        action=_write_action("/tmp/project/main.py"),
+    )
+    assert d.effect.value == "allow"
 
 
 # --- end-to-end: constitutional deny is un-overridable ----------------------

@@ -42,10 +42,23 @@ from unified_enforce.policy import Rule as EngineRule
 
 from .config import DangerousCommands, DeploymentConfig, Rule, Workspace, mcphub_home
 
-# Filesystem write tools that could edit/replace/remove a policy file. Reads are
-# intentionally left out — a locked deployment protects policy *integrity*, and
-# denying reads would surprise legitimate tooling without adding protection.
-_FS_WRITE_TOOLS = ("create_file", "edit_file", "delete_file")
+# Filesystem write tools that could edit/replace/remove a policy file, each paired
+# with the argument that carries their write target. Reads are intentionally left
+# out — a locked deployment protects policy *integrity*, and denying reads would
+# surprise legitimate tooling without adding protection.
+#
+# The target arg is named per tool rather than guarded across a blanket path-arg
+# set, and that is load-bearing given how `path_under` fails closed: an *absent*
+# path argument on a DENY rule is treated as a match (deny), because a write
+# whose destination cannot be determined must not be allowed. That is correct
+# for the arg a tool actually writes through, and wrong for any other — a deny
+# rule on `directory` would match every `edit_file` (which never sends one),
+# blocking all edits. So each tool is guarded on exactly the arg it writes to.
+_FS_WRITE_TARGETS = {
+    "create_file": "path",
+    "edit_file": "path",
+    "delete_file": "path",
+}
 
 
 def _constitutional_rules(deployment: DeploymentConfig | None) -> list[EngineRule]:
@@ -67,14 +80,14 @@ def _constitutional_rules(deployment: DeploymentConfig | None) -> list[EngineRul
         return []
     protected = str(mcphub_home())
     rules: list[EngineRule] = []
-    for tool in _FS_WRITE_TOOLS:
+    for tool, target_arg in _FS_WRITE_TARGETS.items():
         rules.append(
             EngineRule(
                 id=f"const-fs-{tool}",
                 match=EngineMatch(
                     principal="*",
                     tool=f"mcp://filesystem/{tool}",
-                    args={"path": {"path_under": [protected]}},
+                    args={target_arg: {"path_under": [protected]}},
                 ),
                 effect="deny",
                 reason="locked deployment: the policy/config dir is not agent-writable",

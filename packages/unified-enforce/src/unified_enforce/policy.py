@@ -13,6 +13,8 @@ Spec: specs/enforce/e1.v1.md §4 (v0.1 core) and specs/enforce/policy.v2.md
 - verdicts: ALLOW / DENY / DEFER (defer = hand to the approval contract)
 
 Precedence (highest to lowest):
+  0. constitutional rules — outrank everything, un-waivable (UAI-216); empty by
+     default, so absent them precedence is unchanged
   1. exact rules (no wildcard in the tool pattern), in file order
   2. floors (generalized dangerous-commands: wildcard allows can't waive them)
   3. wildcard rules, first match wins
@@ -139,6 +141,13 @@ class PolicyDoc(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: Literal[1]
+    #: Highest-precedence tier (UAI-216). Evaluated before every other tier, so
+    #: a constitutional rule cannot be waived by any workspace rule or floor.
+    #: This is where a `locked` deployment installs the protections a compromised
+    #: agent must not be able to edit away (e.g. deny writes to the policy dir).
+    #: Empty by default: with no constitutional rules the engine behaves exactly
+    #: as before, which is what keeps the legacy-parity guarantee intact.
+    constitutional: list[Rule] = Field(default_factory=list)
     rules: list[Rule] = Field(default_factory=list)
     floors: list[Floor] = Field(default_factory=list)
     counters: list[Counter] = Field(default_factory=list)
@@ -287,6 +296,12 @@ class PolicyEngine:
             compile_one(r.id, r.match, r.when, Verdict(r.effect), r.audit_level, r.reason)
             for r in doc.rules
         ]
+        # Constitutional tier (UAI-216): compiled like any rule but evaluated
+        # ahead of everything, so it cannot be overridden. Empty ⇒ no-op.
+        self._constitutional = [
+            compile_one(r.id, r.match, r.when, Verdict(r.effect), r.audit_level, r.reason)
+            for r in doc.constitutional
+        ]
         # Precedence tier 1 vs 3 is decided by the tool pattern; floors are tier 2.
         self._exact = [c for c in rules if c.is_exact]
         self._floors = [
@@ -354,6 +369,7 @@ class PolicyEngine:
         activation: dict[str, Any] | None = None  # built lazily, only if a rule has CEL
 
         for tier, source in (
+            (self._constitutional, "constitutional"),
             (self._exact, "exact"),
             (self._floors, "floor"),
             (self._wildcard, "wildcard"),

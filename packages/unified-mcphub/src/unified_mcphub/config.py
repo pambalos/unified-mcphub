@@ -164,11 +164,6 @@ class DeploymentConfig(BaseModel):
     # approval (staged, applied only after human approval). None → derived from
     # policy_protection: open→hot, locked→approval.
     reload_mode: str | None = None
-    # Keep the "no principal may broaden its OWN policy" and config-dir-write
-    # constitutional protections on even in `open` mode. They never block a
-    # legitimate operator/agent edit (that is the operator acting, not an agent
-    # granting ITSELF allow), so on-by-default is safe everywhere.
-    forbid_self_broadening: bool = True
 
     @property
     def is_locked(self) -> bool:

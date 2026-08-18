@@ -40,7 +40,42 @@ from unified_enforce.policy import Match as EngineMatch
 from unified_enforce.policy import PolicyDoc, PolicyEngine, Verdict
 from unified_enforce.policy import Rule as EngineRule
 
-from .config import DangerousCommands, Rule, Workspace
+from .config import DangerousCommands, DeploymentConfig, Rule, Workspace, mcphub_home
+
+# Filesystem write tools that could edit/replace/remove a policy file. Reads are
+# intentionally left out — a locked deployment protects policy *integrity*, and
+# denying reads would surprise legitimate tooling without adding protection.
+_FS_WRITE_TOOLS = ("create_file", "edit_file", "delete_file")
+
+
+def _constitutional_rules(deployment: DeploymentConfig | None) -> list[EngineRule]:
+    """Rules a `locked` deployment installs at the highest precedence tier so a
+    compromised agent cannot edit them away (UAI-216).
+
+    Front-line defense-in-depth: deny agent-driven filesystem writes into the
+    hub config/policy dir. The robust backstop is reload-gating in hub.py — even
+    a write that slips past this (e.g. via a shell redirection, which carries no
+    structured path arg to match; tracked as a follow-up) does not take effect
+    in a locked deployment, because non-`hot` reload never auto-applies.
+    """
+    if deployment is None or not deployment.is_locked:
+        return []
+    protected = str(mcphub_home())
+    rules: list[EngineRule] = []
+    for tool in _FS_WRITE_TOOLS:
+        rules.append(
+            EngineRule(
+                id=f"const-fs-{tool}",
+                match=EngineMatch(
+                    principal="*",
+                    tool=f"mcp://filesystem/{tool}",
+                    args={"path": {"starts_with": [protected]}},
+                ),
+                effect="deny",
+                reason="locked deployment: the policy/config dir is not agent-writable",
+            )
+        )
+    return rules
 
 
 class Effect(str, Enum):
@@ -105,6 +140,7 @@ class AuthzResolver:
         workspace: Workspace,
         dangerous: DangerousCommands,
         telemetry: Telemetry | None = None,
+        deployment: DeploymentConfig | None = None,
     ) -> None:
         rules: list[EngineRule] = []
         names: dict[str, str] = {}  # engine rule id -> hub tool pattern (audit `authz_rule`)
@@ -134,7 +170,12 @@ class AuthzResolver:
             if floor is not None:
                 names[floor.id] = pattern
                 floors.append(floor)
-        self._engine = PolicyEngine(PolicyDoc(version=1, rules=rules, floors=floors))
+        constitutional = _constitutional_rules(deployment)
+        for r in constitutional:
+            names[r.id] = r.reason or r.id
+        self._engine = PolicyEngine(
+            PolicyDoc(version=1, constitutional=constitutional, rules=rules, floors=floors)
+        )
         self._names = names
         # Route through the Enforcer rather than the raw engine so every hub
         # decision emits a span (UAI-86). No audit chain here: the hub keeps its

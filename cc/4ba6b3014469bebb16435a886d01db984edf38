@@ -1,0 +1,22 @@
+packages/unified-mcphub/src/unified_mcphub/authz.py
+  s_282789b416b827::t_a92a351637ea71 45-61,83,90
+packages/unified-mcphub/tests/unit/test_deployment_profile.py
+  s_282789b416b827::t_8cc4e23eb0509a 98,102-103,106,108
+  s_282789b416b827::t_bdc04ed5cb8cea 88-89,93-97,99-101,104-105,107,109
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "cc4ba6b3014469bebb16435a886d01db984edf38",
+  "prompts": {},
+  "sessions": {
+    "s_282789b416b827": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "04876425-0a75-444e-9d0a-3bd7a976f4d3",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

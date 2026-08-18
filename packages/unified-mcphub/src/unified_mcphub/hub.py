@@ -531,12 +531,27 @@ class Hub:
         except Exception as exc:  # noqa: BLE001 - spec §8: any validation failure keeps prior config
             logger.error("config reload failed; keeping prior config: %s", exc)
             return
+        # The deployment security profile is fixed at boot and is NOT re-read
+        # here (UAI-216). It describes how this process was deployed, not what
+        # the config file currently says — otherwise the one control protecting
+        # policy from tampering could be switched off by editing the very file
+        # it protects. Changing `locked`/`open` takes a restart, in both
+        # directions, exactly like any other deployment property.
+        booted = self.config.hub.deployment
+        if new.hub.deployment != booted:
+            logger.warning(
+                "deployment profile change ignored on reload "
+                "(running policy_protection=%s, file says %s); a restart is required",
+                booted.policy_protection,
+                new.hub.deployment.policy_protection,
+            )
+        new.hub.deployment = booted
         self.config = new
         self.authz = AuthzResolver(
             new.workspace,
             new.dangerous,
             telemetry=self.telemetry,
-            deployment=new.hub.deployment,
+            deployment=booted,
         )
         self.redactor = Redactor(new.workspace.redact)
         self.approval.enabled = new.hub.approval.enabled

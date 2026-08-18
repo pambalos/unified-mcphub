@@ -84,7 +84,9 @@ def test_locked_injects_config_dir_write_denies():
     assert all(r.effect == "deny" for r in rules)
     home = str(mcphub_home())
     for r in rules:
-        assert r.match.args["path"]["starts_with"] == [home]
+        # `path_under`, not `starts_with`: the protected dir is matched by real
+        # containment so traversal and symlinks cannot walk around it.
+        assert r.match.args["path"]["path_under"] == [home]
 
 
 # --- end-to-end: constitutional deny is un-overridable ----------------------
@@ -176,3 +178,75 @@ def test_empty_constitutional_is_noop():
         principal=Principal(id="agent:a"), tool="mcp://x/y", verb="call", resource="*", params={}
     )
     assert eng.decide(action).verdict == Verdict.ALLOW
+
+
+# --- path containment, not string prefix ------------------------------------
+
+
+def _resolver(protection: str = "locked"):
+    """Permissive workspace (filesystem edits allowed) + the given profile, so
+    any deny below can only have come from the constitutional tier."""
+    ws = Workspace(authz=Authz(rules=[Rule(tool="mcp://filesystem/edit_file", effect="allow")]))
+    return AuthzResolver(
+        ws, DangerousCommands(), deployment=DeploymentConfig(policy_protection=protection)
+    )
+
+
+def _effect(resolver, path: str) -> str:
+    d = resolver.resolve(
+        "mcp://filesystem/edit_file",
+        {"path": path, "old_string": "x", "new_string": "y"},
+        "claude-code",
+        action=_write_action(path),
+    )
+    return d.effect.value
+
+
+def test_traversal_into_the_protected_dir_is_denied():
+    """The bypass a lexical prefix misses: the string does not start with the
+    protected dir, but the path resolves inside it."""
+    home = mcphub_home()
+    sneaky = str(home.parent / "elsewhere" / ".." / home.name / "config.yaml")
+    assert not sneaky.startswith(str(home)), "the string prefix must genuinely not match"
+    assert _effect(_resolver(), sneaky) == "deny"
+
+
+def test_the_protected_dir_itself_is_denied():
+    assert _effect(_resolver(), str(mcphub_home())) == "deny"
+
+
+def test_a_sibling_directory_sharing_the_prefix_is_not_swept_up():
+    """`<home>-backup` is a different directory. A bare `starts_with` prefix
+    denied writes to it; a containment test does not."""
+    sibling = f"{mcphub_home()}-backup/notes.txt"
+    assert _effect(_resolver(), sibling) == "allow"
+
+
+def test_constitutional_rule_is_named_by_its_tool_pattern_in_the_audit_map():
+    """`authz_rule` carries the same shape for a constitutional deny as for any
+    other rule — a tool pattern, not a prose reason."""
+    assert _resolver()._names["const-fs-edit_file"] == "mcp://filesystem/edit_file"
+
+
+# --- locked + hot is refused ------------------------------------------------
+
+
+def test_locked_with_hot_reload_is_refused():
+    """The combination reads as protected and is not, so it is a load error
+    rather than something quietly honoured."""
+    with pytest.raises(ValueError, match="cancels reload-gating"):
+        DeploymentConfig(policy_protection="locked", reload_mode="hot")
+
+
+def test_locked_defaults_to_approval():
+    assert DeploymentConfig(policy_protection="locked").effective_reload_mode() == "approval"
+
+
+def test_locked_may_still_be_manual_or_approval():
+    for mode in ("manual", "approval"):
+        assert DeploymentConfig(policy_protection="locked", reload_mode=mode).reload_mode == mode
+
+
+def test_open_with_hot_is_fine():
+    cfg = DeploymentConfig(policy_protection="open", reload_mode="hot")
+    assert cfg.effective_reload_mode() == "hot"

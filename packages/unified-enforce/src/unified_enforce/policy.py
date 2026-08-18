@@ -4,9 +4,12 @@ Spec: specs/enforce/e1.v1.md §4 (v0.1 core) and specs/enforce/policy.v2.md
 (v0.2: the hub's ADR-0006 authz constructs absorbed as first-class policy).
 
 - match on all four Action axes; `principal` accepts a glob or a list of globs
-- `match.args` — per-argument operator maps (equals / starts_with / matches),
-  ported verbatim from the hub: str()-coerced values, missing arg compares as
-  "" (rule quietly doesn't match). Structured matchers are for shape.
+- `match.args` — per-argument operator maps (equals / starts_with / matches /
+  path_under), ported verbatim from the hub: str()-coerced values, missing arg
+  compares as "" (rule quietly doesn't match). Structured matchers are for
+  shape. `path_under` is the exception to "verbatim": it canonicalises both
+  sides and tests real directory containment, because a lexical prefix is not
+  a safe way to protect a directory (see `_is_under`).
 - optional `when:` CEL condition for value-level constraints — compiled once at
   policy load, evaluated in-process. CEL is for value logic.
 - `floors:` — a tier that forces DEFER, overridable only by an exact rule
@@ -30,6 +33,7 @@ Fail closed, always:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -192,7 +196,35 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
 
 # --- args operator matching (ported verbatim from the hub's authz.py, ADR-0006) ---
 
-_ARGS_OPERATORS = ("equals", "starts_with", "matches")
+_ARGS_OPERATORS = ("equals", "starts_with", "matches", "path_under")
+
+
+def _canonical_path(value: str) -> str:
+    """Absolute, symlink- and `..`-resolved form of a path argument.
+
+    `realpath` resolves `..` segments *and* symlinks on the parts that exist,
+    and makes a relative path absolute against the process cwd, so the result
+    is a single definite location. It does not require the path to exist, which
+    matters because the thing being authorised is usually a file about to be
+    created. Never raises for ordinary input; the fallback keeps a pathological
+    value (embedded NUL, over-long) from taking the engine down.
+    """
+    try:
+        return os.path.realpath(os.path.expanduser(value))
+    except (OSError, ValueError):
+        return os.path.normpath(value)
+
+
+def _is_under(child: str, parent: str) -> bool:
+    """True when `child` is `parent` itself or lies inside it.
+
+    The separator is what makes this a directory test rather than a string
+    test: without it `/srv/app-backup` reads as living under `/srv/app`, which
+    both over-denies a deny rule and over-grants an allow rule.
+    """
+    if child == parent:
+        return True
+    return child.startswith(parent.rstrip(os.sep) + os.sep)
 
 
 def _compile_args(args_map: ArgsMap, owner_id: str) -> dict[str, list[tuple[str, list[Any]]]]:
@@ -208,7 +240,11 @@ def _compile_args(args_map: ArgsMap, owner_id: str) -> dict[str, list[tuple[str,
                     f"rule {owner_id!r}: unknown args operator {op!r} "
                     f"(allowed: {', '.join(_ARGS_OPERATORS)})"
                 )
-            if op == "matches":
+            if op == "path_under":
+                # Canonicalise the rule side once at load, so evaluation is a
+                # comparison of two already-normalised absolute paths.
+                ops.append((op, [_canonical_path(v) for v in values]))
+            elif op == "matches":
                 try:
                     ops.append((op, [re.compile(v) for v in values]))
                 except re.error as exc:
@@ -230,6 +266,12 @@ def _args_match(compiled: dict[str, list[tuple[str, list[Any]]]], params: dict[s
                     return False
             elif op == "starts_with":  # case-sensitive prefix
                 if not any(actual.startswith(v) for v in values):
+                    return False
+            elif op == "path_under":  # real containment, not a string prefix
+                if not actual:
+                    return False
+                resolved = _canonical_path(actual)
+                if not any(_is_under(resolved, v) for v in values):
                     return False
             else:  # matches — regex search ((?i) for case-insensitivity)
                 if not any(p.search(actual) for p in values):

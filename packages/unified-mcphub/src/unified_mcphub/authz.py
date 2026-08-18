@@ -57,6 +57,11 @@ def _constitutional_rules(deployment: DeploymentConfig | None) -> list[EngineRul
     a write that slips past this (e.g. via a shell redirection, which carries no
     structured path arg to match; tracked as a follow-up) does not take effect
     in a locked deployment, because non-`hot` reload never auto-applies.
+
+    Matched with `path_under`, not a string prefix: the argument is canonicalised
+    before comparison, so `<home>/../mcphub/config.yaml` and a symlink pointing
+    into the directory are caught, and a sibling like `<home>-backup` is not
+    swept up by an accidental prefix match.
     """
     if deployment is None or not deployment.is_locked:
         return []
@@ -69,7 +74,7 @@ def _constitutional_rules(deployment: DeploymentConfig | None) -> list[EngineRul
                 match=EngineMatch(
                     principal="*",
                     tool=f"mcp://filesystem/{tool}",
-                    args={"path": {"starts_with": [protected]}},
+                    args={"path": {"path_under": [protected]}},
                 ),
                 effect="deny",
                 reason="locked deployment: the policy/config dir is not agent-writable",
@@ -172,7 +177,10 @@ class AuthzResolver:
                 floors.append(floor)
         constitutional = _constitutional_rules(deployment)
         for r in constitutional:
-            names[r.id] = r.reason or r.id
+            # `names` maps engine rule id -> hub tool pattern for the audit
+            # `authz_rule` field. The pattern, not the reason: a reader of the
+            # audit log expects the same shape here as for every other rule.
+            names[r.id] = r.match.tool
         self._engine = PolicyEngine(
             PolicyDoc(version=1, constitutional=constitutional, rules=rules, floors=floors)
         )

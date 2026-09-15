@@ -1097,3 +1097,85 @@ def test_the_enforcer_wires_the_receipt_to_distribution(source, root):
     other = EvidenceShipper(Quiet(), on_receipt=mine)
     Enforcer(engine, distribution=dist, evidence=other)
     assert other.on_receipt is mine
+
+
+# --- containment announcements (build-04: the enforcement point that can stop
+# --- a call in progress needs to hear that the list changed) ------------------
+
+
+def test_a_containment_change_is_announced(source, root, policy_key):
+    heard: list[tuple[frozenset, frozenset]] = []
+    dist = make(source, root, on_containment=lambda a, r: heard.append((a, r)))
+    dist.refresh(now=NOW)
+    assert heard == [], "an empty list contains nobody; nothing to announce"
+
+    source.revocations_doc = revocations(
+        policy_key, version=2, entries=[{"principal_id": AGENT, "mode": "defer", "allow": []}]
+    )
+    dist.refresh(now=NOW)
+    assert heard == [(frozenset({AGENT}), frozenset())]
+
+    # Tightened, not merely re-listed: still news to a call in flight.
+    source.revocations_doc = revocations(
+        policy_key, version=3, entries=[{"principal_id": AGENT, "mode": "deny", "allow": []}]
+    )
+    dist.refresh(now=NOW)
+    assert heard[-1] == (frozenset({AGENT}), frozenset())
+
+    source.revocations_doc = revocations(policy_key, version=4, entries=[])
+    dist.refresh(now=NOW)
+    assert heard[-1] == (frozenset(), frozenset({AGENT}))
+
+
+def test_an_unchanged_list_announces_nothing(source, root, policy_key):
+    heard: list = []
+    source.revocations_doc = revocations(
+        policy_key, version=2, entries=[{"principal_id": AGENT, "mode": "defer", "allow": []}]
+    )
+    dist = make(source, root, on_containment=lambda a, r: heard.append((a, r)))
+    dist.refresh(now=NOW)
+    assert len(heard) == 1
+    # Same entries, new version: the list was reissued, nobody's state moved.
+    source.revocations_doc = revocations(
+        policy_key, version=3, entries=[{"principal_id": AGENT, "mode": "defer", "allow": []}]
+    )
+    dist.refresh(now=NOW)
+    assert len(heard) == 1
+
+
+def test_hydration_from_cache_announces_nothing(source, root, policy_key, tmp_path):
+    source.revocations_doc = revocations(
+        policy_key, version=2, entries=[{"principal_id": AGENT, "mode": "deny", "allow": []}]
+    )
+    first = make(source, root, cache_dir=tmp_path)
+    first.cache_keyset(source.keyset_doc)
+    first.refresh(now=NOW)
+
+    heard: list = []
+    second = make(
+        source,
+        root,
+        cache_dir=tmp_path,
+        on_containment=lambda a, r: heard.append((a, r)),
+        now=NOW,
+    )
+    assert AGENT in second.snapshot.containment, "the cache restored containment"
+    assert heard == [], "nothing is in flight at start-up; hydration is not a change"
+
+
+def test_a_failing_containment_handler_never_fails_the_refresh(source, root, policy_key):
+    def explode(added, removed):
+        raise RuntimeError("handler bug")
+
+    dist = make(source, root, on_containment=explode)
+    dist.refresh(now=NOW)
+    source.revocations_doc = revocations(
+        policy_key, version=2, entries=[{"principal_id": AGENT, "mode": "deny", "allow": []}]
+    )
+    report = dist.refresh(now=NOW)
+    assert report.applied_revocations
+    assert not [p for p in report.problems if p[0] == "revocations"]
+    forced = dist.gate(action())
+    assert forced is not None and forced.verdict == Verdict.DENY, (
+        "the list is applied before it is announced; a broken handler cannot un-contain"
+    )

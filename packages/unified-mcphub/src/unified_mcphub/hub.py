@@ -16,6 +16,7 @@ import os
 import signal
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -33,6 +34,7 @@ from . import servers as servers_mod
 from .approval import Approval, ApprovalChannel, TerminalChannel
 from .control import ApprovalEventBroadcaster, ControlApiChannel, PendingRegistry
 from .authz import AuthzResolver, Effect
+from .fleet import FleetLink
 from .config import (
     ApprovalConfig,
     Config,
@@ -59,6 +61,36 @@ from .util import now_iso, secure_write
 logger = logging.getLogger(__name__)
 
 BUILTIN_SERVER = "built-in"
+
+#: The containment entry that means "everyone in the fleet"; mirrors
+#: `unified_enforce.distribution.FLEET_WIDE`.
+FLEET_WIDE = "*"
+
+
+@dataclass
+class Interdiction:
+    """Why an in-flight forward was cancelled, and by whom."""
+
+    by: str
+    reason: str
+
+
+@dataclass
+class InFlight:
+    """One forward between its `received` and its closing audit entry.
+
+    The registry of these *is* the hub's in-flight state (build-04). It is
+    derived from the two-phase bracket — an entry exists exactly while the
+    forward task runs — rather than kept as a second source of truth that
+    could disagree with the audit log.
+    """
+
+    request_id: str
+    principal: str
+    tool_uri: str
+    task: asyncio.Task
+    started: float
+    interdiction: Interdiction | None = None
 
 
 class PolicyDirWritableError(RuntimeError):
@@ -150,12 +182,18 @@ class Hub:
         self.servers: dict[str, SupervisedServer] = {}
         self.builtins = BuiltinRegistry()
         self.telemetry = _build_telemetry(config.hub.otel)
-        self.authz = AuthzResolver(
-            config.workspace,
-            config.dangerous,
-            telemetry=self.telemetry,
-            deployment=config.hub.deployment,
+        #: Joined to a fleet, or standalone (None). Built before the authorizer
+        #: because the authorizer's Enforcer must hold the fleet's revocation
+        #: state to gate on containment before policy.
+        self.fleet: FleetLink | None = (
+            FleetLink(config.hub.control_plane, on_containment=self._on_containment_change)
+            if config.hub.control_plane.enabled
+            else None
         )
+        self.authz = self._build_authz(config)
+        #: Forwards currently between `received` and their closing entry.
+        self._inflight: dict[str, InFlight] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
         self.redactor = Redactor(config.workspace.redact)
         approval_cfg = config.hub.approval
         self.approval_events = ApprovalEventBroadcaster()
@@ -171,6 +209,16 @@ class Hub:
         self._started_at = now_iso()
         self._reload_task: asyncio.Task | None = None
         self._refresh_task: asyncio.Task | None = None
+
+    def _build_authz(self, config: Config) -> AuthzResolver:
+        return AuthzResolver(
+            config.workspace,
+            config.dangerous,
+            telemetry=self.telemetry,
+            deployment=config.hub.deployment,
+            distribution=self.fleet.distribution if self.fleet else None,
+            evidence=self.fleet.evidence if self.fleet else None,
+        )
 
     def _select_approval_channel(self, cfg: ApprovalConfig) -> ApprovalChannel | None:
         # Attached to a real terminal -> keypress reader (local dev / interactive).
@@ -194,6 +242,8 @@ class Hub:
                 refs.add(f"{name}-oauth-refresh")
             elif spec.auth_secret_ref:
                 refs.add(spec.auth_secret_ref)
+        if self.fleet is not None:
+            refs.add(self.fleet.credential_secret_ref)
         return sorted(refs)
 
     def _gate_secrets(self) -> None:
@@ -235,6 +285,14 @@ class Hub:
         self.audit.start()
         self.builtins.load_user_tools(mcphub_home() / "tools")
         self._gate_secrets()
+        self._loop = asyncio.get_running_loop()
+        if self.fleet is not None:
+            credential = (
+                self.secrets.get(self.fleet.credential_secret_ref)
+                if self.secrets.exists()
+                else None
+            )
+            await self.fleet.start(credential)
 
         for name, spec in self.config.workspace.servers.items():
             if not spec.enabled:
@@ -263,6 +321,8 @@ class Hub:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._transport.stop()
+        if self.fleet is not None:
+            await self.fleet.stop()
         for server in list(self.servers.values()):
             await server.stop()
         self.audit.stop()  # release the audit lock first — must always happen
@@ -402,12 +462,41 @@ class Hub:
             return _err(req_id, -32003, f"denied by policy ({authz_decision})")
 
         t0 = time.monotonic()
+        task = asyncio.create_task(
+            self._forward(server_name, tool, args), name=f"forward:{request_id}"
+        )
+        flight = InFlight(
+            request_id=request_id,
+            principal=action.principal.id,
+            tool_uri=tool_uri,
+            task=task,
+            started=t0,
+        )
+        self._inflight[request_id] = flight
         try:
-            value = await self._forward(server_name, tool, args)
+            value = await task
             # Redact secrets before the result is audited or returned, so neither
             # the audit log nor the caller ever sees them (spec §10.2).
             result = self.redactor.result(_result_dict(value))
             status = "error" if result.get("isError") else "ok"
+        except asyncio.CancelledError:
+            if flight.interdiction is None:
+                # Not ours: the caller's task was cancelled (shutdown, client
+                # gone). Do not let the forward outlive the request either.
+                task.cancel()
+                raise
+            # The plane stopped this call while it was in flight (build-04).
+            # Whatever the upstream returns after this point is dropped: not
+            # audited, not returned. The bracket closes as `interdicted`, which
+            # a reader can tell from a crash.
+            self.audit.write_interdicted(
+                request_id=request_id,
+                duration_ms=(time.monotonic() - t0) * 1000,
+                interdicted_by=flight.interdiction.by,
+                reason=flight.interdiction.reason,
+                prompt_response_ms=prompt_ms,
+            )
+            return _err(req_id, -32004, f"interdicted: {flight.interdiction.reason}")
         except Exception as exc:  # noqa: BLE001
             duration = (time.monotonic() - t0) * 1000
             self.audit.write_completed(
@@ -419,6 +508,8 @@ class Hub:
                 prompt_response_ms=prompt_ms,
             )
             return _err(req_id, -32000, f"tool execution failed: {exc}")
+        finally:
+            self._inflight.pop(request_id, None)
 
         self.audit.write_completed(
             request_id=request_id,
@@ -429,6 +520,73 @@ class Hub:
             prompt_response_ms=prompt_ms,
         )
         return _ok(req_id, result)
+
+    # --- in-flight interdiction (build-04) ---
+
+    def in_flight(self) -> list[dict]:
+        now = time.monotonic()
+        return [
+            {
+                "request_id": f.request_id,
+                "principal": f.principal,
+                "tool": f.tool_uri,
+                "elapsed_ms": round((now - f.started) * 1000, 3),
+            }
+            for f in self._inflight.values()
+        ]
+
+    def interdict(self, principal: str, *, by: str, reason: str) -> list[str]:
+        """Cancel every forward in flight for `principal` (`*` = all of them).
+
+        Returns the request ids interrupted. This stops what is *in progress*;
+        it does not contain the principal's next action — that is the
+        revocation list's job, and the two arrive together when the control
+        plane contains someone (`_on_containment_change`). An operator calling
+        this directly on a standalone hub gets exactly what it says: the calls
+        now in flight end, and the next one is decided by policy as usual.
+
+        Upstream cancellation is best-effort. Cancelling the task drops the
+        response and frees the hub; a stdio server that has already begun a
+        side effect finishes it. Severing the effect is build-05 (egress-sever)
+        and build-08 (sandbox), not this.
+        """
+        hit: list[str] = []
+        for flight in list(self._inflight.values()):
+            if principal != FLEET_WIDE and flight.principal != principal:
+                continue
+            if flight.interdiction is not None:
+                continue  # already being stopped; do not overwrite the attribution
+            flight.interdiction = Interdiction(by=by, reason=reason)
+            flight.task.cancel()
+            hit.append(flight.request_id)
+        if hit:
+            logger.warning(
+                "interdicted %d in-flight call(s) for %s (%s): %s", len(hit), principal, by, reason
+            )
+        return hit
+
+    def _on_containment_change(self, added: frozenset[str], removed: frozenset[str]) -> None:
+        """`Distribution` announced a verified change to who is contained.
+
+        Runs on the refreshing thread (the poller's worker, or the evidence
+        shipper's on a receipt), so the cancellation is handed to the loop.
+        Only additions matter here: a release does nothing to a call in
+        flight, and the next action is simply decided by policy again.
+        """
+        if not added or self._loop is None:
+            return
+        snapshot = self.fleet.distribution.snapshot if self.fleet else None
+
+        def _apply() -> None:
+            for principal in sorted(added):
+                mode = snapshot.containment[principal].mode if snapshot else "contained"
+                self.interdict(
+                    principal,
+                    by="control-plane",
+                    reason=f"{principal} is contained ({mode})",
+                )
+
+        self._loop.call_soon_threadsafe(_apply)
 
     async def _forward(self, server_name: str, tool: str, args: dict):
         if server_name == BUILTIN_SERVER:
@@ -673,13 +831,14 @@ class Hub:
                 new.hub.deployment.policy_protection,
             )
         new.hub.deployment = booted
+        # Likewise the fleet link: joining or leaving a fleet is a deployment
+        # property, and an agent that could edit config to drop `control_plane`
+        # would be editing itself out of containment.
+        if new.hub.control_plane != self.config.hub.control_plane:
+            logger.warning("control_plane change ignored on reload; a restart is required")
+        new.hub.control_plane = self.config.hub.control_plane
         self.config = new
-        self.authz = AuthzResolver(
-            new.workspace,
-            new.dangerous,
-            telemetry=self.telemetry,
-            deployment=booted,
-        )
+        self.authz = self._build_authz(new)
         self.redactor = Redactor(new.workspace.redact)
         self.approval.enabled = new.hub.approval.enabled
         await self._apply_server_diff(new.workspace.servers)
@@ -715,6 +874,8 @@ class Hub:
                 name: {"healthy": s.healthy, "tools": len(s.tools), "last_error": s.last_error}
                 for name, s in self.servers.items()
             },
+            "fleet": self.fleet.status() if self.fleet is not None else None,
+            "in_flight": self.in_flight(),
         }
 
 

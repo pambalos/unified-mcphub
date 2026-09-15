@@ -159,6 +159,8 @@ class AuthzResolver:
         dangerous: DangerousCommands,
         telemetry: Telemetry | None = None,
         deployment: DeploymentConfig | None = None,
+        distribution: Any = None,
+        evidence: Any = None,
     ) -> None:
         rules: list[EngineRule] = []
         names: dict[str, str] = {}  # engine rule id -> hub tool pattern (audit `authz_rule`)
@@ -202,7 +204,14 @@ class AuthzResolver:
         # decision emits a span (UAI-86). No audit chain here: the hub keeps its
         # own two-phase AuditLog, which is already chained and records the
         # completion half that the engine's single-entry form cannot express.
-        self._enforcer = Enforcer(self._engine, telemetry=telemetry)
+        # `distribution` is the fleet's verified policy + revocation state
+        # (build-04): when the hub is joined to a control plane, containment is
+        # consulted before any workspace rule, in the Enforcer, in the same
+        # order the Envoy sidecar uses. Standalone hubs pass None and nothing
+        # changes. `evidence` ships each decision to the control plane.
+        self._enforcer = Enforcer(
+            self._engine, telemetry=telemetry, distribution=distribution, evidence=evidence
+        )
 
     def resolve(
         self, tool_uri: str, args: dict[str, Any], caller: str, action: Action | None = None

@@ -146,6 +146,40 @@ class AuditLog:
         }
         self._write(entry)
 
+    def write_interdicted(
+        self,
+        *,
+        request_id: str,
+        duration_ms: float,
+        interdicted_by: str,
+        reason: str,
+        prompt_response_ms: float | None = None,
+    ) -> None:
+        """The third phase (build-04). Closes a bracket whose forward was
+        cancelled while in flight because the principal became contained.
+
+        Distinct from `completed` with an error on purpose: a reader must be
+        able to tell "the upstream failed" from "the plane stopped this call"
+        without parsing an error string — today an interrupted call and a
+        crashed one look the same, and that ambiguity is what this removes.
+        No result is recorded because none was accepted: whatever the upstream
+        returned after cancellation was dropped, never audited, never returned.
+        """
+        self._write(
+            {
+                "phase": "interdicted",
+                "request_id": request_id,
+                "ts": utcnow().isoformat(),
+                "seq": self._next_seq(),
+                "duration_ms": round(duration_ms, 3),
+                "result": None,
+                "result_status": "interdicted",
+                "interdicted_by": interdicted_by,
+                "reason": reason,
+                "prompt_response_ms": prompt_response_ms,
+            }
+        )
+
     # --- internals ---
 
     def _next_seq(self) -> int:

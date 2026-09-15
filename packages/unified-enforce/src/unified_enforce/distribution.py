@@ -394,6 +394,7 @@ class Distribution:
         on_stale: StaleAction = StaleAction.KEEP,
         required_kids: set[str] | None = None,
         now: datetime | None = None,
+        on_containment: Any = None,
     ) -> None:
         self._source = source
         self._fleet = fleet_id
@@ -401,6 +402,15 @@ class Distribution:
         self._cache = Path(cache_dir) if cache_dir else None
         self._on_stale = on_stale
         self._required_kids = required_kids
+        #: Called as `on_containment(added, removed)` -- two frozensets of
+        #: principal ids -- after a verified revocation list changes who is
+        #: contained (or how strictly). `gate()` already stops a contained
+        #: principal's *next* action; this is for the enforcement point that
+        #: can also stop the one in progress. Fired on the refreshing thread,
+        #: never on hydration from cache (nothing is in flight at start-up),
+        #: and a handler that raises does not fail the refresh: the list is
+        #: applied first, the announcement second.
+        self.on_containment = on_containment
         #: `refresh` is called from the poller's worker thread and, since
         #: receipts, from the evidence shipper's thread. Serialised, so two
         #: refreshes cannot interleave their snapshot writes.
@@ -654,6 +664,7 @@ class Distribution:
             self._refuse(report, "revocations", verdict.reason, verdict.detail)
             return
 
+        before = self.snapshot.containment
         self.snapshot.containment = {
             entry["principal_id"]: Containment(
                 principal_id=entry["principal_id"],
@@ -666,6 +677,24 @@ class Distribution:
         self._revocations_expire_at = verdict.payload["expires_at_ms"]
         report.applied_revocations = True
         self._write_cache("revocations.json", doc)
+        if not hydrating:
+            self._announce_containment(before, self.snapshot.containment)
+
+    def _announce_containment(
+        self, before: Mapping[str, Containment], after: Mapping[str, Containment]
+    ) -> None:
+        if self.on_containment is None:
+            return
+        # "Added" is anyone newly contained *or* contained differently: a
+        # principal moved from `defer` to `deny` is news to a call in flight.
+        added = frozenset(p for p, c in after.items() if before.get(p) != c)
+        removed = frozenset(p for p in before if p not in after)
+        if not added and not removed:
+            return
+        try:
+            self.on_containment(added, removed)
+        except Exception:
+            log.exception("containment change handler raised")
 
     _revocations_expire_at: int | None = None
     _shadow_expire_at: int | None = None

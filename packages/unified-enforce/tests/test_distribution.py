@@ -990,3 +990,110 @@ async def test_containment_lands_within_one_poll(root, policy_key):
         await poller.stop()
 
     assert time.monotonic() - pressed < 1.0
+
+
+# --- receipts: refresh at once when the list moved --------------------------------
+#
+# The evidence receipt for the batch that raised an incident carries the fleet's
+# revocation-list version. The reporting sidecar is the one running the agent
+# that was just contained, and the one that would otherwise wait up to a full
+# poll interval to hear about it. These hold the property, and its limit: the
+# receipt is a cue, never a source.
+
+
+def test_a_moved_revocations_version_refreshes_at_once(source, root, policy_key):
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+    assert dist.snapshot.revocations_version == 1
+    assert dist.gate(action()) is None
+
+    # The control plane contained this agent (Active mode: defer) and said so
+    # in the receipt for the batch that caused it.
+    source.revocations_doc = revocations(
+        policy_key, version=2, entries=[{"principal_id": AGENT, "mode": "defer", "allow": []}]
+    )
+    report = dist.on_receipt({"accepted": 1, "raised": 1, "revocations_version": 2}, now=NOW)
+
+    assert report is not None, "a moved version must trigger a refresh"
+    assert dist.snapshot.revocations_version == 2
+    forced = dist.gate(action())
+    assert forced is not None and forced.verdict == "defer"
+
+
+def test_an_unmoved_version_does_not_refresh(source, root):
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+
+    fetches = 0
+    original = source.fetch_revocations
+
+    def counting():
+        nonlocal fetches
+        fetches += 1
+        return original()
+
+    source.fetch_revocations = counting
+
+    assert dist.on_receipt({"revocations_version": 1}, now=NOW) is None
+    assert dist.on_receipt({"revocations_version": 0}, now=NOW) is None
+    assert dist.on_receipt({"revocations_version": None}, now=NOW) is None
+    assert dist.on_receipt({"revocations_version": "2"}, now=NOW) is None
+    assert dist.on_receipt({}, now=NOW) is None
+    assert fetches == 0
+
+
+def test_a_forged_receipt_cannot_downgrade_contain_or_release(source, root, policy_key):
+    """THE NEGATIVE CONTROL for receipts. Anyone who can answer an evidence
+    post can write a receipt. It may cost one verified fetch and nothing else:
+    the refresh it triggers still checks every signature against the pinned
+    root and still refuses a version older than the one held."""
+    contained = [{"principal_id": AGENT, "mode": "deny", "allow": []}]
+    source.revocations_doc = revocations(policy_key, version=3, entries=contained)
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+    assert dist.gate(action()).verdict == "deny"
+
+    # A receipt claiming a far newer version. The source still serves 3, so a
+    # refresh changes nothing — and the agent stays contained.
+    dist.on_receipt({"revocations_version": 99}, now=NOW)
+    assert dist.snapshot.revocations_version == 3
+    assert dist.gate(action()).verdict == "deny"
+
+    # A receipt cannot carry the list itself. Only the signed fetch counts.
+    dist.on_receipt({"revocations_version": 100, "revocations": []}, now=NOW)
+    assert dist.gate(action()).verdict == "deny"
+
+    # And a receipt cannot release: an older version in the receipt is ignored,
+    # and an older version *served* is refused as the rollback it is.
+    source.revocations_doc = revocations(policy_key, version=1, entries=[])
+    dist.on_receipt({"revocations_version": 4}, now=NOW)
+    assert dist.snapshot.revocations_version == 3
+    assert dist.gate(action()).verdict == "deny"
+
+
+def test_the_enforcer_wires_the_receipt_to_distribution(source, root):
+    """Wired, not merely available — the same rule as the kill switch."""
+    from unified_enforce.enforcer import Enforcer
+    from unified_enforce.evidence import EvidenceShipper
+    from unified_enforce.policy import PolicyEngine
+
+    class Quiet:
+        def send(self, batch):
+            return None
+
+    engine = PolicyEngine.from_yaml(
+        "version: 1\nrules:\n  - id: allow-all\n    match:\n      tool: '**'\n    effect: allow\n"
+    )
+    dist = make(source, root)
+    shipper = EvidenceShipper(Quiet())
+    assert shipper.on_receipt is None
+
+    Enforcer(engine, distribution=dist, evidence=shipper)
+
+    assert shipper.on_receipt == dist.on_receipt
+
+    # A deployment that wired its own handler keeps it.
+    mine = lambda receipt: None  # noqa: E731
+    other = EvidenceShipper(Quiet(), on_receipt=mine)
+    Enforcer(engine, distribution=dist, evidence=other)
+    assert other.on_receipt is mine

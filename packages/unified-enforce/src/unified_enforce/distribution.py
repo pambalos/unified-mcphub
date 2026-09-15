@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -400,6 +401,10 @@ class Distribution:
         self._cache = Path(cache_dir) if cache_dir else None
         self._on_stale = on_stale
         self._required_kids = required_kids
+        #: `refresh` is called from the poller's worker thread and, since
+        #: receipts, from the evidence shipper's thread. Serialised, so two
+        #: refreshes cannot interleave their snapshot writes.
+        self._refresh_lock = threading.Lock()
         self.snapshot = Snapshot()
         #: The keys from the last key set that verified. Retained so anything
         #: else needing to check a control-plane signature -- the approval
@@ -424,6 +429,35 @@ class Distribution:
 
     def refresh(self, *, now: datetime | None = None) -> RefreshReport:
         """One poll. Never raises; the report says what happened."""
+        with self._refresh_lock:
+            return self._refresh(now=now)
+
+    def on_receipt(
+        self, receipt: Mapping[str, Any], *, now: datetime | None = None
+    ) -> RefreshReport | None:
+        """An evidence receipt says the fleet's revocation list moved: refresh now.
+
+        The reporting sidecar is the one running the agent whose batch just
+        raised an incident, so it is the one that most needs the new list --
+        and the one that would otherwise wait up to a full poll interval for
+        it. This makes "contained at its next action" true for that sidecar.
+
+        The receipt is a cue, not a source. Nothing in it is trusted: it only
+        decides *whether* to run the same verified refresh the poller runs, and
+        that refresh still checks every signature against the pinned root and
+        still refuses a version older than the one held. A forged receipt can
+        therefore cost one extra fetch and nothing else -- it cannot downgrade,
+        cannot contain, and cannot release.
+        """
+        version = receipt.get("revocations_version")
+        if not isinstance(version, int):
+            return None
+        held = self.snapshot.revocations_version
+        if held is not None and version <= held:
+            return None
+        return self.refresh(now=now)
+
+    def _refresh(self, *, now: datetime | None = None) -> RefreshReport:
         now_ms = _ms(now or datetime.now(UTC))
         report = RefreshReport()
 

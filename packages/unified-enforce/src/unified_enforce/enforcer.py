@@ -44,6 +44,17 @@ class Enforcer:
         self._distribution = distribution
         self._evidence = evidence
         self._shadow = shadow
+        # Wired here rather than left as a component someone remembers to
+        # connect, for the reason `enforce()` gives about the kill switch: a
+        # sidecar that ships evidence and polls containment but never learns
+        # from the receipt that the list moved is a containment that arrives a
+        # poll interval late, while everything looks correctly configured.
+        if (
+            distribution is not None
+            and evidence is not None
+            and getattr(evidence, "on_receipt", None) is None
+        ):
+            evidence.on_receipt = distribution.on_receipt
         #: Cumulative totals (UAI-147). Lives here rather than in the engine
         #: because it is state, and the engine's purity is what the latency
         #: budget and the fail-closed story rest on. Created unconditionally:

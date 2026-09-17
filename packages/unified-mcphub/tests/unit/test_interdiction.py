@@ -237,3 +237,53 @@ def _today() -> str:
     from datetime import UTC, datetime
 
     return datetime.now(UTC).date().isoformat()
+
+
+@pytest.mark.asyncio
+async def test_a_finished_call_still_in_the_registry_is_not_reported_interdicted(hub):
+    """Between the forward finishing and `_handle_call` popping it, the entry
+    is still registered. Stopping it does nothing — the result is on its way
+    — so it must not be reported as stopped, or the operator's answer and
+    the audit disagree."""
+    from unified_mcphub.hub import InFlight
+
+    done = asyncio.get_running_loop().create_future()
+    done.set_result({"content": []})
+    hub._inflight["late"] = InFlight(
+        request_id="late", principal="agent:crew-1", tool_uri="t", task=done, started=0.0
+    )
+    try:
+        assert hub.interdict("agent:crew-1", by="operator:x", reason="late") == []
+        assert hub._inflight["late"].interdiction is None
+    finally:
+        del hub._inflight["late"]
+
+
+@pytest.mark.asyncio
+async def test_a_principal_released_before_the_loop_runs_does_not_abort_the_rest(hub):
+    """The announcement runs on the loop some time after the refresh that
+    made it; a later refresh can have replaced the snapshot by then. A
+    principal no longer in it must not raise inside the callback and leave
+    the principals after it uncontained."""
+    from types import SimpleNamespace
+
+    hub.fleet = SimpleNamespace(  # type: ignore[assignment]
+        distribution=SimpleNamespace(snapshot=SimpleNamespace(containment={}))
+    )
+    t1, t2 = _call(hub, "crew-1", 1), _call(hub, "crew-2", 2)
+    await _settle()
+    await asyncio.to_thread(
+        hub._on_containment_change,
+        frozenset({"agent:crew-0", "agent:crew-1", "agent:crew-2"}),
+        frozenset(),
+    )
+    b1, b2 = await asyncio.wait_for(asyncio.gather(t1, t2), timeout=5)
+    assert b1["error"]["code"] == -32004 and b2["error"]["code"] == -32004
+    assert len(audit_reader.search(audit_dir(), phase="interdicted")) == 2
+
+
+def test_the_fleet_wide_sentinel_is_the_engines():
+    from unified_enforce import distribution
+    from unified_mcphub import hub as hub_mod
+
+    assert hub_mod.FLEET_WIDE is distribution.FLEET_WIDE

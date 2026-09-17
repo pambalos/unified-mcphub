@@ -241,6 +241,7 @@ class AuthzResolver:
                 source="identity_invalid",
                 reason=f"no valid credential presented from {source or 'unknown'}",
             ),
+            count=False,  # a refusal at the door is not the fleet's spend
         )
 
     def record_ingress(self, action: Action, hits: list[str]) -> None:
@@ -265,6 +266,7 @@ class AuthzResolver:
                 source="injection_suspected",
                 reason=f"tool result carried instruction shapes: {', '.join(hits)}",
             ),
+            count=False,  # the call was counted when it was decided
         )
 
     def resolve(

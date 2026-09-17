@@ -203,6 +203,7 @@ class ExtAuthzCore:
                     source="agent_protocol_unenrolled",
                     reason=f"{protocol} spoken by a peer that established no identity",
                 ),
+                count=False,  # beside the verdict, which was already counted
             )
         except Exception:  # noqa: BLE001 - a finding must never change a verdict
             pass

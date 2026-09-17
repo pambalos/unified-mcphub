@@ -12,6 +12,8 @@ rules:
   - id: mcp-open
     match: {tool: "https://tools.acme.internal/**"}
     effect: allow
+counters:
+  - id: calls
 """
 
 
@@ -121,3 +123,36 @@ def test_ordinary_unenrolled_traffic_records_no_protocol_finding():
     ev = Collecting()
     core(ev).check(_req(path="/api/orders", body=b'{"id": 1}'))
     assert not [d for _, d in ev.records if d.source == "agent_protocol_unenrolled"]
+
+
+def test_the_finding_is_not_charged_to_the_counters():
+    """The request was counted when it was decided. The finding beside it,
+    with the default `tool: *` / `verb: *` counter match, must not count it
+    again — or a rate floor trips at half its rate for unenrolled traffic."""
+    ev = Collecting()
+    c = core(ev)
+    c.check(_req())
+    assert c._enforcer.counters.snapshot("agent:unknown", ["calls"])["calls"]["day"] == 1.0
+
+
+# --- the method comes from the prefix, not from a parse ------------------------------
+
+
+def test_the_method_is_read_from_a_body_larger_than_the_prefix():
+    """A `tools/call` with real arguments is far past 4 KiB. A prefix never
+    parses as a document, so parsing missed every such body."""
+    big = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {"name": "write", "arguments": {"content": "x" * 20_000}},
+    }
+    assert fp(body=json.dumps(big).encode(), path="/rpc") == "mcp"
+    a2a = {"jsonrpc": "2.0", "id": 1, "method": "tasks/send", "params": {"text": "y" * 20_000}}
+    assert fp(body=json.dumps(a2a).encode(), path="/agent") == "a2a"
+
+
+def test_a_method_without_jsonrpc_is_not_a_protocol():
+    assert fp(body=b'{"method": "tools/call"}', path="/rpc") is None
+    assert fp(body=b'{"jsonrpc": "1.0", "method": "tools/call"}', path="/rpc") is None
+    assert fp(body=b"jsonrpc 2.0 method tools/call", path="/rpc") is None

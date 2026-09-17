@@ -69,8 +69,25 @@ def scan_text(text: str) -> list[str]:
     return [name for name, pattern in PATTERNS.items() if pattern.search(sample)]
 
 
+def _text_of(item: Any) -> str | None:
+    """The text a content block carries: a `text` block's own, or an embedded
+    resource's (`{"type": "resource", "resource": {"uri", "text"}}`) — the
+    form a fetched page or a `resources/read` arrives in, and the one an
+    injection is most likely to ride."""
+    if not isinstance(item, dict):
+        return None
+    text = item.get("text")
+    if isinstance(text, str):
+        return text
+    resource = item.get("resource")
+    if isinstance(resource, dict) and isinstance(resource.get("text"), str):
+        return resource["text"]
+    return None
+
+
 def scan(result: Any) -> list[str]:
-    """Every text content block of a CallToolResult dict, unique ids in order."""
+    """Every text-bearing content block of a CallToolResult dict, unique ids
+    in order."""
     if not isinstance(result, dict):
         return []
     content = result.get("content")
@@ -78,8 +95,10 @@ def scan(result: Any) -> list[str]:
         return []
     found: list[str] = []
     for item in content:
-        if isinstance(item, dict) and isinstance(item.get("text"), str):
-            for name in scan_text(item["text"]):
-                if name not in found:
-                    found.append(name)
+        text = _text_of(item)
+        if text is None:
+            continue
+        for name in scan_text(text):
+            if name not in found:
+                found.append(name)
     return found

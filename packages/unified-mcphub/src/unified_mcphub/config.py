@@ -273,6 +273,10 @@ class ControlPlaneConfig(BaseModel):
             )
         if self.poll_seconds <= 0:
             raise ValueError("control_plane.poll_seconds must be positive")
+        if self.evidence_interval_seconds <= 0:
+            # `EvidenceShipper` waits this long between flushes; zero is a
+            # thread spinning at full tilt against the control plane.
+            raise ValueError("control_plane.evidence_interval_seconds must be positive")
         return self
 
 

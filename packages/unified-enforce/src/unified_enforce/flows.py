@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from .evidence import EvidenceShipper, HttpSink
 from .policy import Decision, Verdict
@@ -72,19 +73,29 @@ def from_connection(
     }
 
 
+def _authority(authority: str, *, default: int) -> tuple[str, int]:
+    """`host[:port]`, including the bracketed IPv6 form (`[::1]:8080`), which
+    a split on the first colon turns into a host of `[`."""
+    try:
+        parts = urlsplit(f"//{authority}")
+        host, port = parts.hostname or "", parts.port
+    except ValueError:
+        return authority.lower(), default
+    return host.lower(), port if port is not None else default
+
+
 def from_request(
     req: CheckInput, decision: Decision, *, now: datetime | None = None
 ) -> dict[str, Any]:
     """One HTTP request as a flow: the authority and the scheme's port. The
     path and headers are deliberately not here."""
     at = (now or datetime.now(UTC)).replace(microsecond=0)
-    host, _, port_text = (req.host or "").partition(":")
-    port = int(port_text) if port_text.isdigit() else (443 if req.scheme == "https" else 80)
+    host, port = _authority(req.host or "", default=443 if req.scheme == "https" else 80)
     source = req.headers.get("x-forwarded-for", "").split(",")[0].strip() or req.principal_id
     return {
         "digest": _digest("http", source, host, port, req.principal_id, at.isoformat()),
         "source": source,
-        "dst_host": host.lower(),
+        "dst_host": host,
         "dst_port": port,
         "protocol": "tcp",
         "bytes": int(req.body_size or 0),

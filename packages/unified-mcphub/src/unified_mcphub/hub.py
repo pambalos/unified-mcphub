@@ -25,6 +25,7 @@ from ulid import ULID
 from watchfiles import awatch
 
 from unified_enforce import Action, ActionContext, Principal, Telemetry
+from unified_enforce.distribution import FLEET_WIDE as _FLEET_WIDE
 from unified_paths import canonical
 
 from . import audit as audit_mod
@@ -63,9 +64,17 @@ logger = logging.getLogger(__name__)
 
 BUILTIN_SERVER = "built-in"
 
-#: The containment entry that means "everyone in the fleet"; mirrors
-#: `unified_enforce.distribution.FLEET_WIDE`.
-FLEET_WIDE = "*"
+#: The containment entry that means "everyone in the fleet". The engine's
+#: sentinel, so `interdict("*")` and `gate()` cannot stop meaning the same
+#: thing.
+FLEET_WIDE = _FLEET_WIDE
+
+
+#: How often one source's identity refusals are recorded (seconds), and how
+#: many sources the hub tracks at once. Bounds on what an unauthenticated
+#: caller can make the hub write.
+REFUSAL_WINDOW = 60.0
+REFUSAL_SOURCES = 1024
 
 
 @dataclass
@@ -194,6 +203,8 @@ class Hub:
         self.authz = self._build_authz(config)
         #: Forwards currently between `received` and their closing entry.
         self._inflight: dict[str, InFlight] = {}
+        #: (source, method) → (window started at, refusals not recorded since).
+        self._refusals: dict[tuple[str, str], tuple[float, int]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self.redactor = Redactor(config.workspace.redact)
         approval_cfg = config.hub.approval
@@ -480,15 +491,7 @@ class Hub:
             # the audit log nor the caller ever sees them (spec §10.2).
             result = self.redactor.result(_result_dict(value))
             status = "error" if result.get("isError") else "ok"
-            # D-12 (build-14): the deterministic injection pass over what is
-            # about to enter the agent. Ids only leave the hub; the result is
-            # returned unchanged — this is a finding, not a filter.
-            hits = injection.scan(result)
-            if hits:
-                logger.warning(
-                    "INJECTION SHAPES in result request=%s tool=%s: %s", request_id, tool_uri, hits
-                )
-                self.authz.record_ingress(action, hits)
+            hits = self._scan_result(request_id, tool_uri, action, result)
         except asyncio.CancelledError:
             if flight.interdiction is None:
                 # Not ours: the caller's task was cancelled (shutdown, client
@@ -539,7 +542,16 @@ class Hub:
         deny for the local operator, and through the authorizer as a
         structural decision on `agent:unknown` so a joined hub feeds the
         control plane's identity refusal stream like the gateway does.
+
+        Recorded once per source per `REFUSAL_WINDOW`, with the refusals in
+        between counted into the next record. The 401 is free; the record is
+        a chained audit write and an evidence row, and a caller that can
+        reach the port must not be able to grow the log or push real
+        decisions out of the spool by being refused fast enough.
         """
+        suppressed = self._refusal_budget(source or "unknown", method)
+        if suppressed is None:
+            return
         try:
             self.audit.write_received(
                 request_id=str(ULID()),
@@ -549,7 +561,7 @@ class Hub:
                 caller_token_id=None,
                 mcp_server="hub",
                 tool=method,
-                args={"source": source or "unknown"},
+                args={"source": source or "unknown", "suppressed": suppressed},
                 authz_decision="deny",
                 authz_rule=None,
                 audit_level="standard",
@@ -558,6 +570,25 @@ class Hub:
             self.authz.record_unidentified(source=source, method=method)
         except Exception:  # noqa: BLE001 - a refusal must stay a refusal
             logger.exception("could not record an unidentified caller")
+
+    def _refusal_budget(self, source: str, method: str) -> int | None:
+        """None: this refusal is counted, not recorded. An int: record it,
+        and this many were counted since the last record for this source."""
+        now = time.monotonic()
+        key = (source, method)
+        started, counted = self._refusals.get(key, (None, 0))
+        if started is not None and now - started < REFUSAL_WINDOW:
+            self._refusals[key] = (started, counted + 1)
+            return None
+        if len(self._refusals) >= REFUSAL_SOURCES:
+            # Many sources at once is its own finding; the table stays small
+            # and the oldest windows go first.
+            for stale in sorted(self._refusals, key=lambda k: self._refusals[k][0])[
+                : len(self._refusals) - REFUSAL_SOURCES + 1
+            ]:
+                del self._refusals[stale]
+        self._refusals[key] = (now, 0)
+        return counted
 
     # --- in-flight interdiction (build-04) ---
 
@@ -572,6 +603,27 @@ class Hub:
             }
             for f in self._inflight.values()
         ]
+
+    def _scan_result(
+        self, request_id: str, tool_uri: str, action: Action, result: dict
+    ) -> list[str]:
+        """D-12 (build-14): the deterministic injection pass over what is
+        about to enter the agent. Ids only leave the hub; the result is
+        returned unchanged — this is a finding, not a filter. So a failure
+        *here* is logged and the result still goes back: the call succeeded,
+        and a sensor that turns a success into `tool execution failed` has
+        become a filter by accident."""
+        try:
+            hits = injection.scan(result)
+            if hits:
+                logger.warning(
+                    "INJECTION SHAPES in result request=%s tool=%s: %s", request_id, tool_uri, hits
+                )
+                self.authz.record_ingress(action, hits)
+            return hits
+        except Exception:  # noqa: BLE001 - a finding must never change an outcome
+            logger.exception("injection pass failed request=%s tool=%s", request_id, tool_uri)
+            return []
 
     def interdict(self, principal: str, *, by: str, reason: str) -> list[str]:
         """Cancel every forward in flight for `principal` (`*` = all of them).
@@ -594,6 +646,8 @@ class Hub:
                 continue
             if flight.interdiction is not None:
                 continue  # already being stopped; do not overwrite the attribution
+            if flight.task.done():
+                continue  # finished; its result is on the way to the caller, not stopped
             flight.interdiction = Interdiction(by=by, reason=reason)
             flight.task.cancel()
             hit.append(flight.request_id)
@@ -617,7 +671,12 @@ class Hub:
 
         def _apply() -> None:
             for principal in sorted(added):
-                mode = snapshot.containment[principal].mode if snapshot else "contained"
+                # The snapshot may have been replaced by a later refresh (the
+                # poller and the receipt path both run) before this runs on
+                # the loop; a principal released in between is still stopped
+                # here — the announcement stands — and must not abort the rest.
+                entry = snapshot.containment.get(principal) if snapshot else None
+                mode = entry.mode if entry is not None else "contained"
                 self.interdict(
                     principal,
                     by="control-plane",

@@ -16,7 +16,7 @@ unauthorized agents and raise on it.
 
 from __future__ import annotations
 
-import json
+import re
 from typing import Any
 
 MCP_METHODS = frozenset(
@@ -47,18 +47,27 @@ MODEL_PATHS = (
 )
 
 
+#: How much of a body the fingerprint reads. `jsonrpc` and `method` sit at
+#: the top of a JSON-RPC document; the arguments that make a `tools/call`
+#: body large come after, and are none of this module's business.
+PREFIX_LIMIT = 4096
+_METHOD = re.compile(rb'"method"\s*:\s*"([^"\\]{1,64})"')
+_JSONRPC = re.compile(rb'"jsonrpc"\s*:\s*"2\.0"')
+
+
 def _method_of(body: bytes | None, params: dict[str, Any]) -> str | None:
     if isinstance(params.get("method"), str) and params.get("jsonrpc"):
         return params["method"]
     if not body:
         return None
-    try:
-        doc = json.loads(body[:4096].decode("utf-8", "replace"))
-    except (ValueError, TypeError):
+    # Pulled from the prefix rather than parsed: a truncated document never
+    # parses, so `json.loads` on a prefix missed every body over the limit —
+    # which is most `tools/call` bodies, and every A2A one with a payload.
+    prefix = body[:PREFIX_LIMIT]
+    if not _JSONRPC.search(prefix):
         return None
-    if isinstance(doc, dict) and doc.get("jsonrpc") and isinstance(doc.get("method"), str):
-        return doc["method"]
-    return None
+    found = _METHOD.search(prefix)
+    return found.group(1).decode("utf-8", "replace") if found else None
 
 
 def fingerprint(

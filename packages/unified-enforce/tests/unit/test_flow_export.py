@@ -117,6 +117,23 @@ def test_a_request_becomes_a_flow_without_its_path_or_headers():
     assert flows.from_request(plain, allow(), now=NOW)["dst_port"] == 8080
 
 
+def test_an_ipv6_authority_keeps_its_host_and_port():
+    """`[::1]:8080` split on the first colon is a host of `[`, which folded
+    every IPv6 destination into one bucket with the wrong port."""
+    v6 = CheckInput(
+        principal_id="agent:crew-1", method="GET", host="[::1]:8080", path="/", scheme="http"
+    )
+    record = flows.from_request(v6, allow(), now=NOW)
+    assert (record["dst_host"], record["dst_port"]) == ("::1", 8080)
+    bare = CheckInput(
+        principal_id="agent:crew-1", method="GET", host="[fd00::5]", path="/", scheme="https"
+    )
+    record = flows.from_request(bare, allow(), now=NOW)
+    assert (record["dst_host"], record["dst_port"]) == ("fd00::5", 443)
+    odd = CheckInput(principal_id="agent:crew-1", method="GET", host="h:notaport", path="/")
+    assert flows.from_request(odd, allow(), now=NOW)["dst_port"] == 443
+
+
 # --- the gateway emits ---------------------------------------------------------------
 
 

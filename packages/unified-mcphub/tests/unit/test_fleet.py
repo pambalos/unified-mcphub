@@ -171,6 +171,23 @@ def test_on_stale_is_validated():
         )
 
 
+def test_the_evidence_interval_is_validated_like_the_poll():
+    """Zero is a shipping thread spinning at full tilt against the control
+    plane for the life of the hub; a typo is refused at load."""
+    for bad in (0, -5):
+        with pytest.raises(ValueError, match="evidence_interval_seconds"):
+            ControlPlaneConfig(
+                url="https://cp.example",
+                fleet_id="a",
+                root_public_key="k",
+                evidence_interval_seconds=bad,
+            )
+    with pytest.raises(ValueError, match="poll_seconds"):
+        ControlPlaneConfig(
+            url="https://cp.example", fleet_id="a", root_public_key="k", poll_seconds=0
+        )
+
+
 def test_a_standalone_hub_has_no_fleet(hub_home):
     _permissive(hub_home, control_plane=False)
     hub = Hub(load_config())

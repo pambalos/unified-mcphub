@@ -145,3 +145,88 @@ async def test_a_tcp_request_without_a_bearer_is_refused_and_recorded(hub):
         r = await c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert r.status_code == 401
     assert any(d.source == "identity_invalid" for _, d in hub.evidence.records)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_injection_pass_does_not_change_a_successful_call(hub, monkeypatch):
+    """The pass is a finding, not a filter — including when it breaks. A
+    tool that succeeded is returned and audited as a success."""
+    from unified_mcphub import injection
+
+    def boom(result):
+        raise RuntimeError("pattern table corrupted")
+
+    monkeypatch.setattr(injection, "scan", boom)
+
+    from mcp import types
+
+    async def forward(*a):
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text="The file has 12 lines.")]
+        )
+
+    hub._forward = forward  # type: ignore[method-assign]
+    body = await _call(hub)
+    assert body["result"]["content"][0]["text"] == "The file has 12 lines."
+    (completed,) = audit_reader.search(audit_dir(), phase="completed")
+    assert completed["result_status"] == "ok" and "injection" not in completed
+
+
+@pytest.mark.asyncio
+async def test_findings_are_recorded_beside_the_verdict_not_counted_with_it(hub, monkeypatch):
+    seen: list[bool] = []
+    real = hub.authz._enforcer.record
+
+    def spy(action, decision, *, count=True):
+        seen.append(count)
+        return real(action, decision, count=count)
+
+    monkeypatch.setattr(hub.authz._enforcer, "record", spy)
+    hub.refuse_unidentified(source="10.0.7.17")
+    hub.authz.record_ingress(
+        __import__("unified_enforce").Action.build(
+            principal=__import__("unified_enforce").Principal(id="agent:crew-1"),
+            tool="mcp://filesystem/read_file",
+            verb="call",
+            resource="*",
+            params={},
+        ),
+        ["ignore-previous"],
+    )
+    assert seen == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_refusals_from_one_source_are_recorded_once_a_minute(hub, monkeypatch):
+    """The 401 is free; the record is a chained audit write and an evidence
+    row. A caller that can reach the port must not be able to grow either at
+    its own pace by being refused fast enough."""
+    from unified_mcphub import hub as hub_mod
+
+    clock = [1000.0]
+    monkeypatch.setattr(hub_mod.time, "monotonic", lambda: clock[0])
+    for _ in range(5):
+        hub.refuse_unidentified(source="10.0.7.17")
+    assert len(audit_reader.search(audit_dir(), phase="received")) == 1
+    assert len([d for _, d in hub.evidence.records if d.source == "identity_invalid"]) == 1
+    # Another source is another record.
+    hub.refuse_unidentified(source="10.0.7.18")
+    assert len(audit_reader.search(audit_dir(), phase="received")) == 2
+    # The window passes: recorded again, and the four in between are counted.
+    clock[0] += hub_mod.REFUSAL_WINDOW + 1
+    hub.refuse_unidentified(source="10.0.7.17")
+    entries = audit_reader.search(audit_dir(), phase="received")
+    assert len(entries) == 3
+    last = [e for e in entries if e["args"]["source"] == "10.0.7.17"][-1]
+    assert last["args"]["suppressed"] == 4
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_table_is_bounded(hub, monkeypatch):
+    from unified_mcphub import hub as hub_mod
+
+    monkeypatch.setattr(hub_mod, "REFUSAL_SOURCES", 8)
+    for i in range(40):
+        hub.refuse_unidentified(source=f"198.51.100.{i}")
+    assert len(hub._refusals) <= 8
+    assert len(audit_reader.search(audit_dir(), phase="received")) == 40, "each first sighting"

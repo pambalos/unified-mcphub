@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .action import Action, ActionContext, Attestation, Principal
+from . import flows
 from .enforcer import Enforcer
 from .identity import OIDCValidator
 from .policy import Decision, Verdict
@@ -156,12 +157,26 @@ class ExtAuthzCore:
         trust_principal_header: bool = True,
         body_inspection: BodyInspection | None = None,
         oidc: OIDCValidator | None = None,
+        flows: Any = None,
     ) -> None:
         self._enforcer = enforcer
         self._default_principal = default_principal
         self._trust_principal_header = trust_principal_header
         self._body = body_inspection
         self._oidc = oidc
+        #: A shipper for `flow.v1` records (`flows.flow_shipper`), or None.
+        #: The gateway sees every connection and request it decides on, which
+        #: makes it the control plane's cheapest egress-log exporter (build-14
+        #: S-2). Emission never touches the verdict: `submit` cannot raise.
+        self._flows = flows
+
+    def _emit_flow(self, record: dict[str, Any]) -> None:
+        if self._flows is None:
+            return
+        try:
+            self._flows.submit(record)
+        except Exception:  # noqa: BLE001 - telemetry must never change a verdict
+            pass
 
     def principal_for(self, *, mtls: str | None = None, header: str | None = None) -> str:
         """Back-compat shim over resolve_principal — id only, provenance dropped."""
@@ -315,6 +330,7 @@ class ExtAuthzCore:
         if decision.rule_id is not None:
             headers["x-unified-rule"] = decision.rule_id
         body = "" if allowed else f"unified-enforce: {decision.verdict.value}"
+        self._emit_flow(flows.from_request(req, decision))
         return CheckResult(
             allowed=allowed,
             status_code=200 if allowed else 403,
@@ -364,6 +380,7 @@ class ExtAuthzCore:
         }
         if decision.rule_id is not None:
             headers["x-unified-rule"] = decision.rule_id
+        self._emit_flow(flows.from_connection(conn, decision))
         return CheckResult(
             allowed=allowed,
             status_code=200 if allowed else 403,

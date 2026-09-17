@@ -9,7 +9,15 @@ Canonicalize → decide → record:
     chain.append_decision(action, decision)
 """
 
-from .action import Action, ActionContext, Principal, SCHEMA_VERSION
+from .action import (
+    Action,
+    ActionContext,
+    Attestation,
+    Hop,
+    Principal,
+    SCHEMA_VERSION,
+    grade_at_least,
+)
 from .approval import (
     ApprovalChannel,
     ApprovalKind,
@@ -36,7 +44,17 @@ from .extauthz import (
 )
 from .identity import OIDCValidator, VerifiedIdentity
 from .index import AuditIndex
-from .policy import Decision, Floor, Match, PolicyDoc, PolicyEngine, PolicyError, Rule, Verdict
+from .policy import (
+    AttestationFloor,
+    Decision,
+    Floor,
+    Match,
+    PolicyDoc,
+    PolicyEngine,
+    PolicyError,
+    Rule,
+    Verdict,
+)
 from .replay import Divergence, ReplayReport, replay
 from .signing import SignedAction, Signer, verify_bytes
 from .telemetry import Telemetry
@@ -79,7 +97,11 @@ __all__ = [
     "PolicyDoc",
     "PolicyEngine",
     "PolicyError",
+    "Attestation",
+    "AttestationFloor",
+    "Hop",
     "Principal",
+    "grade_at_least",
     "Rule",
     "SignedAction",
     "Signer",

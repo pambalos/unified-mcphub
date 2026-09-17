@@ -20,6 +20,7 @@ channel until the approval contract is wired in; M0.8). Every response carries
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -29,7 +30,16 @@ from .enforcer import Enforcer
 from .identity import OIDCValidator
 from .policy import Decision, Verdict
 
+log = logging.getLogger("unified_enforce.extauthz")
+
 PRINCIPAL_HEADER = "x-unified-principal"
+#: A delegation chain a *caller* claims for itself. Never trusted, and present
+#: here only so it can be dropped loudly — build-01 §3. A hop is written by the
+#: parent's own credentialed context; an agent naming its own parent is worth
+#: exactly what an agent naming its own identity is worth, which UAI-137 already
+#: settled is nothing. Dropping it silently would be worse than not looking: the
+#: attempt is the signal.
+ON_BEHALF_OF_HEADER = "x-unified-on-behalf-of"
 #: Set by the E4 SDK to the digest of the semantic Action it already decided,
 #: so both observations of one operation can be joined in the audit chain.
 CORRELATION_HEADER = "x-unified-action"
@@ -257,6 +267,20 @@ class ExtAuthzCore:
         claimed = req.headers.get(CORRELATION_HEADER)
         if claimed and _DIGEST.match(claimed):
             extra["sdk_action_claimed"] = claimed
+        # A caller-asserted delegation chain is dropped, not merged, and the
+        # attempt is recorded as the CHANNEL DOWNGRADE-class event the core
+        # threat model already defines for a request claiming more than its
+        # channel proves (build-01 §3). The gateway has no parent context here,
+        # so the resolved principal is a leaf with no chain — which is the
+        # honest answer, and strictly weaker than the claim.
+        asserted_chain = req.headers.get(ON_BEHALF_OF_HEADER)
+        if asserted_chain:
+            extra["identity_assertion"] = "on_behalf_of header dropped"
+            log.warning(
+                "dropped caller-asserted delegation chain for %s: %r",
+                req.principal_id,
+                asserted_chain[:200],
+            )
         if req.identity_problem is not None:
             extra["identity"] = req.identity_problem
         action = Action.build(

@@ -35,6 +35,7 @@ from .approval import Approval, ApprovalChannel, TerminalChannel
 from .control import ApprovalEventBroadcaster, ControlApiChannel, PendingRegistry
 from .authz import AuthzResolver, Effect
 from .fleet import FleetLink
+from . import injection
 from .config import (
     ApprovalConfig,
     Config,
@@ -479,6 +480,15 @@ class Hub:
             # the audit log nor the caller ever sees them (spec §10.2).
             result = self.redactor.result(_result_dict(value))
             status = "error" if result.get("isError") else "ok"
+            # D-12 (build-14): the deterministic injection pass over what is
+            # about to enter the agent. Ids only leave the hub; the result is
+            # returned unchanged — this is a finding, not a filter.
+            hits = injection.scan(result)
+            if hits:
+                logger.warning(
+                    "INJECTION SHAPES in result request=%s tool=%s: %s", request_id, tool_uri, hits
+                )
+                self.authz.record_ingress(action, hits)
         except asyncio.CancelledError:
             if flight.interdiction is None:
                 # Not ours: the caller's task was cancelled (shutdown, client
@@ -518,8 +528,36 @@ class Hub:
             result_status=status,
             audit_level=decision.audit_level,
             prompt_response_ms=prompt_ms,
+            injection=hits,
         )
         return _ok(req_id, result)
+
+    def refuse_unidentified(self, *, source: str, method: str = "mcp") -> None:
+        """A caller with no valid identity was turned away (build-14 S-1).
+
+        Recorded twice, on purpose: in the hub's own audit as a received-only
+        deny for the local operator, and through the authorizer as a
+        structural decision on `agent:unknown` so a joined hub feeds the
+        control plane's identity refusal stream like the gateway does.
+        """
+        try:
+            self.audit.write_received(
+                request_id=str(ULID()),
+                trace_id=audit_mod.new_trace_id(),
+                span_id=audit_mod.new_span_id(),
+                caller_id="unknown",
+                caller_token_id=None,
+                mcp_server="hub",
+                tool=method,
+                args={"source": source or "unknown"},
+                authz_decision="deny",
+                authz_rule=None,
+                audit_level="standard",
+                reason="no valid credential presented",
+            )
+            self.authz.record_unidentified(source=source, method=method)
+        except Exception:  # noqa: BLE001 - a refusal must stay a refusal
+            logger.exception("could not record an unidentified caller")
 
     # --- in-flight interdiction (build-04) ---
 

@@ -129,6 +129,7 @@ class AuditLog:
         audit_level: str,
         prompt_response_ms: float | None = None,
         upstream_request_id: str | None = None,
+        injection: list[str] | None = None,
     ) -> None:
         result_json = json.dumps(result, default=str) if result is not None else ""
         entry = {
@@ -144,6 +145,10 @@ class AuditLog:
             "upstream_request_id": upstream_request_id,
             "redactions_applied": audit_level == "standard",
         }
+        if injection:
+            # D-12: the shapes found in the result, by id. The reader sees
+            # that this result carried instructions without re-reading them.
+            entry["injection"] = list(injection)
         self._write(entry)
 
     def write_interdicted(

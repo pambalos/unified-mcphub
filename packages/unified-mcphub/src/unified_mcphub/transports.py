@@ -63,6 +63,9 @@ def build_app(hub) -> Starlette:
     async def mcp_endpoint(request: Request) -> Response:
         caller, token_id = _authenticate(request, hub)
         if caller is None:
+            hub.refuse_unidentified(
+                source=request.client.host if request.client else "", method="mcp"
+            )
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         message = await request.json()
         result = await hub.handle_mcp(message, caller, token_id)

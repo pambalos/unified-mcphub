@@ -85,6 +85,29 @@ one can at most re-answer a settled question — which is a 409.
 speak for any operator granted on its fleet. The response to a compromised
 console is revoking its credential, not rotating a key quietly.
 
+### executor ticket ↔ everything else
+
+**Attacker:** whoever holds the analyzer — the Guardian's proposal path reads
+attacker-authored content by design — trying to turn a proposal into an action
+the plane never authorised; or anyone holding an executor ticket, trying to use
+it as a credential.
+
+**Control:** the executor role, which runs the plays the plane cannot (tearing
+down a workload in its blast-radius zone), sees nothing but a **typed play** from
+a **closed schema**: a play names the incident's own principal and carries no
+free-form target, so an attacker who can emit any schema-valid play can still
+only name the agent the incident is about. On a person's confirm the plane mints
+a credential for that **one play instance** — minutes long, bound to the play
+rather than the incident, accepted by two routes and refused by every other on
+sight — and the first outcome report revokes it. The plane records what the
+executor says happened; it holds no cloud credential and touches no
+infrastructure.
+
+**Residual:** the executor's own credentials and zone configuration are outside
+the plane and are as strong as their deployment. A play the schema admits is
+executable for any incident, which is why the schema stays small and every entry
+is safe by construction rather than by review of its parameters.
+
 ### control plane → sidecar: approval decisions
 
 **Attacker:** anything serving plain JSON that says "approved", to release an

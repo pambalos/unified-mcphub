@@ -14,6 +14,11 @@ from pathlib import Path
 from unified_enforce.audit import HashChainWriter, VerifyResult
 
 _ALLOWED_DECISIONS = {"allow", "prompt_allowed", "approval_disabled"}
+#: The phases that close a `received` bracket. `interdicted` (build-04) is a
+#: forward the plane cancelled in flight; it is a closing phase so that a
+#: contained agent's interrupted call reads as closed, not as a crash or a
+#: hub that died mid-call.
+_CLOSING_PHASES = {"completed", "interdicted"}
 
 
 def _day_files(audit_dir: Path) -> list[Path]:
@@ -41,7 +46,7 @@ def read_day(audit_dir: Path, date_str: str) -> list[dict]:
 
 
 def pair(audit_dir: Path, request_id: str) -> dict:
-    result: dict = {"received": None, "completed": None}
+    result: dict = {"received": None, "completed": None, "interdicted": None}
     for _, _, entry in _iter_entries(audit_dir):
         if entry and entry.get("request_id") == request_id:
             result[entry.get("phase")] = entry
@@ -97,7 +102,7 @@ def tail(audit_dir: Path, n: int = 20) -> list[dict]:
 def lint(audit_dir: Path) -> list[str]:
     problems: list[str] = []
     received: dict[str, str] = {}  # request_id -> decision
-    completed: set[str] = set()
+    closed: dict[str, str] = {}  # request_id -> the phase that closed the bracket
     for filename, lineno, entry in _iter_entries(audit_dir):
         if entry is None:
             problems.append(f"{filename}:{lineno}: malformed JSON")
@@ -106,15 +111,18 @@ def lint(audit_dir: Path) -> list[str]:
         rid = entry.get("request_id")
         if phase == "received":
             received[rid] = entry.get("authz_decision", "")
-        elif phase == "completed":
-            completed.add(rid)
+        elif phase in _CLOSING_PHASES:
+            if rid in closed:
+                problems.append(f"request {rid}: closed twice ({closed[rid]}, then {phase})")
+            closed[rid] = phase
         else:
             problems.append(f"{filename}:{lineno}: unknown phase {phase!r}")
     for rid, dec in received.items():
-        if dec in _ALLOWED_DECISIONS and rid not in completed:
+        if dec in _ALLOWED_DECISIONS and rid not in closed:
             problems.append(f"request {rid}: '{dec}' received with no completed entry")
-    for rid in completed - set(received):
-        problems.append(f"request {rid}: completed with no received entry")
+    for rid, phase in closed.items():
+        if rid not in received:
+            problems.append(f"request {rid}: {phase} with no received entry")
     return problems
 
 

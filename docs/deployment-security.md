@@ -92,3 +92,53 @@ re-read even by an explicit reload.
 
 - Self-broadening *content* analysis — an agent that may propose policy but not
   grant itself allow — belongs with the Layer-2 policy-diff detector.
+
+## Joining a fleet: containment before policy, and in flight
+
+Standalone, the hub decides every call from its workspace policy and nothing
+leaves the machine. Joined to a control plane, it also enforces the fleet's
+**signed revocation list** — the kill switch the Guardian and an incident
+responder press — and does so in the order the Envoy sidecar already uses:
+containment first, workspace rules second. A contained agent is contained
+whatever the rules say.
+
+```yaml
+# ~/.unified-ai/mcphub/config.yaml
+control_plane:
+  url: https://control-plane.example
+  fleet_id: acme
+  root_public_key: <the fleet's pinned root verification key, base64url>
+  credential_secret_ref: control-plane-credential   # read from the hub's secrets store
+  poll_seconds: 30
+  on_stale: keep          # keep | defer | deny — what an expired policy bundle does
+  evidence: true          # ship decision evidence (what the Guardian reads)
+```
+
+What this gives you, and what it costs:
+
+- **Verified, never trusted.** Everything the control plane serves is checked
+  against a signature chain that ends at `root_public_key`. A wrong or hostile
+  control plane is a refused refresh; the hub keeps its last verified snapshot
+  (cached under the hub home, so a restart mid-incident is not an outage).
+- **Fail closed at first boot.** A joined hub that has never verified a policy
+  bundle denies every call until it has one. An unprotected hub is what an
+  attacker able to block one fetch would otherwise get.
+- **Next action.** A principal the control plane contains is stopped at its
+  next call — on the next poll, or at once when the evidence receipt for the
+  batch that triggered the containment says the list moved.
+- **In flight.** A call already forwarded when the containment lands is
+  cancelled. Its audit bracket closes with `phase: interdicted` (who, why),
+  the caller receives `-32004 interdicted`, and whatever the upstream returns
+  afterwards is dropped: never audited, never returned. `unified-mcphub audit
+  lint` treats `interdicted` as a closed bracket, so an interrupted call no
+  longer reads like a crash.
+- **Operator stop, locally.** `POST /interdict {"principal": "agent:x"}`
+  (`"*"` for every call) on the hub's control API cancels what is in flight
+  now. It does not contain the next action; that is the revocation list's job.
+- **Best-effort upstream.** Cancelling the forward frees the hub and drops the
+  response. A stdio server that has already begun a side effect finishes it.
+  Severing the effect is egress-sever and workload sandboxing, not this.
+- **Fixed at boot.** Like `deployment.policy_protection`, `control_plane` is
+  not re-read on reload. An agent that could edit config to leave the fleet
+  would be editing itself out of containment; joining or leaving takes a
+  restart.

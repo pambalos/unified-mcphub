@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .action import Action, ActionContext, Attestation, Principal
+from . import agent_protocol, flows
 from .enforcer import Enforcer
 from .identity import OIDCValidator
 from .policy import Decision, Verdict
@@ -156,12 +157,64 @@ class ExtAuthzCore:
         trust_principal_header: bool = True,
         body_inspection: BodyInspection | None = None,
         oidc: OIDCValidator | None = None,
+        flows: Any = None,
     ) -> None:
         self._enforcer = enforcer
         self._default_principal = default_principal
         self._trust_principal_header = trust_principal_header
         self._body = body_inspection
         self._oidc = oidc
+        #: A shipper for `flow.v1` records (`flows.flow_shipper`), or None.
+        #: The gateway sees every connection and request it decides on, which
+        #: makes it the control plane's cheapest egress-log exporter (build-14
+        #: S-2). Emission never touches the verdict: `submit` cannot raise.
+        self._flows = flows
+
+    def _unenrolled(self, req: CheckInput) -> bool:
+        """Did this peer establish an identity? The deployment default and a
+        credential that failed are "no"; a stamped header the deployment
+        chose to trust, an OIDC subject or an mTLS SAN are "yes"."""
+        return req.identity_problem is not None or req.principal_id == self._default_principal
+
+    def _record_unenrolled_protocol(
+        self, action: Action, protocol: str, decision: Decision
+    ) -> None:
+        """S-5: an agent protocol spoken by a peer nobody enrolled. A finding
+        beside the verdict, never instead of it: the request was allowed or
+        denied by policy as usual; this records that the fleet's servers are
+        being addressed as agents by something outside the inventory."""
+        try:
+            finding = Action.build(
+                principal=action.principal,
+                tool=action.tool,
+                verb="ingress",
+                resource=protocol,
+                params={},
+                context=ActionContext(
+                    origin="gateway",
+                    extra={"agent_protocol": protocol, "verdict": decision.verdict.value},
+                ),
+            )
+            self._enforcer.record(
+                finding,
+                Decision(
+                    verdict=decision.verdict,
+                    rule_id=None,
+                    source="agent_protocol_unenrolled",
+                    reason=f"{protocol} spoken by a peer that established no identity",
+                ),
+                count=False,  # beside the verdict, which was already counted
+            )
+        except Exception:  # noqa: BLE001 - a finding must never change a verdict
+            pass
+
+    def _emit_flow(self, record: dict[str, Any]) -> None:
+        if self._flows is None:
+            return
+        try:
+            self._flows.submit(record)
+        except Exception:  # noqa: BLE001 - telemetry must never change a verdict
+            pass
 
     def principal_for(self, *, mtls: str | None = None, header: str | None = None) -> str:
         """Back-compat shim over resolve_principal — id only, provenance dropped."""
@@ -259,6 +312,14 @@ class ExtAuthzCore:
             extra["sdk_action_claimed"] = claimed
         if req.identity_problem is not None:
             extra["identity"] = req.identity_problem
+        # S-5 (build-14): what protocol is this, and did the peer establish an
+        # identity? Recorded on the action for the audit; a finding below when
+        # the answer is "an agent protocol" and "no".
+        protocol = agent_protocol.fingerprint(
+            method=req.method, path=req.path, headers=req.headers, body=req.body, params=params
+        )
+        if protocol is not None:
+            extra["agent_protocol"] = protocol
         action = Action.build(
             principal=Principal(
                 id=req.principal_id,
@@ -307,6 +368,8 @@ class ExtAuthzCore:
         else:
             decision = self._enforcer.enforce(action)
         allowed = decision.verdict is Verdict.ALLOW
+        if protocol is not None and self._unenrolled(req):
+            self._record_unenrolled_protocol(action, protocol, decision)
         headers = {
             "x-unified-verdict": decision.verdict.value,
             "x-unified-source": decision.source,
@@ -315,6 +378,7 @@ class ExtAuthzCore:
         if decision.rule_id is not None:
             headers["x-unified-rule"] = decision.rule_id
         body = "" if allowed else f"unified-enforce: {decision.verdict.value}"
+        self._emit_flow(flows.from_request(req, decision))
         return CheckResult(
             allowed=allowed,
             status_code=200 if allowed else 403,
@@ -364,6 +428,7 @@ class ExtAuthzCore:
         }
         if decision.rule_id is not None:
             headers["x-unified-rule"] = decision.rule_id
+        self._emit_flow(flows.from_connection(conn, decision))
         return CheckResult(
             allowed=allowed,
             status_code=200 if allowed else 403,

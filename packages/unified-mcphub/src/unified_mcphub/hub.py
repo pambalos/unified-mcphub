@@ -16,6 +16,7 @@ import os
 import signal
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -24,6 +25,7 @@ from ulid import ULID
 from watchfiles import awatch
 
 from unified_enforce import Action, ActionContext, Principal, Telemetry
+from unified_enforce.distribution import FLEET_WIDE as _FLEET_WIDE
 from unified_paths import canonical
 
 from . import audit as audit_mod
@@ -33,6 +35,8 @@ from . import servers as servers_mod
 from .approval import Approval, ApprovalChannel, TerminalChannel
 from .control import ApprovalEventBroadcaster, ControlApiChannel, PendingRegistry
 from .authz import AuthzResolver, Effect
+from .fleet import FleetLink
+from . import injection
 from .config import (
     ApprovalConfig,
     Config,
@@ -59,6 +63,44 @@ from .util import now_iso, secure_write
 logger = logging.getLogger(__name__)
 
 BUILTIN_SERVER = "built-in"
+
+#: The containment entry that means "everyone in the fleet". The engine's
+#: sentinel, so `interdict("*")` and `gate()` cannot stop meaning the same
+#: thing.
+FLEET_WIDE = _FLEET_WIDE
+
+
+#: How often one source's identity refusals are recorded (seconds), and how
+#: many sources the hub tracks at once. Bounds on what an unauthenticated
+#: caller can make the hub write.
+REFUSAL_WINDOW = 60.0
+REFUSAL_SOURCES = 1024
+
+
+@dataclass
+class Interdiction:
+    """Why an in-flight forward was cancelled, and by whom."""
+
+    by: str
+    reason: str
+
+
+@dataclass
+class InFlight:
+    """One forward between its `received` and its closing audit entry.
+
+    The registry of these *is* the hub's in-flight state (build-04). It is
+    derived from the two-phase bracket — an entry exists exactly while the
+    forward task runs — rather than kept as a second source of truth that
+    could disagree with the audit log.
+    """
+
+    request_id: str
+    principal: str
+    tool_uri: str
+    task: asyncio.Task
+    started: float
+    interdiction: Interdiction | None = None
 
 
 class PolicyDirWritableError(RuntimeError):
@@ -150,12 +192,20 @@ class Hub:
         self.servers: dict[str, SupervisedServer] = {}
         self.builtins = BuiltinRegistry()
         self.telemetry = _build_telemetry(config.hub.otel)
-        self.authz = AuthzResolver(
-            config.workspace,
-            config.dangerous,
-            telemetry=self.telemetry,
-            deployment=config.hub.deployment,
+        #: Joined to a fleet, or standalone (None). Built before the authorizer
+        #: because the authorizer's Enforcer must hold the fleet's revocation
+        #: state to gate on containment before policy.
+        self.fleet: FleetLink | None = (
+            FleetLink(config.hub.control_plane, on_containment=self._on_containment_change)
+            if config.hub.control_plane.enabled
+            else None
         )
+        self.authz = self._build_authz(config)
+        #: Forwards currently between `received` and their closing entry.
+        self._inflight: dict[str, InFlight] = {}
+        #: (source, method) → (window started at, refusals not recorded since).
+        self._refusals: dict[tuple[str, str], tuple[float, int]] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
         self.redactor = Redactor(config.workspace.redact)
         approval_cfg = config.hub.approval
         self.approval_events = ApprovalEventBroadcaster()
@@ -171,6 +221,16 @@ class Hub:
         self._started_at = now_iso()
         self._reload_task: asyncio.Task | None = None
         self._refresh_task: asyncio.Task | None = None
+
+    def _build_authz(self, config: Config) -> AuthzResolver:
+        return AuthzResolver(
+            config.workspace,
+            config.dangerous,
+            telemetry=self.telemetry,
+            deployment=config.hub.deployment,
+            distribution=self.fleet.distribution if self.fleet else None,
+            evidence=self.fleet.evidence if self.fleet else None,
+        )
 
     def _select_approval_channel(self, cfg: ApprovalConfig) -> ApprovalChannel | None:
         # Attached to a real terminal -> keypress reader (local dev / interactive).
@@ -194,6 +254,8 @@ class Hub:
                 refs.add(f"{name}-oauth-refresh")
             elif spec.auth_secret_ref:
                 refs.add(spec.auth_secret_ref)
+        if self.fleet is not None:
+            refs.add(self.fleet.credential_secret_ref)
         return sorted(refs)
 
     def _gate_secrets(self) -> None:
@@ -235,6 +297,14 @@ class Hub:
         self.audit.start()
         self.builtins.load_user_tools(mcphub_home() / "tools")
         self._gate_secrets()
+        self._loop = asyncio.get_running_loop()
+        if self.fleet is not None:
+            credential = (
+                self.secrets.get(self.fleet.credential_secret_ref)
+                if self.secrets.exists()
+                else None
+            )
+            await self.fleet.start(credential)
 
         for name, spec in self.config.workspace.servers.items():
             if not spec.enabled:
@@ -263,6 +333,8 @@ class Hub:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._transport.stop()
+        if self.fleet is not None:
+            await self.fleet.stop()
         for server in list(self.servers.values()):
             await server.stop()
         self.audit.stop()  # release the audit lock first — must always happen
@@ -402,12 +474,42 @@ class Hub:
             return _err(req_id, -32003, f"denied by policy ({authz_decision})")
 
         t0 = time.monotonic()
+        task = asyncio.create_task(
+            self._forward(server_name, tool, args), name=f"forward:{request_id}"
+        )
+        flight = InFlight(
+            request_id=request_id,
+            principal=action.principal.id,
+            tool_uri=tool_uri,
+            task=task,
+            started=t0,
+        )
+        self._inflight[request_id] = flight
         try:
-            value = await self._forward(server_name, tool, args)
+            value = await task
             # Redact secrets before the result is audited or returned, so neither
             # the audit log nor the caller ever sees them (spec §10.2).
             result = self.redactor.result(_result_dict(value))
             status = "error" if result.get("isError") else "ok"
+            hits = self._scan_result(request_id, tool_uri, action, result)
+        except asyncio.CancelledError:
+            if flight.interdiction is None:
+                # Not ours: the caller's task was cancelled (shutdown, client
+                # gone). Do not let the forward outlive the request either.
+                task.cancel()
+                raise
+            # The plane stopped this call while it was in flight (build-04).
+            # Whatever the upstream returns after this point is dropped: not
+            # audited, not returned. The bracket closes as `interdicted`, which
+            # a reader can tell from a crash.
+            self.audit.write_interdicted(
+                request_id=request_id,
+                duration_ms=(time.monotonic() - t0) * 1000,
+                interdicted_by=flight.interdiction.by,
+                reason=flight.interdiction.reason,
+                prompt_response_ms=prompt_ms,
+            )
+            return _err(req_id, -32004, f"interdicted: {flight.interdiction.reason}")
         except Exception as exc:  # noqa: BLE001
             duration = (time.monotonic() - t0) * 1000
             self.audit.write_completed(
@@ -419,6 +521,8 @@ class Hub:
                 prompt_response_ms=prompt_ms,
             )
             return _err(req_id, -32000, f"tool execution failed: {exc}")
+        finally:
+            self._inflight.pop(request_id, None)
 
         self.audit.write_completed(
             request_id=request_id,
@@ -427,8 +531,159 @@ class Hub:
             result_status=status,
             audit_level=decision.audit_level,
             prompt_response_ms=prompt_ms,
+            injection=hits,
         )
         return _ok(req_id, result)
+
+    def refuse_unidentified(self, *, source: str, method: str = "mcp") -> None:
+        """A caller with no valid identity was turned away (build-14 S-1).
+
+        Recorded twice, on purpose: in the hub's own audit as a received-only
+        deny for the local operator, and through the authorizer as a
+        structural decision on `agent:unknown` so a joined hub feeds the
+        control plane's identity refusal stream like the gateway does.
+
+        Recorded once per source per `REFUSAL_WINDOW`, with the refusals in
+        between counted into the next record. The 401 is free; the record is
+        a chained audit write and an evidence row, and a caller that can
+        reach the port must not be able to grow the log or push real
+        decisions out of the spool by being refused fast enough.
+        """
+        suppressed = self._refusal_budget(source or "unknown", method)
+        if suppressed is None:
+            return
+        try:
+            self.audit.write_received(
+                request_id=str(ULID()),
+                trace_id=audit_mod.new_trace_id(),
+                span_id=audit_mod.new_span_id(),
+                caller_id="unknown",
+                caller_token_id=None,
+                mcp_server="hub",
+                tool=method,
+                args={"source": source or "unknown", "suppressed": suppressed},
+                authz_decision="deny",
+                authz_rule=None,
+                audit_level="standard",
+                reason="no valid credential presented",
+            )
+            self.authz.record_unidentified(source=source, method=method)
+        except Exception:  # noqa: BLE001 - a refusal must stay a refusal
+            logger.exception("could not record an unidentified caller")
+
+    def _refusal_budget(self, source: str, method: str) -> int | None:
+        """None: this refusal is counted, not recorded. An int: record it,
+        and this many were counted since the last record for this source."""
+        now = time.monotonic()
+        key = (source, method)
+        started, counted = self._refusals.get(key, (None, 0))
+        if started is not None and now - started < REFUSAL_WINDOW:
+            self._refusals[key] = (started, counted + 1)
+            return None
+        if len(self._refusals) >= REFUSAL_SOURCES:
+            # Many sources at once is its own finding; the table stays small
+            # and the oldest windows go first.
+            for stale in sorted(self._refusals, key=lambda k: self._refusals[k][0])[
+                : len(self._refusals) - REFUSAL_SOURCES + 1
+            ]:
+                del self._refusals[stale]
+        self._refusals[key] = (now, 0)
+        return counted
+
+    # --- in-flight interdiction (build-04) ---
+
+    def in_flight(self) -> list[dict]:
+        now = time.monotonic()
+        return [
+            {
+                "request_id": f.request_id,
+                "principal": f.principal,
+                "tool": f.tool_uri,
+                "elapsed_ms": round((now - f.started) * 1000, 3),
+            }
+            for f in self._inflight.values()
+        ]
+
+    def _scan_result(
+        self, request_id: str, tool_uri: str, action: Action, result: dict
+    ) -> list[str]:
+        """D-12 (build-14): the deterministic injection pass over what is
+        about to enter the agent. Ids only leave the hub; the result is
+        returned unchanged — this is a finding, not a filter. So a failure
+        *here* is logged and the result still goes back: the call succeeded,
+        and a sensor that turns a success into `tool execution failed` has
+        become a filter by accident."""
+        try:
+            hits = injection.scan(result)
+            if hits:
+                logger.warning(
+                    "INJECTION SHAPES in result request=%s tool=%s: %s", request_id, tool_uri, hits
+                )
+                self.authz.record_ingress(action, hits)
+            return hits
+        except Exception:  # noqa: BLE001 - a finding must never change an outcome
+            logger.exception("injection pass failed request=%s tool=%s", request_id, tool_uri)
+            return []
+
+    def interdict(self, principal: str, *, by: str, reason: str) -> list[str]:
+        """Cancel every forward in flight for `principal` (`*` = all of them).
+
+        Returns the request ids interrupted. This stops what is *in progress*;
+        it does not contain the principal's next action — that is the
+        revocation list's job, and the two arrive together when the control
+        plane contains someone (`_on_containment_change`). An operator calling
+        this directly on a standalone hub gets exactly what it says: the calls
+        now in flight end, and the next one is decided by policy as usual.
+
+        Upstream cancellation is best-effort. Cancelling the task drops the
+        response and frees the hub; a stdio server that has already begun a
+        side effect finishes it. Severing the effect is build-05 (egress-sever)
+        and build-08 (sandbox), not this.
+        """
+        hit: list[str] = []
+        for flight in list(self._inflight.values()):
+            if principal != FLEET_WIDE and flight.principal != principal:
+                continue
+            if flight.interdiction is not None:
+                continue  # already being stopped; do not overwrite the attribution
+            if flight.task.done():
+                continue  # finished; its result is on the way to the caller, not stopped
+            flight.interdiction = Interdiction(by=by, reason=reason)
+            flight.task.cancel()
+            hit.append(flight.request_id)
+        if hit:
+            logger.warning(
+                "interdicted %d in-flight call(s) for %s (%s): %s", len(hit), principal, by, reason
+            )
+        return hit
+
+    def _on_containment_change(self, added: frozenset[str], removed: frozenset[str]) -> None:
+        """`Distribution` announced a verified change to who is contained.
+
+        Runs on the refreshing thread (the poller's worker, or the evidence
+        shipper's on a receipt), so the cancellation is handed to the loop.
+        Only additions matter here: a release does nothing to a call in
+        flight, and the next action is simply decided by policy again.
+        """
+        if not added or self._loop is None:
+            return
+        snapshot = self.fleet.distribution.snapshot if self.fleet else None
+
+        def _apply() -> None:
+            for principal in sorted(added):
+                # The snapshot may have been replaced by a later refresh (the
+                # poller and the receipt path both run) before this runs on
+                # the loop; a principal released in between is still stopped
+                # here — the announcement stands — and must not abort the rest.
+                entry = snapshot.containment.get(principal) if snapshot else None
+                mode = entry.mode if entry is not None else "contained"
+                self.interdict(
+                    principal,
+                    by="control-plane",
+                    reason=f"{principal} is contained ({mode})",
+                )
+
+        self._loop.call_soon_threadsafe(_apply)
 
     async def _forward(self, server_name: str, tool: str, args: dict):
         if server_name == BUILTIN_SERVER:
@@ -673,13 +928,14 @@ class Hub:
                 new.hub.deployment.policy_protection,
             )
         new.hub.deployment = booted
+        # Likewise the fleet link: joining or leaving a fleet is a deployment
+        # property, and an agent that could edit config to drop `control_plane`
+        # would be editing itself out of containment.
+        if new.hub.control_plane != self.config.hub.control_plane:
+            logger.warning("control_plane change ignored on reload; a restart is required")
+        new.hub.control_plane = self.config.hub.control_plane
         self.config = new
-        self.authz = AuthzResolver(
-            new.workspace,
-            new.dangerous,
-            telemetry=self.telemetry,
-            deployment=booted,
-        )
+        self.authz = self._build_authz(new)
         self.redactor = Redactor(new.workspace.redact)
         self.approval.enabled = new.hub.approval.enabled
         await self._apply_server_diff(new.workspace.servers)
@@ -715,6 +971,8 @@ class Hub:
                 name: {"healthy": s.healthy, "tools": len(s.tools), "last_error": s.last_error}
                 for name, s in self.servers.items()
             },
+            "fleet": self.fleet.status() if self.fleet is not None else None,
+            "in_flight": self.in_flight(),
         }
 
 

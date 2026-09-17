@@ -34,7 +34,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from unified_enforce import Action, Enforcer, Principal, Telemetry
+from unified_enforce import Action, ActionContext, Enforcer, Principal, Telemetry
+from unified_enforce.policy import Decision as EngineDecision
 from unified_enforce.policy import Floor as EngineFloor
 from unified_enforce.policy import Match as EngineMatch
 from unified_enforce.policy import PolicyDoc, PolicyEngine, Verdict
@@ -159,6 +160,8 @@ class AuthzResolver:
         dangerous: DangerousCommands,
         telemetry: Telemetry | None = None,
         deployment: DeploymentConfig | None = None,
+        distribution: Any = None,
+        evidence: Any = None,
     ) -> None:
         rules: list[EngineRule] = []
         names: dict[str, str] = {}  # engine rule id -> hub tool pattern (audit `authz_rule`)
@@ -202,7 +205,69 @@ class AuthzResolver:
         # decision emits a span (UAI-86). No audit chain here: the hub keeps its
         # own two-phase AuditLog, which is already chained and records the
         # completion half that the engine's single-entry form cannot express.
-        self._enforcer = Enforcer(self._engine, telemetry=telemetry)
+        # `distribution` is the fleet's verified policy + revocation state
+        # (build-04): when the hub is joined to a control plane, containment is
+        # consulted before any workspace rule, in the Enforcer, in the same
+        # order the Envoy sidecar uses. Standalone hubs pass None and nothing
+        # changes. `evidence` ships each decision to the control plane.
+        self._enforcer = Enforcer(
+            self._engine, telemetry=telemetry, distribution=distribution, evidence=evidence
+        )
+
+    # --- structural records (build-14): refusals and findings the policy
+    # --- engine never saw, landed in the chain and the evidence like verdicts
+
+    def record_unidentified(self, *, source: str, method: str) -> None:
+        """A caller that presented no valid identity was refused (S-1).
+
+        The hub already returns 401. This makes the refusal a *decision* on
+        the unknown principal, so it reaches the control plane's identity
+        refusal stream like the gateway's do. The same shape the gateway
+        records: source "identity_invalid", verdict deny.
+        """
+        action = Action.build(
+            principal=Principal(id="agent:unknown", attestation="assigned"),
+            tool=f"mcp://hub/{method}",
+            verb="call",
+            resource="*",
+            params={},
+            context=ActionContext(origin="mcp", extra={"source": source or "unknown"}),
+        )
+        self._enforcer.record(
+            action,
+            EngineDecision(
+                verdict=Verdict.DENY,
+                rule_id=None,
+                source="identity_invalid",
+                reason=f"no valid credential presented from {source or 'unknown'}",
+            ),
+            count=False,  # a refusal at the door is not the fleet's spend
+        )
+
+    def record_ingress(self, action: Action, hits: list[str]) -> None:
+        """A tool result carried instruction shapes (D-12). Recorded as a
+        structural decision on the same principal and tool, verb `ingest`,
+        with the pattern ids as the resource — never the text. Verdict
+        `allow`, because the call already happened; the finding is the
+        `source`."""
+        finding = Action.build(
+            principal=action.principal,
+            tool=action.tool,
+            verb="ingest",
+            resource=",".join(hits),
+            params={},
+            context=ActionContext(origin="mcp", extra={"injection": hits}),
+        )
+        self._enforcer.record(
+            finding,
+            EngineDecision(
+                verdict=Verdict.ALLOW,
+                rule_id=None,
+                source="injection_suspected",
+                reason=f"tool result carried instruction shapes: {', '.join(hits)}",
+            ),
+            count=False,  # the call was counted when it was decided
+        )
 
     def resolve(
         self, tool_uri: str, args: dict[str, Any], caller: str, action: Action | None = None

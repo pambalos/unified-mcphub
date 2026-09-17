@@ -216,8 +216,73 @@ class DeploymentConfig(BaseModel):
         return self
 
 
+_VALID_ON_STALE = {"keep", "defer", "deny"}
+
+
+class ControlPlaneConfig(BaseModel):
+    """Join this hub to a fleet (build-04 / build-07).
+
+    Unset (`url` empty) the hub is standalone: its workspace policy decides
+    everything and nothing leaves the machine — today's behaviour, unchanged.
+    Set, the hub polls the control plane for the signed policy bundle and the
+    signed **revocation list**, gates every call on containment *before* its
+    workspace policy (a contained agent is contained whatever the rules say),
+    ships decision evidence, and cancels a contained principal's calls that are
+    already in flight. This is the block that makes the Guardian's "contained
+    at its next action" true of a hub, not only of the Envoy sidecar.
+
+    The credential is a secret ref, never a literal: the hub reads it from its
+    own secrets store at start-up, alongside the servers' credentials.
+    """
+
+    url: str | None = None
+    fleet_id: str | None = None
+    #: The fleet's pinned root verification key (base64url). Everything the
+    #: control plane serves is verified against a chain that ends here; a
+    #: hostile or wrong control plane is a refused refresh, not a new policy.
+    root_public_key: str | None = None
+    credential_secret_ref: str = "control-plane-credential"
+    poll_seconds: float = 30.0
+    #: What an expired policy bundle does: keep enforcing the old rules
+    #: (default), defer everything to a human, or deny everything.
+    on_stale: str = "keep"
+    #: Where the last verified artifacts are cached, so a restart during an
+    #: incident does not become an unprovisioned outage. None → under the hub home.
+    cache_dir: str | None = None
+    #: Ship decision evidence to the control plane (what the Guardian reads).
+    evidence: bool = True
+    evidence_interval_seconds: float = 5.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.url)
+
+    @field_validator("on_stale")
+    @classmethod
+    def _check_on_stale(cls, v: str) -> str:
+        if v not in _VALID_ON_STALE:
+            raise ValueError(f"on_stale must be one of {sorted(_VALID_ON_STALE)}")
+        return v
+
+    @model_validator(mode="after")
+    def _check_complete(self) -> "ControlPlaneConfig":
+        if self.enabled and not (self.fleet_id and self.root_public_key):
+            raise ValueError(
+                "control_plane.url is set but fleet_id and root_public_key are missing; "
+                "without the pinned root key nothing the control plane serves can be verified"
+            )
+        if self.poll_seconds <= 0:
+            raise ValueError("control_plane.poll_seconds must be positive")
+        if self.evidence_interval_seconds <= 0:
+            # `EvidenceShipper` waits this long between flushes; zero is a
+            # thread spinning at full tilt against the control plane.
+            raise ValueError("control_plane.evidence_interval_seconds must be positive")
+        return self
+
+
 class HubConfig(BaseModel):
     listen: ListenConfig = Field(default_factory=ListenConfig)
+    control_plane: ControlPlaneConfig = Field(default_factory=ControlPlaneConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     secrets: SecretsConfig = Field(default_factory=SecretsConfig)

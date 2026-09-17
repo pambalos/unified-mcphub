@@ -394,13 +394,15 @@ class Receiver:
     an object with a `send` method.
     """
 
-    def __init__(self, status=202, delay=0.0):
+    def __init__(self, status=202, delay=0.0, body=b"{}"):
         from http.server import BaseHTTPRequestHandler, HTTPServer
 
         self.batches: list[list[dict]] = []
         self.auth: list[str | None] = []
         self.status = status
         self.delay = delay
+        #: What the receiver answers with. The control plane answers a receipt.
+        self.body = body
         receiver = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -416,7 +418,7 @@ class Receiver:
                     receiver.batches.append(body.get("decisions", []))
                 self.send_response(receiver.status)
                 self.end_headers()
-                self.wfile.write(b"{}")
+                self.wfile.write(receiver.body)
 
             def log_message(self, *args):
                 pass
@@ -537,5 +539,93 @@ def test_a_slow_receiver_cannot_stall_shipping_forever():
 
         assert elapsed < 3, f"flush waited {elapsed:.1f}s despite a 0.3s timeout"
         assert len(shipper.spool) == 1, "the record should be requeued, not lost"
+    finally:
+        server.close()
+
+
+# --- receipts: the receiver answers, and the sidecar may act on it --------------
+
+
+class Receipting(Collecting):
+    """A sink that answers the way the control plane does."""
+
+    def __init__(self, receipt):
+        super().__init__()
+        self.receipt = receipt
+
+    def send(self, batch):
+        super().send(batch)
+        return self.receipt
+
+
+def test_the_receipt_reaches_the_callback():
+    seen: list[dict] = []
+    shipper = EvidenceShipper(
+        Receipting({"accepted": 1, "raised": 1, "revocations_version": 4}),
+        on_receipt=seen.append,
+    )
+    shipper.record(action(), decision())
+
+    assert shipper.flush() == 1
+    assert seen == [{"accepted": 1, "raised": 1, "revocations_version": 4}]
+
+
+def test_a_sink_without_receipts_is_still_fine():
+    """Every sink written before receipts existed returns None."""
+    seen: list[dict] = []
+    shipper = EvidenceShipper(Collecting(), on_receipt=seen.append)
+    shipper.record(action(), decision())
+
+    assert shipper.flush() == 1
+    assert seen == []
+
+
+def test_a_receipt_handler_failure_never_fails_shipping():
+    """The records are already accepted. A refresh that blows up must not look
+    like a send failure, or the batch would be requeued and shipped twice."""
+
+    def explode(receipt):
+        raise RuntimeError("refresh exploded")
+
+    sink = Receipting({"revocations_version": 2})
+    shipper = EvidenceShipper(sink, on_receipt=explode)
+    shipper.record(action(), decision())
+
+    assert shipper.flush() == 1
+    assert len(sink.records) == 1
+    assert shipper.spool.stats.failures == 0
+    assert len(shipper.spool) == 0
+
+
+def test_an_http_receipt_is_parsed_and_handed_on():
+    from unified_enforce.evidence import HttpSink
+
+    server = Receiver(body=b'{"accepted": 1, "raised": 1, "revocations_version": 7}')
+    try:
+        seen: list[dict] = []
+        shipper = EvidenceShipper(HttpSink(server.url, "t"), on_receipt=seen.append)
+        shipper.record(action(), decision())
+
+        assert shipper.flush() == 1
+        assert seen == [{"accepted": 1, "raised": 1, "revocations_version": 7}]
+    finally:
+        server.close()
+
+
+def test_an_unparseable_receipt_is_accepted_and_ignored():
+    """202 is accepted whatever the body says. A receiver that answered
+    nonsense has still taken the records; resending them would be wrong."""
+    from unified_enforce.evidence import HttpSink
+
+    server = Receiver(body=b"not json")
+    try:
+        seen: list[dict] = []
+        shipper = EvidenceShipper(HttpSink(server.url, "t"), on_receipt=seen.append)
+        shipper.record(action(), decision())
+
+        assert shipper.flush() == 1
+        assert seen == []
+        assert len(server.records) == 1
+        assert len(shipper.spool) == 0
     finally:
         server.close()

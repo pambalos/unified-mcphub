@@ -44,6 +44,17 @@ class Enforcer:
         self._distribution = distribution
         self._evidence = evidence
         self._shadow = shadow
+        # Wired here rather than left as a component someone remembers to
+        # connect, for the reason `enforce()` gives about the kill switch: a
+        # sidecar that ships evidence and polls containment but never learns
+        # from the receipt that the list moved is a containment that arrives a
+        # poll interval late, while everything looks correctly configured.
+        if (
+            distribution is not None
+            and evidence is not None
+            and getattr(evidence, "on_receipt", None) is None
+        ):
+            evidence.on_receipt = distribution.on_receipt
         #: Cumulative totals (UAI-147). Lives here rather than in the engine
         #: because it is state, and the engine's purity is what the latency
         #: budget and the fail-closed story rest on. Created unconditionally:
@@ -94,7 +105,7 @@ class Enforcer:
         )
         return self.record(action, self._engine.decide(action, totals))
 
-    def record(self, action: Action, decision: Decision) -> Decision:
+    def record(self, action: Action, decision: Decision, *, count: bool = True) -> Decision:
         """Chain and trace a decision that did NOT come from the policy engine.
 
         Some verdicts are structural rather than rule-driven — the gateway
@@ -102,13 +113,20 @@ class Enforcer:
         must land in the audit chain and the trace exactly like policy verdicts,
         or the evidence would show only the decisions the engine happened to
         make. `Decision.source` is what distinguishes them to a reader.
+
+        `count=False` for a *finding*: a record beside a verdict (an
+        unenrolled peer's protocol, an injection shape in a result, an
+        identity refusal) that describes an action already decided and
+        counted. Charging it to the policy's counters would spend a budget
+        twice for one request, and a floor that reads the counter would trip
+        at half its stated rate for exactly that traffic.
         """
         # Before the chain write, and unconditionally. If the write then fails
         # the caller aborts the action and this counted something that never
         # happened -- over-counting, which restricts, and which ages out of the
         # window on its own. The alternative ordering under-counts a spend that
         # did happen, and that is a fail-open bought for nothing.
-        deltas = self._engine.deltas(action, decision)
+        deltas = self._engine.deltas(action, decision) if count else {}
         for counter_id, value in deltas.items():
             self.counters.add(action.principal.id, counter_id, value)
 

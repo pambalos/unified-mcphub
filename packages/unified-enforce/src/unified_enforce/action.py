@@ -150,14 +150,18 @@ class Principal(BaseModel):
         if self.on_behalf_of:
             return list(self.on_behalf_of)
         if self.parent_id is not None:
-            kind = self.parent_id.split(":", 1)[0]
-            return [
-                Hop(
-                    id=self.parent_id,
-                    kind=kind if kind in ("agent", "user", "service") else "agent",
-                    attestation="assigned",
-                )
-            ]
+            # Widened explicitly rather than with an `in` test, which does not
+            # narrow `str` to the literal union: the namespace prefix is
+            # attacker-influenced in the general case, so anything unrecognized
+            # falls to `agent` — the kind with no special standing in §6's
+            # human-rootedness check.
+            prefix = self.parent_id.split(":", 1)[0]
+            kind: Literal["agent", "user", "service"] = "agent"
+            if prefix == "user":
+                kind = "user"
+            elif prefix == "service":
+                kind = "service"
+            return [Hop(id=self.parent_id, kind=kind, attestation="assigned")]
         return []
 
     def lineage(self) -> list[str]:

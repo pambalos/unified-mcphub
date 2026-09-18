@@ -47,7 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from unified_paths import canonical, is_under
 
-from .action import Action
+from .action import Action, Attestation, grade_at_least
 
 log = logging.getLogger("unified_enforce.policy")
 
@@ -62,10 +62,15 @@ class Verdict(str, Enum):
 class Decision:
     verdict: Verdict
     rule_id: str | None  # matching rule's id (audit field), None for default-deny
-    source: str  # exact | floor | wildcard | default | condition_error
+    source: str  # exact | floor | wildcard | default | condition_error | attestation_floor
     audit_level: str = "standard"
     reason: str | None = None
     elapsed_ms: float = 0.0
+    #: Structured detail the `why` needs but a reason string cannot carry —
+    #: today the offending hop of a chain that failed an attestation floor
+    #: (build-01 §5). Optional and defaulted so every existing construction
+    #: site keeps working unchanged.
+    context: dict[str, Any] | None = None
 
 
 class PolicyError(ValueError):
@@ -107,6 +112,35 @@ class Floor(BaseModel):
     id: str
     match: Match = Field(default_factory=Match)
     when: str | None = None
+    audit_level: Literal["minimal", "standard", "detailed", "full"] = "standard"
+    reason: str | None = None
+
+
+class AttestationFloor(BaseModel):
+    """A minimum chain grade for a matched verb class — build-01 §5.
+
+    Today the strength of every rule is silently the weakest identity path in
+    the deployment: a rule naming `agent:refunder` is exactly as strong as
+    whatever established that name, and nothing says which. This makes that
+    strength a value policy states and the engine enforces, rather than a
+    topology property nobody can see.
+
+    `effect` is deliberately limited to deny|defer. A floor is a precondition
+    on *who is asking*, so the most it can ever do is refuse — an identity
+    requirement that could grant would be an authorization rule wearing the
+    wrong name.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    match: Match = Field(default_factory=Match)
+    #: `assigned` < `derived` < `attested`. Compared against
+    #: `Principal.chain_grade()`, never the leaf's own grade — that is the
+    #: minimum-grade rule, and reading the leaf here would reintroduce exactly
+    #: the laundering build-01 §4 exists to stop.
+    minimum: Attestation
+    effect: Literal["deny", "defer"] = "deny"
     audit_level: Literal["minimal", "standard", "detailed", "full"] = "standard"
     reason: str | None = None
 
@@ -153,6 +187,15 @@ class PolicyDoc(BaseModel):
     #: Empty by default: with no constitutional rules the engine behaves exactly
     #: as before, which is what keeps the legacy-parity guarantee intact.
     constitutional: list[Rule] = Field(default_factory=list)
+    #: Identity preconditions, evaluated after `constitutional` and before every
+    #: other tier (build-01 §5). After, because a constitutional rule is the one
+    #: thing a deployment has said cannot be waived by any floor — the existing
+    #: `floors` tier is already subordinate to it, and a second kind of floor
+    #: that outranked it would make "constitutional" mean two different things.
+    #: Before the rest, because a rule evaluated on behalf of an identity that
+    #: was never established to the required grade is a rule whose strength is
+    #: fiction.
+    attestation_floors: list[AttestationFloor] = Field(default_factory=list)
     rules: list[Rule] = Field(default_factory=list)
     floors: list[Floor] = Field(default_factory=list)
     counters: list[Counter] = Field(default_factory=list)
@@ -352,6 +395,17 @@ class PolicyEngine:
             for f in doc.floors
         ]
         self._wildcard = [c for c in rules if not c.is_exact]
+        # Attestation floors compile through the same path as everything else --
+        # same globs, same duplicate-id check -- and carry their minimum grade
+        # alongside, the way counters carry `on_verdict`. `when` is deliberately
+        # not offered: a floor that could be conditioned off is not a floor.
+        self._attestation: list[tuple[_Compiled, Attestation]] = [
+            (
+                compile_one(f.id, f.match, None, Verdict(f.effect), f.audit_level, f.reason),
+                f.minimum,
+            )
+            for f in doc.attestation_floors
+        ]
 
         # Counters compile through the same path as rules -- same globs, same
         # CEL environment, same duplicate-id check -- so a counter whose match
@@ -411,19 +465,18 @@ class PolicyEngine:
 
         activation: dict[str, Any] | None = None  # built lazily, only if a rule has CEL
 
-        for tier, source in (
-            (self._constitutional, "constitutional"),
-            (self._exact, "exact"),
-            (self._floors, "floor"),
-            (self._wildcard, "wildcard"),
-        ):
+        def matches(c: _Compiled) -> bool:
+            return bool(
+                any(p.fullmatch(action.principal.id) for p in c.principals)
+                and c.tool.fullmatch(action.tool)
+                and c.verb.fullmatch(action.verb)
+                and c.resource.fullmatch(action.resource)
+            )
+
+        def scan(tier: list[_Compiled], source: str) -> Decision | None:
+            nonlocal activation
             for c in tier:
-                if not (
-                    any(p.fullmatch(action.principal.id) for p in c.principals)
-                    and c.tool.fullmatch(action.tool)
-                    and c.verb.fullmatch(action.verb)
-                    and c.resource.fullmatch(action.resource)
-                ):
+                if not matches(c):
                     continue
                 if c.args is not None and not _args_match(c.args, action.params, c.effect):
                     continue
@@ -433,30 +486,95 @@ class PolicyEngine:
                     try:
                         result = c.condition.evaluate(activation)
                     except Exception as exc:
-                        return done(
-                            Decision(
-                                Verdict.DENY,
-                                c.id,
-                                "condition_error",
-                                c.audit_level,
-                                f"condition raised: {exc}",
-                            )
+                        return Decision(
+                            Verdict.DENY,
+                            c.id,
+                            "condition_error",
+                            c.audit_level,
+                            f"condition raised: {exc}",
                         )
                     if not isinstance(result, celpy.celtypes.BoolType):
-                        return done(
-                            Decision(
-                                Verdict.DENY,
-                                c.id,
-                                "condition_error",
-                                c.audit_level,
-                                f"condition returned {type(result).__name__}, not bool",
-                            )
+                        return Decision(
+                            Verdict.DENY,
+                            c.id,
+                            "condition_error",
+                            c.audit_level,
+                            f"condition returned {type(result).__name__}, not bool",
                         )
                     if not result:
                         continue  # condition false → rule does not match
-                return done(Decision(c.effect, c.id, source, c.audit_level, c.reason))
+                return Decision(c.effect, c.id, source, c.audit_level, c.reason)
+            return None
+
+        # Constitutional first: the one tier no floor may waive (UAI-216).
+        hit = scan(self._constitutional, "constitutional")
+        if hit is not None:
+            return done(hit)
+
+        # Then identity: a rule evaluated on behalf of an identity never
+        # established to the required grade is a rule whose strength is fiction
+        # (build-01 §5). Checked against the *chain* grade, so a well-attested
+        # leaf behind a weak hop does not pass.
+        hit = self._attestation_check(action)
+        if hit is not None:
+            return done(hit)
+
+        for tier, source in (
+            (self._exact, "exact"),
+            (self._floors, "floor"),
+            (self._wildcard, "wildcard"),
+        ):
+            hit = scan(tier, source)
+            if hit is not None:
+                return done(hit)
 
         return done(Decision(Verdict.DENY, None, "default", "standard", "no rule matched"))
+
+    def _attestation_check(self, action: Action) -> Decision | None:
+        """First matching attestation floor the chain fails — build-01 §5.
+
+        The `why` names the offending hop rather than reporting only that the
+        chain was too weak, because a denial an operator cannot trace to a link
+        sends them to read the whole topology to find out which one it was.
+        """
+        principal = action.principal
+        grade = principal.chain_grade()
+        for c, minimum in self._attestation:
+            if not (
+                any(p.fullmatch(principal.id) for p in c.principals)
+                and c.tool.fullmatch(action.tool)
+                and c.verb.fullmatch(action.verb)
+                and c.resource.fullmatch(action.resource)
+            ):
+                continue
+            # The args axis matters here as much as the other four. Omitting it
+            # — as this method first did, having re-implemented tier matching
+            # rather than reusing `scan` — makes a floor scoped by `match.args`
+            # apply to every action matching the other four, and silently: the
+            # args map still compiles, so nothing fails at load.
+            if c.args is not None and not _args_match(c.args, action.params, c.effect):
+                continue
+            if grade_at_least(grade, minimum):
+                continue
+            weak = principal.weakest_link()
+            where = f"hop {weak.id!r}" if weak is not None else f"principal {principal.id!r}"
+            return Decision(
+                c.effect,
+                c.id,
+                "attestation_floor",
+                c.audit_level,
+                c.reason or f"chain grade {grade!r} below floor {minimum!r} at {where}",
+                context={
+                    "attestation_below_floor": {
+                        "required": minimum,
+                        "chain_grade": grade,
+                        "offending_hop": weak.model_dump(mode="json") if weak else None,
+                        "chain": [h.id for h in principal.chain()],
+                        "human_rooted": principal.human_rooted(),
+                    }
+                },
+            )
+        return None
 
     def deltas(self, action: Action, decision: Decision) -> dict[str, float]:
         """What this action adds to each counter. Pure, like everything else here.

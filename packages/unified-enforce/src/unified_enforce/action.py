@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 from ulid import ULID
 
 from .canonical import canonical_bytes, sha256_hex
@@ -48,6 +48,60 @@ def _utcnow_iso() -> str:
 #:               `derived` — a JWT is a bearer secret, not a channel.
 Attestation = Literal["assigned", "derived", "attested"]
 
+#: Grades are ordered, and the order is the whole point of build-01 §4: a chain
+#: is only as strong as its weakest link, so comparing grades has to mean
+#: something. Kept as a module constant rather than an Enum because the wire
+#: type is a string literal and the audit log records it verbatim.
+_GRADE_RANK: Final[dict[str, int]] = {"assigned": 0, "derived": 1, "attested": 2}
+
+
+def grade_at_least(grade: Attestation, floor: Attestation) -> bool:
+    """Is `grade` at or above `floor`? `assigned < derived < attested`."""
+    return _GRADE_RANK[grade] >= _GRADE_RANK[floor]
+
+
+def _kind_of(principal_id: str, declared: str) -> Literal["agent", "user", "service"]:
+    """The kind a principal id implies, falling back to what was declared.
+
+    `id` is namespaced (`user:alice`, `service:sched`, `agent:crew-1`) and the
+    prefix is the more reliable signal: production constructors — the gateway,
+    the hub, the authz resolver — build `Principal(id=..., attestation=...)`
+    and leave `kind` at its `agent` default, so trusting the field alone
+    reports an OIDC-resolved `user:alice` as an agent and §6's human-rootedness
+    flag fires on a chain that is plainly human-rooted.
+
+    Widened with explicit comparisons rather than an `in` test, which does not
+    narrow `str` to the literal union. An unrecognized prefix keeps the
+    declared value, which for the default construction is `agent` — the kind
+    with no special standing in §6.
+    """
+    prefix = principal_id.split(":", 1)[0]
+    if prefix == "user":
+        return "user"
+    if prefix == "service":
+        return "service"
+    if prefix == "agent":
+        return "agent"
+    return declared  # type: ignore[return-value]
+
+
+class Hop(BaseModel):
+    """One established link in a delegation chain — build-01 §2.
+
+    Each hop carries its **own** attestation grade: how *that* delegation was
+    established, not how the leaf authenticated. A hop is only ever written by
+    the parent's own credentialed context (§3) — never from a value in the
+    child's request, because an agent asserting its own parent is worth exactly
+    as much as an agent asserting its own identity, which UAI-137 already
+    established is nothing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kind: Literal["agent", "user", "service"] = "agent"
+    attestation: Attestation = "assigned"
+
 
 class Principal(BaseModel):
     """Who is acting. `id` is namespaced: agent:<name>, user:<name>, service:<name>."""
@@ -78,14 +132,145 @@ class Principal(BaseModel):
     #: independently.
     parent_id: str | None = None
 
-    def lineage(self) -> list[str]:
-        """This principal and its parent, nearest first. One level today.
+    #: The delegation chain, ordered **root-first**: the human or system at
+    #: index 0, the immediate parent last. build-01 §2.
+    #:
+    #: Omitted entirely when there is no delegation — `None` and `[]` are the
+    #: same statement and canonicalize identically, so adding this field leaves
+    #: every existing action's digest byte-for-byte unchanged (§2, and
+    #: `test_chain_is_canonical`).
+    #:
+    #: Authoritative over `parent_id`, which predates it and survives only as a
+    #: one-level input. Where both are present the chain wins; where only
+    #: `parent_id` is set, accessors read it as a single hop of **`assigned`**
+    #: grade, because a parent recorded without a grade is a parent whose
+    #: delegation was never established — and §4 says the honest reading of an
+    #: unknown grade is the weakest one.
+    on_behalf_of: list[Hop] | None = None
 
-        A list rather than a pair because the frameworks nest further than one
-        level, and a caller that walks a list keeps working when a chain
-        arrives. Returning `[id]` for an orphan means no caller needs a branch.
+    @model_serializer(mode="wrap")
+    def _omit_empty_chain(self, handler: Any) -> dict[str, Any]:
+        """Drop `on_behalf_of` from the payload when there is no chain.
+
+        This is what makes the field digest-compatible: a principal with no
+        delegation serializes to exactly the bytes it did before build-01. The
+        other optional fields keep emitting `null`, because they were part of
+        the canonical bytes already and dropping them now *would* change
+        existing digests.
         """
-        return [self.id] if self.parent_id is None else [self.id, self.parent_id]
+        data = handler(self)
+        if not data.get("on_behalf_of"):
+            data.pop("on_behalf_of", None)
+        return data
+
+    def chain(self) -> list[Hop]:
+        """The delegation chain, root-first. `[]` for an undelegated principal.
+
+        One reader for two representations: the `on_behalf_of` list when it is
+        set, otherwise the legacy `parent_id` read as a single `assigned` hop.
+        Callers never branch on which one a producer happened to write, which
+        is the point — two sources of truth for lineage is the drift this
+        method exists to prevent.
+        """
+        if self.on_behalf_of:
+            return list(self.on_behalf_of)
+        if self.parent_id is not None:
+            return [
+                Hop(
+                    id=self.parent_id,
+                    kind=_kind_of(self.parent_id, "agent"),
+                    attestation="assigned",
+                )
+            ]
+        return []
+
+    def lineage(self) -> list[str]:
+        """This principal and its ancestors, **nearest first**.
+
+        Walks the full chain since build-01; the pre-chain contract (leaf, then
+        parent) is the depth-1 case of the same list, so callers written against
+        it keep working — which is what the original one-level docstring
+        promised would happen when a chain arrived.
+        """
+        return [self.id] + [hop.id for hop in reversed(self.chain())]
+
+    def chain_grade(self) -> Attestation:
+        """Effective attestation: the **minimum** across the leaf and every hop.
+
+        build-01 §4, the load-bearing invariant. A well-attested leaf behind one
+        `assigned` hop is an `assigned` chain. Taking the maximum — or the
+        leaf's own grade — would let delegation *launder* a weak identity into a
+        strong-looking one, which is strictly worse than having no chain at all:
+        it manufactures unearned confidence, and unearned confidence is what the
+        join engine (build-10) would go on to act on.
+        """
+        weakest = self.attestation
+        for hop in self.chain():
+            if _GRADE_RANK[hop.attestation] < _GRADE_RANK[weakest]:
+                weakest = hop.attestation
+        return weakest
+
+    def weakest_link(self) -> Hop | None:
+        """The hop that set `chain_grade()`, or None when the leaf itself is weakest.
+
+        Exists so a denial can name which link failed rather than reporting only
+        that the chain was too weak — a `why` that does not identify the bad hop
+        sends an operator to read the whole topology.
+        """
+        worst: Hop | None = None
+        rank = _GRADE_RANK[self.attestation]
+        for hop in self.chain():
+            if _GRADE_RANK[hop.attestation] < rank:
+                worst, rank = hop, _GRADE_RANK[hop.attestation]
+        return worst
+
+    def human_rooted(self) -> bool:
+        """Does the chain terminate in a `user:` or `service:` principal?
+
+        build-01 §6. A chain that does not is **flagged, not denied** — a fully
+        autonomous agent with no human root is legitimate (a cron, a scheduled
+        job) but is a distinct security class, and the evidence has to show it
+        as one rather than blend it in.
+        """
+        chain = self.chain()
+        root = chain[0] if chain else self
+        return _kind_of(root.id, root.kind) in ("user", "service")
+
+    def delegate(
+        self,
+        *,
+        id: str,
+        kind: Literal["agent", "user", "service"] = "agent",
+        session_id: str | None = None,
+        labels: dict[str, str] | None = None,
+        attestation: Attestation = "assigned",
+    ) -> "Principal":
+        """Stamp *this* principal as the parent of a new child — build-01 §3.
+
+        The establishment half of the spec: a hop is added by the parent's own
+        credentialed context, so the chain is something the spawning side writes
+        about itself, never something the child says about its parent. Every
+        spawn path (hub, adapters, the gateway) goes through here so there is
+        one place where that rule is either kept or broken.
+        """
+        return Principal(
+            id=id,
+            kind=kind,
+            session_id=session_id,
+            labels=labels or {},
+            attestation=attestation,
+            # `parent_id` is set as well as the chain, not instead of it. It is
+            # the legacy one-level field, and consumers that predate the chain
+            # still read it — `evidence.py` ships it in the signed record. A
+            # delegated principal that left it `None` would tell a receiver it
+            # was an orphan while `on_behalf_of` said otherwise, which is worse
+            # than the field simply being coarse.
+            parent_id=self.id,
+            on_behalf_of=[
+                *self.chain(),
+                Hop(id=self.id, kind=_kind_of(self.id, self.kind), attestation=self.attestation),
+            ],
+        )
 
 
 class ActionContext(BaseModel):

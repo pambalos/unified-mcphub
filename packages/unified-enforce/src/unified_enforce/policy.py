@@ -547,6 +547,13 @@ class PolicyEngine:
                 and c.resource.fullmatch(action.resource)
             ):
                 continue
+            # The args axis matters here as much as the other four. Omitting it
+            # — as this method first did, having re-implemented tier matching
+            # rather than reusing `scan` — makes a floor scoped by `match.args`
+            # apply to every action matching the other four, and silently: the
+            # args map still compiles, so nothing fails at load.
+            if c.args is not None and not _args_match(c.args, action.params, c.effect):
+                continue
             if grade_at_least(grade, minimum):
                 continue
             weak = principal.weakest_link()

@@ -21,7 +21,7 @@ from unified_enforce.action import (
     grade_at_least,
 )
 from unified_enforce.extauthz import ON_BEHALF_OF_HEADER, CheckInput, ExtAuthzCore
-from unified_enforce.policy import PolicyEngine, Verdict
+from unified_enforce.policy import Decision, PolicyEngine, Verdict
 
 GRADES = ("assigned", "derived", "attested")
 
@@ -298,3 +298,138 @@ def test_chain_wins_over_parent_id() -> None:
         on_behalf_of=[Hop(id="user:b", kind="user", attestation="attested")],
     )
     assert [h.id for h in both.chain()] == ["user:b"]
+
+
+# --- regressions from the build-01 self-review -----------------------------
+#
+# Five defects survived the twenty tests above. Each gets a test that fails
+# against the original implementation, because a fix without one is a fix that
+# comes back.
+
+
+def test_delegate_sets_parent_id_for_legacy_consumers() -> None:
+    """`delegate()` writes the chain AND the legacy one-level field.
+
+    Leaving `parent_id` at None told every pre-chain consumer the principal was
+    an orphan while `on_behalf_of` said otherwise — worse than the field being
+    coarse, because the two disagreed.
+    """
+    root = Principal(id="user:b", kind="user", attestation="attested")
+    child = root.delegate(id="agent:planner", attestation="derived")
+    grandchild = child.delegate(id="agent:exec", attestation="attested")
+
+    assert child.parent_id == "user:b"
+    assert grandchild.parent_id == "agent:planner"  # the IMMEDIATE parent
+    assert [h.id for h in grandchild.chain()] == ["user:b", "agent:planner"]
+
+
+def test_evidence_ships_the_chain_grade_not_the_leaf() -> None:
+    """The laundering §4 prevents on the decision side, prevented on the wire.
+
+    Shipping `principal.attestation` made an `attested` leaf behind an
+    `assigned` hop arrive as `attestation: "attested"` — a receiver counting
+    denials per principal scored an unproven chain as proven.
+    """
+    from unified_enforce.evidence import summarise
+
+    laundered = _chain("attested", "assigned", "attested")
+    assert laundered.attestation == "attested"
+    assert laundered.chain_grade() == "assigned"
+
+    record = summarise(_act(laundered), Decision(Verdict.DENY, "r", "exact"))
+    assert record["attestation"] == "assigned"
+    assert record["parent_id"] == "agent:h1"
+
+
+def test_args_scoped_attestation_floor_does_not_overmatch() -> None:
+    """A floor scoped by `match.args` applies only where the args match.
+
+    `_attestation_check` re-implemented tier matching and omitted the args
+    step, so the constraint was dead — and silently, because the args map still
+    compiled.
+    """
+    engine = PolicyEngine.from_dict(
+        {
+            "version": 1,
+            "attestation_floors": [
+                {
+                    "id": "etc-needs-attested",
+                    "match": {"verb": "write", "args": {"path": {"starts_with": ["/etc"]}}},
+                    "minimum": "attested",
+                }
+            ],
+            "rules": [{"id": "allow-all", "match": {}, "effect": "allow"}],
+        }
+    )
+    weak = _chain("assigned")
+
+    outside = Action.build(
+        principal=weak, tool="mcp://s/t", verb="write", resource="r", params={"path": "/home/ok"}
+    )
+    assert engine.decide(outside).verdict is Verdict.ALLOW
+
+    inside = Action.build(
+        principal=weak, tool="mcp://s/t", verb="write", resource="r", params={"path": "/etc/shadow"}
+    )
+    assert engine.decide(inside).verdict is Verdict.DENY
+
+
+def test_human_rooted_infers_kind_from_the_id_prefix() -> None:
+    """Production constructors never pass `kind`.
+
+    The gateway, the hub and the authz resolver all build
+    `Principal(id=..., attestation=...)` and leave `kind` at its `agent`
+    default, so reading the field alone reported an OIDC-resolved `user:alice`
+    as a non-human-rooted agent.
+    """
+    oidc_resolved = Principal(id="user:alice", attestation="derived")  # no kind=
+    assert oidc_resolved.kind == "agent"  # the default the constructor left
+    assert oidc_resolved.human_rooted()
+
+    assert Principal(id="service:sched", attestation="derived").human_rooted()
+    assert not Principal(id="agent:cron", attestation="derived").human_rooted()
+
+    delegated = Principal(id="user:alice", attestation="attested").delegate(id="agent:worker")
+    assert delegated.human_rooted()
+
+
+def test_decision_context_reaches_the_audit_chain(tmp_path) -> None:
+    """The offending hop is written down, not left in-process.
+
+    A `why` that names which link failed is worth nothing to an investigator
+    reading the chain a week later if it never left the process that computed
+    it.
+    """
+    from unified_enforce.audit import AuditChain
+
+    engine = PolicyEngine.from_dict(
+        {
+            "version": 1,
+            "attestation_floors": [{"id": "f", "match": {}, "minimum": "attested"}],
+            "rules": [{"id": "allow-all", "match": {}, "effect": "allow"}],
+        }
+    )
+    action = _act(_chain("attested", "assigned", "attested"))
+    decision = engine.decide(action)
+    assert decision.context is not None
+
+    chain = AuditChain(tmp_path)
+    chain.start()
+    entry = chain.append_decision(action, decision)
+    assert entry["payload"]["context"]["attestation_below_floor"]["offending_hop"]["id"] == (
+        "agent:h1"
+    )
+
+
+def test_plain_decision_has_no_context_key(tmp_path) -> None:
+    """Omitted when absent, like `counters` — the common entry stays clean."""
+    from unified_enforce.audit import AuditChain
+
+    engine = PolicyEngine.from_dict(
+        {"version": 1, "rules": [{"id": "allow-all", "match": {}, "effect": "allow"}]}
+    )
+    action = _act(_chain("attested"))
+    chain = AuditChain(tmp_path)
+    chain.start()
+    entry = chain.append_decision(action, engine.decide(action))
+    assert "context" not in entry["payload"]

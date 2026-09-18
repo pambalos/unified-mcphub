@@ -199,7 +199,21 @@ def summarise(
         # counting something whose meaning depends on this -- "agent:crew-1 was
         # denied nine times" is a different fact when that name was a header a
         # gateway stamped than when it was proven.
-        "attestation": action.principal.attestation,
+        # The CHAIN's grade, not the leaf's. This field answers "how was the
+        # identity every rule keys on established", and once delegation exists
+        # the leaf's own grade is the wrong answer: an `attested` sidecar
+        # acting behind an `assigned` hop is an `assigned` chain (build-01 §4).
+        # Shipping the leaf value re-introduced, on the receiver side, exactly
+        # the laundering the minimum-grade rule prevents on the decision side —
+        # a receiver counting denials per principal scored an unproven chain as
+        # proven.
+        #
+        # EVIDENCE_VERSION is deliberately NOT bumped: the signed field set and
+        # the canonical bytes are unchanged, so producer and verifier cannot
+        # drift over this. What changed is the value's truthfulness, and
+        # consumers that *interpret* the field (the control plane's analytics)
+        # need telling that it is now chain-aware.
+        "attestation": action.principal.chain_grade(),
         "parent_id": action.principal.parent_id,
         "decided_at": action.ts,
     }

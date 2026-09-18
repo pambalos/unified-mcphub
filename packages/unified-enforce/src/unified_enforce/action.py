@@ -60,6 +60,31 @@ def grade_at_least(grade: Attestation, floor: Attestation) -> bool:
     return _GRADE_RANK[grade] >= _GRADE_RANK[floor]
 
 
+def _kind_of(principal_id: str, declared: str) -> Literal["agent", "user", "service"]:
+    """The kind a principal id implies, falling back to what was declared.
+
+    `id` is namespaced (`user:alice`, `service:sched`, `agent:crew-1`) and the
+    prefix is the more reliable signal: production constructors — the gateway,
+    the hub, the authz resolver — build `Principal(id=..., attestation=...)`
+    and leave `kind` at its `agent` default, so trusting the field alone
+    reports an OIDC-resolved `user:alice` as an agent and §6's human-rootedness
+    flag fires on a chain that is plainly human-rooted.
+
+    Widened with explicit comparisons rather than an `in` test, which does not
+    narrow `str` to the literal union. An unrecognized prefix keeps the
+    declared value, which for the default construction is `agent` — the kind
+    with no special standing in §6.
+    """
+    prefix = principal_id.split(":", 1)[0]
+    if prefix == "user":
+        return "user"
+    if prefix == "service":
+        return "service"
+    if prefix == "agent":
+        return "agent"
+    return declared  # type: ignore[return-value]
+
+
 class Hop(BaseModel):
     """One established link in a delegation chain — build-01 §2.
 
@@ -150,18 +175,13 @@ class Principal(BaseModel):
         if self.on_behalf_of:
             return list(self.on_behalf_of)
         if self.parent_id is not None:
-            # Widened explicitly rather than with an `in` test, which does not
-            # narrow `str` to the literal union: the namespace prefix is
-            # attacker-influenced in the general case, so anything unrecognized
-            # falls to `agent` — the kind with no special standing in §6's
-            # human-rootedness check.
-            prefix = self.parent_id.split(":", 1)[0]
-            kind: Literal["agent", "user", "service"] = "agent"
-            if prefix == "user":
-                kind = "user"
-            elif prefix == "service":
-                kind = "service"
-            return [Hop(id=self.parent_id, kind=kind, attestation="assigned")]
+            return [
+                Hop(
+                    id=self.parent_id,
+                    kind=_kind_of(self.parent_id, "agent"),
+                    attestation="assigned",
+                )
+            ]
         return []
 
     def lineage(self) -> list[str]:
@@ -214,7 +234,7 @@ class Principal(BaseModel):
         """
         chain = self.chain()
         root = chain[0] if chain else self
-        return root.kind in ("user", "service")
+        return _kind_of(root.id, root.kind) in ("user", "service")
 
     def delegate(
         self,
@@ -239,9 +259,16 @@ class Principal(BaseModel):
             session_id=session_id,
             labels=labels or {},
             attestation=attestation,
+            # `parent_id` is set as well as the chain, not instead of it. It is
+            # the legacy one-level field, and consumers that predate the chain
+            # still read it — `evidence.py` ships it in the signed record. A
+            # delegated principal that left it `None` would tell a receiver it
+            # was an orphan while `on_behalf_of` said otherwise, which is worse
+            # than the field simply being coarse.
+            parent_id=self.id,
             on_behalf_of=[
                 *self.chain(),
-                Hop(id=self.id, kind=self.kind, attestation=self.attestation),
+                Hop(id=self.id, kind=_kind_of(self.id, self.kind), attestation=self.attestation),
             ],
         )
 

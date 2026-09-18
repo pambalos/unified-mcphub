@@ -389,6 +389,14 @@ class AuditChain:
                 # entry does not grow a `"counters": {}` that every reader has
                 # to learn to ignore.
                 **({"counters": {k: repr(v) for k, v in counters.items()}} if counters else {}),
+                # Structured detail the reason string cannot carry — today the
+                # offending hop of a chain that failed an attestation floor.
+                # Written into the chain rather than left in-process, because a
+                # `why` naming which link failed is worth nothing to an
+                # investigator reading the log a week later. Omitted when
+                # absent, like `counters`, so the common entry does not grow a
+                # key every reader has to learn to ignore.
+                **({"context": decision.context} if decision.context else {}),
             },
         )
 

@@ -36,6 +36,15 @@ one model; design partners must see one semantics).
 Precedence (v0.2): ① exact rules (no wildcard in `tool`), file order →
 ② floors → ③ wildcard rules, first match → ④ default-deny (not configurable).
 
+Since UAI-216 and build-01, two tiers sit above ①: **constitutional rules**
+(un-waivable; a constitutional ALLOW is not subject to attestation floors),
+then **attestation floors**, checked against the delegation chain's grade. A
+failing `deny` floor is final. A failing `defer` floor is applied *after* ①–④
+and replaces only an ALLOW or DEFER — never an explicit or default DENY — so a
+floor can only make an outcome stricter, never turn a refusal into something a
+human can approve. An empty `attestation_floors` is omitted from the document's
+serialisation, so policies that do not use it keep their `policy_digest`.
+
 ## Intentional divergences from the hub (all stricter / fail-closed)
 
 - **Unknown operator** — hub: operator evaluates False at runtime (rule can

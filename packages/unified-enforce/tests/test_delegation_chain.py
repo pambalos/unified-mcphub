@@ -173,6 +173,64 @@ def test_attestation_floor_can_defer_instead_of_deny() -> None:
     assert engine.decide(_act(_chain("derived"))).verdict is Verdict.DEFER
 
 
+@pytest.mark.parametrize("weak", ["assigned", "derived"])
+def test_a_defer_floor_never_softens_an_explicit_deny(weak: str) -> None:
+    """The floor may only make an outcome stricter.
+
+    Returned before the rules, a failing `defer` floor turned an explicit deny
+    into a question a human could approve -- and only for the *weaker*
+    identity, while a well-attested one was still denied outright.
+    """
+    engine = PolicyEngine.from_dict(
+        {
+            "version": 1,
+            "attestation_floors": [
+                {"id": "f", "match": {}, "minimum": "attested", "effect": "defer"}
+            ],
+            "rules": [{"id": "no-writes", "match": {"verb": "write"}, "effect": "deny"}],
+        }
+    )
+    weak_outcome = engine.decide(_act(_chain(weak)))
+    strong_outcome = engine.decide(_act(_chain("attested")))
+    assert weak_outcome.verdict is Verdict.DENY
+    assert weak_outcome.rule_id == "no-writes"
+    assert strong_outcome.verdict is Verdict.DENY
+
+
+def test_a_defer_floor_never_softens_the_default_deny() -> None:
+    engine = PolicyEngine.from_dict(
+        {
+            "version": 1,
+            "attestation_floors": [
+                {"id": "f", "match": {}, "minimum": "attested", "effect": "defer"}
+            ],
+        }
+    )
+    outcome = engine.decide(_act(_chain("assigned")))
+    assert outcome.verdict is Verdict.DENY
+    assert outcome.source == "default"
+
+
+def test_a_policy_without_attestation_floors_keeps_its_digest() -> None:
+    """A digest names which rules decided; a field nobody uses must not rename
+    every existing policy."""
+    from unified_enforce.policy import PolicyDoc, policy_digest
+
+    doc = PolicyDoc.model_validate(
+        {"version": 1, "rules": [{"id": "r", "match": {}, "effect": "allow"}]}
+    )
+    assert "attestation_floors" not in doc.model_dump(mode="json")
+    with_floor = PolicyDoc.model_validate(
+        {
+            "version": 1,
+            "attestation_floors": [{"id": "f", "match": {}, "minimum": "derived"}],
+            "rules": [{"id": "r", "match": {}, "effect": "allow"}],
+        }
+    )
+    assert "attestation_floors" in with_floor.model_dump(mode="json")
+    assert policy_digest(doc) != policy_digest(with_floor)
+
+
 def test_attestation_floor_reads_the_chain_not_the_leaf() -> None:
     """The laundering case: a perfectly attested leaf behind one weak hop.
 

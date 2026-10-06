@@ -1,0 +1,19 @@
+specs/enforce/payload-evidence.v1.md
+  s_57443f001e84f6::t_3a08510be1cdef 1-77
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "4f533df431fb187f4d43cabc17fb4bf7f1b4a9fb",
+  "prompts": {},
+  "sessions": {
+    "s_57443f001e84f6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "870a3f2c-bcad-432a-ac61-8f82694fa6d9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

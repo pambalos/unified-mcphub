@@ -121,6 +121,41 @@ def test_lint_catches_malformed_and_unpaired(tmp_path):
     assert not any("r2" in p for p in problems)
 
 
+def test_lint_treats_interdicted_as_a_closed_bracket(tmp_path):
+    """build-04: a forward the plane cancelled closes its bracket with
+    `interdicted`, so an interrupted call is not flagged like a crash."""
+    d = tmp_path / "audit"
+    interdicted = {
+        "phase": "interdicted",
+        "request_id": "r1",
+        "ts": "2026-01-01T00:00:01+00:00",
+        "seq": 2,
+        "duration_ms": 12.0,
+        "result": None,
+        "result_status": "interdicted",
+        "interdicted_by": "control-plane",
+        "reason": "agent:x is contained (defer)",
+    }
+    _write(
+        d,
+        "2026-01-01",
+        [
+            _received("r1", authz_decision="allow"),
+            json.dumps(interdicted),
+            json.dumps({**interdicted, "request_id": "r2", "seq": 3}),  # no received
+            _received("r3", authz_decision="allow"),
+            _completed("r3"),
+            json.dumps({**interdicted, "request_id": "r3", "seq": 5}),  # closed twice
+        ],
+    )
+    problems = audit_reader.lint(d)
+    assert not any("r1" in p for p in problems)
+    assert any("r2" in p and "no received" in p for p in problems)
+    assert any("r3" in p and "closed twice" in p for p in problems)
+    assert audit_reader.pair(d, "r1")["interdicted"]["interdicted_by"] == "control-plane"
+    assert audit_reader.pair(d, "r1")["completed"] is None
+
+
 def test_prune_removes_only_old(tmp_path):
     d = tmp_path / "audit"
     today = datetime.now(timezone.utc).date()

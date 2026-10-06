@@ -27,6 +27,10 @@ dependencies = [
 
 # Telemetry is opt-in (technologies.md: `otel.enabled` off by default); the core
 # package must stay import-light for the in-process decision path.
+[project.scripts]
+# Build an ISO/IEC 42001 evidence pack from local chains, or verify one.
+unified-evidence = "unified_enforce.evidence_pack:main"
+
 [project.optional-dependencies]
 otel = [
     "opentelemetry-sdk>=1.25.0",

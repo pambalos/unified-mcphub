@@ -34,7 +34,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from unified_enforce import Action, Enforcer, Principal, Telemetry
+from unified_enforce import Action, ActionContext, Enforcer, Principal, Telemetry
+from unified_enforce.policy import Decision as EngineDecision
 from unified_enforce.policy import Floor as EngineFloor
 from unified_enforce.policy import Match as EngineMatch
 from unified_enforce.policy import PolicyDoc, PolicyEngine, Verdict
@@ -108,6 +109,15 @@ class Decision:
     rule: str | None  # the matching rule's `tool` pattern (audit `authz_rule`)
     audit_level: str = "standard"
     source: str = "default"  # exact | danger_floor | wildcard | default
+    #: sha256 of the compiled policy that decided (audit `policy_digest`): the
+    #: workspace rules, the dangerous-commands floors and any constitutional
+    #: rules together, as one document. None when no policy decided.
+    policy_digest: str | None = None
+    #: The engine's own decision, unmapped. What leaves the hub — the DEFER an
+    #: approver is asked about, the evidence row the control plane stores —
+    #: is the engine's vocabulary, and it carries the rule id (now the
+    #: readable pattern, see `_RuleIds`) and the policy digest together.
+    engine: EngineDecision | None = None
 
 
 _VERDICT_TO_EFFECT = {
@@ -136,7 +146,40 @@ def _rule_is_dead(rule: Rule) -> bool:
     return False
 
 
-def _floor_from_pattern(pattern: str, index: int) -> EngineFloor | None:
+class _RuleIds:
+    """Engine rule ids that a reader can recognise: the hub's own pattern.
+
+    The hub's rules have no ids — a rule *is* its `tool` pattern — so the
+    engine's were once synthesized from list position (`rule-22`, `floor-3`).
+    Those never surfaced in the hub's own audit (the `names` map turns an id
+    back into the pattern for `authz_rule`), but they did surface everywhere
+    the engine's decision travels unmapped: the evidence the control plane
+    stores, the approval it queues, the console an approver reads. `rule-22`
+    there means nothing without the workspace file it indexed — and it means
+    something *different* after a learned rule is prepended, because every
+    position shifts. The pattern means the same thing in both places.
+
+    Ids must be unique across rules, floors and constitutional rules (one
+    namespace in `PolicyEngine`), and the same pattern can legitimately appear
+    twice — once per caller list, say. Repeats take `#2`, `#3`… in list order,
+    so the first occurrence, the one first-match-wins usually picks, keeps the
+    bare pattern. Floors are prefixed `floor:` so a workspace rule and a floor
+    over the same tool stay distinguishable — they are different decisions.
+    """
+
+    def __init__(self, reserved: list[str]) -> None:
+        self._seen: set[str] = set(reserved)
+
+    def take(self, base: str) -> str:
+        candidate, n = base, 1
+        while candidate in self._seen:
+            n += 1
+            candidate = f"{base}#{n}"
+        self._seen.add(candidate)
+        return candidate
+
+
+def _floor_from_pattern(pattern: str, floor_id: str) -> EngineFloor | None:
     """Danger patterns: `mcp://srv/tool` or `mcp://srv/tool:<command-prefix>*`,
     or a scheme-less whole-URI glob. Mirrors the legacy _danger_matches split
     (partition on the `:` after `://`, never the scheme colon)."""
@@ -144,12 +187,12 @@ def _floor_from_pattern(pattern: str, index: int) -> EngineFloor | None:
     if not sep_scheme:
         if pattern == "*":
             return None  # dead in the hub; would be match-all in the engine
-        return EngineFloor(id=f"floor-{index}", match=EngineMatch(tool=_collapse_stars(pattern)))
+        return EngineFloor(id=floor_id, match=EngineMatch(tool=_collapse_stars(pattern)))
     uri_tail, sep_arg, arg_part = rest.partition(":")
     match_kwargs: dict[str, Any] = {"tool": _collapse_stars(f"{scheme}://{uri_tail}")}
     if sep_arg:
         match_kwargs["args"] = {"command": {"starts_with": [arg_part.rstrip("*")]}}
-    return EngineFloor(id=f"floor-{index}", match=EngineMatch(**match_kwargs))
+    return EngineFloor(id=floor_id, match=EngineMatch(**match_kwargs))
 
 
 class AuthzResolver:
@@ -159,13 +202,17 @@ class AuthzResolver:
         dangerous: DangerousCommands,
         telemetry: Telemetry | None = None,
         deployment: DeploymentConfig | None = None,
+        distribution: Any = None,
+        evidence: Any = None,
     ) -> None:
         rules: list[EngineRule] = []
         names: dict[str, str] = {}  # engine rule id -> hub tool pattern (audit `authz_rule`)
-        for i, rule in enumerate(workspace.authz.rules):
+        constitutional = _constitutional_rules(deployment)
+        ids = _RuleIds([r.id for r in constitutional])
+        for rule in workspace.authz.rules:
             if _rule_is_dead(rule):
                 continue
-            rid = f"rule-{i}"
+            rid = ids.take(rule.tool)
             names[rid] = rule.tool
             principal: str | list[str] = "*"
             if rule.callers is not None:
@@ -183,12 +230,13 @@ class AuthzResolver:
                 )
             )
         floors: list[EngineFloor] = []
-        for i, pattern in enumerate(dangerous.require_approval):
-            floor = _floor_from_pattern(pattern, i)
+        for pattern in dangerous.require_approval:
+            if pattern == "*":
+                continue  # dead (see _floor_from_pattern); spend no id on it
+            floor = _floor_from_pattern(pattern, ids.take(f"floor:{pattern}"))
             if floor is not None:
                 names[floor.id] = pattern
                 floors.append(floor)
-        constitutional = _constitutional_rules(deployment)
         for r in constitutional:
             # `names` maps engine rule id -> hub tool pattern for the audit
             # `authz_rule` field. The pattern, not the reason: a reader of the
@@ -202,7 +250,113 @@ class AuthzResolver:
         # decision emits a span (UAI-86). No audit chain here: the hub keeps its
         # own two-phase AuditLog, which is already chained and records the
         # completion half that the engine's single-entry form cannot express.
-        self._enforcer = Enforcer(self._engine, telemetry=telemetry)
+        # `distribution` is the fleet's verified policy + revocation state
+        # (build-04): when the hub is joined to a control plane, containment is
+        # consulted before any workspace rule, in the Enforcer, in the same
+        # order the Envoy sidecar uses. Standalone hubs pass None and nothing
+        # changes.
+        #
+        # `evidence` is deliberately *not* handed to the Enforcer. The Enforcer
+        # ships at decision time with the chain entry it wrote — and the hub's
+        # Enforcer writes none, so every row reached the control plane with
+        # `chain_seq`/`chain_hash` empty and could be joined to the hub's
+        # signed local entry only by digest. The hub's entry is its own
+        # `received` line, written after the decision (and, for a prompt,
+        # after the human), so the hub ships through `ship()` once that entry
+        # exists and points the row at it. The Enforcer's own rule — ship only
+        # what the chain holds — is kept, with the hub's chain as the chain: a
+        # failed audit write ships nothing.
+        self._enforcer = Enforcer(self._engine, telemetry=telemetry, distribution=distribution)
+        self._evidence = evidence
+        # The receipt wiring the Enforcer would have done had it held the
+        # shipper (see Enforcer.__init__): a receipt that says the revocation
+        # list moved must still refresh containment at once.
+        if (
+            distribution is not None
+            and evidence is not None
+            and getattr(evidence, "on_receipt", None) is None
+        ):
+            evidence.on_receipt = distribution.on_receipt
+
+    def ship(self, action: Action, decision: EngineDecision, entry: dict[str, Any] | None) -> None:
+        """Report one decision to the fleet, pointing at the hub entry that holds it.
+
+        `decision` is what that entry records: the engine's verdict for a call
+        decided by policy, and for a `prompt` the *resolved* verdict (source
+        `approval`, `approval_timeout`, … with the deferring rule's id and
+        policy digest kept). Not the DEFER, because the entry the row points
+        at says `prompt_allowed`/`prompt_denied` and a row must describe the
+        line it cites; and not both, because the control plane keeps one row
+        per action digest and drops the second. That review was demanded
+        stays visible — the source says a human settled it, and in console
+        mode the approval itself is a signed row of its own at the control
+        plane, joined on the same digest.
+
+        No-op for a standalone hub. Cannot raise (`EvidenceShipper.record`).
+        """
+        if self._evidence is not None:
+            self._evidence.record(action, decision, entry=entry)
+
+    # --- structural records (build-14): refusals and findings the policy
+    # --- engine never saw, landed in the chain and the evidence like verdicts
+
+    def record_unidentified(
+        self, *, source: str, method: str, entry: dict[str, Any] | None = None
+    ) -> None:
+        """A caller that presented no valid identity was refused (S-1).
+
+        The hub already returns 401. This makes the refusal a *decision* on
+        the unknown principal, so it reaches the control plane's identity
+        refusal stream like the gateway's do. The same shape the gateway
+        records: source "identity_invalid", verdict deny.
+        """
+        action = Action.build(
+            principal=Principal(id="agent:unknown", attestation="assigned"),
+            tool=f"mcp://hub/{method}",
+            verb="call",
+            resource="*",
+            params={},
+            context=ActionContext(origin="mcp", extra={"source": source or "unknown"}),
+        )
+        decision = self._enforcer.record(
+            action,
+            EngineDecision(
+                verdict=Verdict.DENY,
+                rule_id=None,
+                source="identity_invalid",
+                reason=f"no valid credential presented from {source or 'unknown'}",
+            ),
+            count=False,  # a refusal at the door is not the fleet's spend
+        )
+        self.ship(action, decision, entry)
+
+    def record_ingress(
+        self, action: Action, hits: list[str], entry: dict[str, Any] | None = None
+    ) -> None:
+        """A tool result carried instruction shapes (D-12). Recorded as a
+        structural decision on the same principal and tool, verb `ingest`,
+        with the pattern ids as the resource — never the text. Verdict
+        `allow`, because the call already happened; the finding is the
+        `source`."""
+        finding = Action.build(
+            principal=action.principal,
+            tool=action.tool,
+            verb="ingest",
+            resource=",".join(hits),
+            params={},
+            context=ActionContext(origin="mcp", extra={"injection": hits}),
+        )
+        decision = self._enforcer.record(
+            finding,
+            EngineDecision(
+                verdict=Verdict.ALLOW,
+                rule_id=None,
+                source="injection_suspected",
+                reason=f"tool result carried instruction shapes: {', '.join(hits)}",
+            ),
+            count=False,  # the call was counted when it was decided
+        )
+        self.ship(finding, decision, entry)
 
     def resolve(
         self, tool_uri: str, args: dict[str, Any], caller: str, action: Action | None = None
@@ -221,4 +375,6 @@ class AuthzResolver:
             rule=self._names.get(d.rule_id) if d.rule_id else None,
             audit_level=d.audit_level,
             source="danger_floor" if d.source == "floor" else d.source,
+            policy_digest=d.policy_digest,
+            engine=d,
         )

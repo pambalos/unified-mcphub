@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -393,6 +394,7 @@ class Distribution:
         on_stale: StaleAction = StaleAction.KEEP,
         required_kids: set[str] | None = None,
         now: datetime | None = None,
+        on_containment: Any = None,
     ) -> None:
         self._source = source
         self._fleet = fleet_id
@@ -400,6 +402,19 @@ class Distribution:
         self._cache = Path(cache_dir) if cache_dir else None
         self._on_stale = on_stale
         self._required_kids = required_kids
+        #: Called as `on_containment(added, removed)` -- two frozensets of
+        #: principal ids -- after a verified revocation list changes who is
+        #: contained (or how strictly). `gate()` already stops a contained
+        #: principal's *next* action; this is for the enforcement point that
+        #: can also stop the one in progress. Fired on the refreshing thread,
+        #: never on hydration from cache (nothing is in flight at start-up),
+        #: and a handler that raises does not fail the refresh: the list is
+        #: applied first, the announcement second.
+        self.on_containment = on_containment
+        #: `refresh` is called from the poller's worker thread and, since
+        #: receipts, from the evidence shipper's thread. Serialised, so two
+        #: refreshes cannot interleave their snapshot writes.
+        self._refresh_lock = threading.Lock()
         self.snapshot = Snapshot()
         #: The keys from the last key set that verified. Retained so anything
         #: else needing to check a control-plane signature -- the approval
@@ -424,6 +439,35 @@ class Distribution:
 
     def refresh(self, *, now: datetime | None = None) -> RefreshReport:
         """One poll. Never raises; the report says what happened."""
+        with self._refresh_lock:
+            return self._refresh(now=now)
+
+    def on_receipt(
+        self, receipt: Mapping[str, Any], *, now: datetime | None = None
+    ) -> RefreshReport | None:
+        """An evidence receipt says the fleet's revocation list moved: refresh now.
+
+        The reporting sidecar is the one running the agent whose batch just
+        raised an incident, so it is the one that most needs the new list --
+        and the one that would otherwise wait up to a full poll interval for
+        it. This makes "contained at its next action" true for that sidecar.
+
+        The receipt is a cue, not a source. Nothing in it is trusted: it only
+        decides *whether* to run the same verified refresh the poller runs, and
+        that refresh still checks every signature against the pinned root and
+        still refuses a version older than the one held. A forged receipt can
+        therefore cost one extra fetch and nothing else -- it cannot downgrade,
+        cannot contain, and cannot release.
+        """
+        version = receipt.get("revocations_version")
+        if not isinstance(version, int):
+            return None
+        held = self.snapshot.revocations_version
+        if held is not None and version <= held:
+            return None
+        return self.refresh(now=now)
+
+    def _refresh(self, *, now: datetime | None = None) -> RefreshReport:
         now_ms = _ms(now or datetime.now(UTC))
         report = RefreshReport()
 
@@ -620,6 +664,7 @@ class Distribution:
             self._refuse(report, "revocations", verdict.reason, verdict.detail)
             return
 
+        before = self.snapshot.containment
         self.snapshot.containment = {
             entry["principal_id"]: Containment(
                 principal_id=entry["principal_id"],
@@ -632,6 +677,24 @@ class Distribution:
         self._revocations_expire_at = verdict.payload["expires_at_ms"]
         report.applied_revocations = True
         self._write_cache("revocations.json", doc)
+        if not hydrating:
+            self._announce_containment(before, self.snapshot.containment)
+
+    def _announce_containment(
+        self, before: Mapping[str, Containment], after: Mapping[str, Containment]
+    ) -> None:
+        if self.on_containment is None:
+            return
+        # "Added" is anyone newly contained *or* contained differently: a
+        # principal moved from `defer` to `deny` is news to a call in flight.
+        added = frozenset(p for p, c in after.items() if before.get(p) != c)
+        removed = frozenset(p for p in before if p not in after)
+        if not added and not removed:
+            return
+        try:
+            self.on_containment(added, removed)
+        except Exception:
+            log.exception("containment change handler raised")
 
     _revocations_expire_at: int | None = None
     _shadow_expire_at: int | None = None

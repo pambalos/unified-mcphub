@@ -75,9 +75,13 @@ class Sink(Protocol):
 
     Raises on failure; the shipper handles that. Raise `PermanentRejection` when
     retrying cannot help — see above for why that distinction is load-bearing.
+
+    May return the receiver's receipt (a mapping) or nothing. The shipper hands
+    a receipt to `on_receipt`; a sink that returns `None` is fine, which is what
+    every sink written before receipts existed does.
     """
 
-    def send(self, batch: list[dict[str, Any]]) -> None: ...
+    def send(self, batch: list[dict[str, Any]]) -> Any: ...
 
 
 @dataclass
@@ -192,6 +196,11 @@ def summarise(
         "verdict": verdict.value if hasattr(verdict, "value") else str(verdict),
         "rule_id": decision.rule_id,
         "source": decision.source,
+        # Which policy decided. Outside EVIDENCE_FIELDS, so not covered by the
+        # signature below: adding it to the signable form changes the bytes an
+        # existing verifier expects, which wants a versioned payload rather than
+        # a quiet edit. The signed copy is the chain entry this row points at.
+        "policy_digest": getattr(decision, "policy_digest", None),
         "chain_seq": (entry or {}).get("seq"),
         "chain_hash": (entry or {}).get("hash"),
         # How the identity every rule keys on was established, and what spawned
@@ -236,7 +245,16 @@ class EvidenceShipper:
         batch_size: int = DEFAULT_BATCH,
         interval_seconds: float = 5.0,
         signer: Any = None,
+        on_receipt: Any = None,
     ) -> None:
+        #: Called with each receipt the sink returns, on the shipping thread.
+        #: The control plane's receipt carries `revocations_version`, and a
+        #: sidecar that sees it move can refresh containment at once rather than
+        #: at its next poll -- which is what lets a containment triggered by the
+        #: batch just shipped land at that agent's *next* action. Public and
+        #: settable so `Enforcer` can wire it without every deployment having to
+        #: remember to. A failing callback never fails shipping.
+        self.on_receipt = on_receipt
         #: The audit chain's signer, when this sidecar keeps a signed chain.
         #:
         #: Optional, and the gradient matters. A reporter without one is a
@@ -253,6 +271,21 @@ class EvidenceShipper:
         self.spool = EvidenceSpool(capacity=capacity)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+
+    @property
+    def signer(self) -> Any:
+        return self._signer
+
+    @signer.setter
+    def signer(self, value: Any) -> None:
+        """Attach the signer after construction, before the first `record()`.
+
+        Same reason as `HashChainWriter.signer`: a host may have to build the
+        shipper before the store holding its key is unlocked. Records are
+        signed when summarised, on the decision path, so whatever is set here
+        when a decision is recorded is what signs it.
+        """
+        self._signer = value
 
     # --- the decision path's only entry point --------------------------------
 
@@ -297,7 +330,7 @@ class EvidenceShipper:
             if not batch:
                 return shipped
             try:
-                self._sink.send(batch)
+                receipt = self._sink.send(batch)
             except PermanentRejection as exc:
                 # Dropped deliberately, and loudly. Requeueing would park it at
                 # the head of the queue forever and take every later record
@@ -319,6 +352,15 @@ class EvidenceShipper:
                 return shipped
             shipped += len(batch)
             self.spool.stats.shipped += len(batch)
+            if receipt and self.on_receipt is not None:
+                try:
+                    self.on_receipt(receipt)
+                except Exception:
+                    # The receipt is a courtesy; the records are already
+                    # accepted. A refresh that blows up must not look like a
+                    # shipping failure, or the batch would be requeued and sent
+                    # twice.
+                    log.exception("evidence receipt handler raised")
 
     def start(self) -> None:
         if self._thread is not None:
@@ -431,7 +473,7 @@ class HttpSink:
         #: same, which is why this is a parameter and not a second class.
         self._field = field
 
-    def send(self, batch: list[dict[str, Any]]) -> None:
+    def send(self, batch: list[dict[str, Any]]) -> dict[str, Any] | None:
         import json as _json
         import urllib.error
         import urllib.request
@@ -450,6 +492,7 @@ class HttpSink:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 if response.status >= 300:
                     raise RuntimeError(f"unexpected status {response.status}")
+                raw = response.read()
         except urllib.error.HTTPError as exc:
             # 4xx means the receiver has judged the batch and will judge it the
             # same way next time — except 429, which is explicitly "try later".
@@ -457,3 +500,13 @@ class HttpSink:
             if 400 <= exc.code < 500 and exc.code != 429:
                 raise PermanentRejection(f"HTTP {exc.code}: {exc.reason}") from exc
             raise
+
+        # The receipt. Accepted is accepted whatever the body says: a receiver
+        # that answered 202 with something unparseable has still taken the
+        # records, so this returns None rather than raising and causing a
+        # resend.
+        try:
+            receipt = _json.loads(raw) if raw else None
+        except ValueError:
+            return None
+        return receipt if isinstance(receipt, dict) else None

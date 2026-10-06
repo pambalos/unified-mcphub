@@ -17,7 +17,11 @@ Spec: specs/enforce/e1.v1.md §4 (v0.1 core) and specs/enforce/policy.v2.md
 
 Precedence (highest to lowest):
   0. constitutional rules — outrank everything, un-waivable (UAI-216); empty by
-     default, so absent them precedence is unchanged
+     default, so absent them precedence is unchanged. A constitutional ALLOW
+     is not subject to attestation floors.
+  0b. attestation floors (build-01 §5) — checked against the chain grade. A
+     failing `deny` floor is final; a failing `defer` floor replaces only an
+     ALLOW or DEFER from tiers 1–4, never a DENY. Floors only tighten.
   1. exact rules (no wildcard in the tool pattern), in file order
   2. floors (generalized dangerous-commands: wildcard allows can't waive them)
   3. wildcard rules, first match wins
@@ -43,11 +47,12 @@ from typing import Any, Literal
 
 import celpy
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from unified_paths import canonical, is_under
 
 from .action import Action, Attestation, grade_at_least
+from .canonical import canonical_bytes, sha256_hex
 
 log = logging.getLogger("unified_enforce.policy")
 
@@ -71,6 +76,11 @@ class Decision:
     #: (build-01 §5). Optional and defaulted so every existing construction
     #: site keeps working unchanged.
     context: dict[str, Any] | None = None
+    #: sha256 of the policy document this verdict was evaluated against (see
+    #: `PolicyEngine.policy_digest`). None for structural verdicts that no
+    #: policy made -- a containment gate, a request the gateway could not read
+    #: -- rather than a digest of a policy that was never consulted.
+    policy_digest: str | None = None
 
 
 class PolicyError(ValueError):
@@ -194,11 +204,26 @@ class PolicyDoc(BaseModel):
     #: that outranked it would make "constitutional" mean two different things.
     #: Before the rest, because a rule evaluated on behalf of an identity that
     #: was never established to the required grade is a rule whose strength is
-    #: fiction.
+    #: fiction. A floor can only make the outcome stricter: see `decide`.
     attestation_floors: list[AttestationFloor] = Field(default_factory=list)
     rules: list[Rule] = Field(default_factory=list)
     floors: list[Floor] = Field(default_factory=list)
     counters: list[Counter] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_attestation_floors(self, handler: Any) -> dict[str, Any]:
+        """Drop `attestation_floors` from the payload when there are none.
+
+        `policy_digest` hashes this model's dump, so a new field that always
+        serialised would change the digest of every existing policy — and a
+        digest is what an audit entry cites to say which rules decided. A
+        policy that does not use the feature must keep naming itself the same
+        way, exactly as `Principal` keeps `on_behalf_of` out of action digests.
+        """
+        data: dict[str, Any] = handler(self)
+        if not self.attestation_floors:
+            data.pop("attestation_floors", None)
+        return data
 
 
 # --- glob compilation ---
@@ -341,6 +366,15 @@ class _Compiled:
 class PolicyEngine:
     def __init__(self, doc: PolicyDoc) -> None:
         self._doc = doc
+        #: Which policy decided, as a fact an auditor can recompute. A digest of
+        #: the validated document rather than a version number: nothing on the
+        #: decision path knows a version (a distributed bundle's version
+        #: describes what the fleet was *sent*, and the engine compiles from its
+        #: own document), and a number is an assertion where a digest is
+        #: checkable -- hash the policy file under review and compare. Computed
+        #: over the normalised model, so comments and key order in the YAML do
+        #: not change it but any change to a rule does.
+        self.policy_digest = policy_digest(doc)
         env = celpy.Environment()
         seen_ids: set[str] = set()
 
@@ -461,6 +495,7 @@ class PolicyEngine:
 
         def done(d: Decision) -> Decision:
             d.elapsed_ms = round((time.perf_counter() - start) * 1000, 3)
+            d.policy_digest = self.policy_digest
             return d
 
         activation: dict[str, Any] | None = None  # built lazily, only if a rule has CEL
@@ -515,20 +550,34 @@ class PolicyEngine:
         # established to the required grade is a rule whose strength is fiction
         # (build-01 §5). Checked against the *chain* grade, so a well-attested
         # leaf behind a weak hop does not pass.
-        hit = self._attestation_check(action)
-        if hit is not None:
-            return done(hit)
+        #
+        # A floor may only make the outcome *stricter*. A failing `deny` floor
+        # is final at once. A failing `defer` floor must not be returned before
+        # the rules have spoken, because that turns an explicit deny -- or the
+        # default deny for an action no rule allows -- into a question a human
+        # can answer yes to, and does so only for the *weaker* identity: an
+        # `assigned` principal writing /etc/passwd got DEFER where a `derived`
+        # one got DENY. So it waits, and replaces only an allow (or a defer, to
+        # carry the identity reason and its context).
+        floor = self._attestation_check(action)
+        if floor is not None and floor.verdict is Verdict.DENY:
+            return done(floor)
 
+        ruled: Decision | None = None
         for tier, source in (
             (self._exact, "exact"),
             (self._floors, "floor"),
             (self._wildcard, "wildcard"),
         ):
-            hit = scan(tier, source)
-            if hit is not None:
-                return done(hit)
+            ruled = scan(tier, source)
+            if ruled is not None:
+                break
+        if ruled is None:
+            ruled = Decision(Verdict.DENY, None, "default", "standard", "no rule matched")
 
-        return done(Decision(Verdict.DENY, None, "default", "standard", "no rule matched"))
+        if floor is not None and ruled.verdict is not Verdict.DENY:
+            return done(floor)
+        return done(ruled)
 
     def _attestation_check(self, action: Action) -> Decision | None:
         """First matching attestation floor the chain fails — build-01 §5.
@@ -634,6 +683,16 @@ class PolicyEngine:
                 continue
             out[compiled.id] = out.get(compiled.id, 0.0) + value
         return out
+
+
+def policy_digest(doc: PolicyDoc) -> str:
+    """sha256 of a policy document's canonical form; what `Decision.policy_digest` records.
+
+    Non-strict canonical bytes: a policy may legitimately carry a float (a
+    counter threshold), and this digest is recomputed by a Python verifier, not
+    compared across languages.
+    """
+    return sha256_hex(canonical_bytes(doc.model_dump(mode="json"), strict=False))
 
 
 def _activation(

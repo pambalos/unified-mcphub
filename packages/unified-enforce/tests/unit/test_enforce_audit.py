@@ -209,3 +209,138 @@ def test_signing_is_optional_and_off_by_default(tmp_path):
         chain.stop()
     assert "sig" not in written
     assert AuditChain.verify(tmp_path / "audit").ok
+
+
+# --- a chain that gains a key mid-life (signed_from_seq) ---
+
+
+def _write(audit_dir, entries, signer=None, *, sign_from: int | None = None):
+    """Append flat `{seq: n}` entries, attaching `signer` at `sign_from`.
+
+    The shape of a hub that ran unsigned and was later given a key: the writer
+    is started without one and the signer set partway through.
+    """
+    from unified_enforce.audit import HashChainWriter
+
+    writer = HashChainWriter(audit_dir, strict=False)
+    writer.start()
+    try:
+        for seq in entries:
+            if signer is not None and sign_from is not None and seq == sign_from:
+                writer.signer = signer
+            writer.append({"seq": seq, "phase": "received"})
+    finally:
+        writer.stop()
+
+
+def _lines(audit_dir):
+    path = next(audit_dir.glob("*.jsonl"))
+    return path, [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_an_unsigned_prefix_verifies_when_signing_began_later(tmp_path):
+    from unified_enforce import Signer
+    from unified_enforce.audit import HashChainWriter
+
+    signer = Signer.generate("hub")
+    audit_dir = tmp_path / "audit"
+    _write(audit_dir, [1, 2, 3, 4, 5], signer, sign_from=4)
+
+    _, entries = _lines(audit_dir)
+    assert [("sig" in e) for e in entries] == [False, False, False, True, True]
+
+    # Without a start point the old rule stands: every entry must be signed.
+    assert not HashChainWriter.verify(audit_dir, public_key=signer.public_bytes()).ok
+    result = HashChainWriter.verify(audit_dir, public_key=signer.public_bytes(), signed_from_seq=4)
+    assert result.ok and result.entries == 5
+
+
+def test_a_stripped_signature_after_the_start_point_fails(tmp_path):
+    """The downgrade: remove the signature from an entry that had one. Its
+    hash still verifies (sig and key_id sit outside it), so only the start
+    point can say this entry was owed a signature."""
+    from unified_enforce import Signer
+    from unified_enforce.audit import HashChainWriter
+
+    signer = Signer.generate("hub")
+    audit_dir = tmp_path / "audit"
+    _write(audit_dir, [1, 2, 3, 4, 5], signer, sign_from=3)
+
+    path, entries = _lines(audit_dir)
+    entries[3].pop("sig"), entries[3].pop("key_id")
+    path.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in entries))
+
+    assert HashChainWriter.verify(audit_dir).ok, "the hash chain alone cannot see it"
+    result = HashChainWriter.verify(audit_dir, public_key=signer.public_bytes(), signed_from_seq=3)
+    assert not result.ok
+    assert "unsigned" in result.error and ":4:" in result.error
+
+
+def test_rewriting_the_unsigned_prefix_is_caught_by_the_first_signature(tmp_path):
+    """The prefix carries no signatures of its own and is still protected:
+    the first signed entry's hash covers its prev_hash, and so the prefix."""
+    from unified_enforce import Signer, canonical_bytes, sha256_hex
+    from unified_enforce.audit import HashChainWriter
+
+    signer = Signer.generate("hub")
+    audit_dir = tmp_path / "audit"
+    _write(audit_dir, [1, 2, 3], signer, sign_from=3)
+
+    path, entries = _lines(audit_dir)
+    # Rewrite entry 1 properly, then re-link the chain forward as far as the
+    # attacker can: entry 2 rehashes freely, entry 3's signature does not.
+    prev = entries[0]["prev_hash"]
+    for e in entries:
+        e.pop("hash")
+        sig = e.pop("sig", None), e.pop("key_id", None)
+        if e["seq"] == 1:
+            e["phase"] = "forged"
+        e["prev_hash"] = prev
+        e["hash"] = prev = sha256_hex(canonical_bytes(e, strict=False))
+        if sig[0] is not None:
+            e["sig"], e["key_id"] = sig
+    path.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in entries))
+
+    assert HashChainWriter.verify(audit_dir).ok, "a consistent rewrite passes the hash check"
+    result = HashChainWriter.verify(audit_dir, public_key=signer.public_bytes(), signed_from_seq=3)
+    assert not result.ok and "bad signature" in result.error
+
+
+def test_renumbering_a_signed_entry_below_the_start_point_does_not_shed_its_signature(tmp_path):
+    from unified_enforce import Signer, canonical_bytes, sha256_hex
+    from unified_enforce.audit import HashChainWriter
+
+    signer = Signer.generate("hub")
+    audit_dir = tmp_path / "audit"
+    _write(audit_dir, [1, 2, 3, 4], signer, sign_from=2)
+
+    path, entries = _lines(audit_dir)
+    last = entries[-1]
+    last.pop("hash"), last.pop("sig"), last.pop("key_id")
+    last["seq"] = 1  # "this one predates signing"
+    last["hash"] = sha256_hex(canonical_bytes(last, strict=False))
+    path.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in entries))
+
+    result = HashChainWriter.verify(audit_dir, public_key=signer.public_bytes(), signed_from_seq=2)
+    assert not result.ok and "unsigned" in result.error
+
+
+def test_a_missing_signed_tail_is_reported(tmp_path):
+    """Signing was recorded from seq 4; the chain now ends at 3. That is the
+    one shape in which the unsigned prefix would be rewritable undetected."""
+    from unified_enforce import Signer
+    from unified_enforce.audit import HashChainWriter
+
+    signer = Signer.generate("hub")
+    audit_dir = tmp_path / "audit"
+    _write(audit_dir, [1, 2, 3])
+
+    result = HashChainWriter.verify(audit_dir, public_key=signer.public_bytes(), signed_from_seq=4)
+    assert not result.ok and "no entry at or after" in result.error
+
+
+def test_signed_from_seq_without_a_key_is_a_usage_error(tmp_path):
+    from unified_enforce.audit import HashChainWriter
+
+    with pytest.raises(ValueError):
+        HashChainWriter.verify(tmp_path, signed_from_seq=1)

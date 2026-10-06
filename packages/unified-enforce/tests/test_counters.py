@@ -313,3 +313,23 @@ def test_counting_does_not_blow_the_latency_budget(declared):
     per_call_ms = (time.perf_counter() - start) * 1000 / 1000
 
     assert per_call_ms < 2.0, f"{per_call_ms:.3f}ms per decision with {declared} counters"
+
+
+def test_a_finding_is_recorded_but_not_spent():
+    """A structural record *beside* a verdict (an unenrolled peer's protocol,
+    an injection shape, a refusal at the door) describes a request that was
+    already decided and counted. Charging it again would spend the budget
+    twice for one call — and a floor reading the counter would trip at half
+    its stated rate for exactly that traffic."""
+    from unified_enforce.policy import Decision, Verdict
+
+    e = enforcer()
+    e.enforce(refund("100.00"))
+    finding = Decision(verdict=Verdict.ALLOW, rule_id=None, source="agent_protocol_unenrolled")
+    e.record(refund("100.00"), finding, count=False)
+    e.record(refund("100.00"), finding, count=False)
+    spent = e.counters.snapshot("agent:1", ["spend"])["spend"]["day"]
+    assert spent == 100.0, "one call, one spend"
+    # The default still counts: a structural *verdict* is a decision like any other.
+    e.record(refund("100.00"), finding)
+    assert e.counters.snapshot("agent:1", ["spend"])["spend"]["day"] == 200.0

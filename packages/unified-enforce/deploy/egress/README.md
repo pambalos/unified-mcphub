@@ -79,3 +79,25 @@ In zero-egress deployments the "allow sidecar" rule is the only egress rule at
 all, and the upstream allowlist lives in policy (`match.tool` globs over
 internal hosts). Nothing here requires outbound internet, including telemetry
 (`otel.enabled` off by default, and Tempo/Langfuse are in-perimeter).
+
+## Exporting flows to the control plane (build-14 S-2)
+
+The gateway is the cheapest egress-log exporter there is: it already sees
+every connection and request it decides on. Give `ExtAuthzCore` a second
+shipper and each check emits one `flow.v1` record — source, destination name
+(the SNI the client claimed, or the address) and port, protocol, verdict, time;
+never a payload, header or path:
+
+```python
+from unified_enforce.flows import flow_shipper
+
+flows = flow_shipper(control_plane_url, credential, interval_seconds=5)
+flows.start()
+core = ExtAuthzCore(enforcer, default_principal="agent:crew-1", flows=flows)
+```
+
+The control plane classifies each flow against `llm-endpoints.v1` and raises
+on a model-provider or agent-runtime destination reached from a source no
+declared agent runs on. NetworkPolicy deny logs, security-group flow logs and
+DNS resolver logs can feed the same endpoint (`POST /api/v1/evidence/flows`)
+through their own adapters; the gateway's export is the one that needs none.

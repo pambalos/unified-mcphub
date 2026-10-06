@@ -15,12 +15,21 @@ from `unified_enforce.redaction` (same patterns the engine uses).
 
 Writes come only from the single asyncio event-loop thread (sync, no await in
 the write path), so no locking is needed.
+
+Signed when the hub has a signing key (signing.py): `set_signer` attaches it
+after start — the lock is taken first, the secrets store unlocked after — and
+the first entry it signs is reported once through `on_first_signed`, which is
+how `signing.json` learns where signing began. The writers return the entry as
+written, `hash` and `seq` included, because that is what a joined hub's
+evidence record points at (`chain_seq`/`chain_hash`).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import secrets
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +37,8 @@ from unified_enforce.audit import HashChainWriter
 from unified_enforce.redaction import scrub as _scrub
 
 from .util import utcnow
+
+logger = logging.getLogger(__name__)
 
 
 def _capture(payload: Any, audit_level: str) -> Any:
@@ -51,6 +62,9 @@ class AuditLog:
         # utcnow resolved late so tests can monkeypatch this module's clock.
         self._writer = HashChainWriter(audit_dir, strict=False, clock=lambda: utcnow())
         self._seq = 0
+        #: Called once with the seq of the first entry the current signer
+        #: signs; cleared when it succeeds (retried on the next write if not).
+        self._on_first_signed: Callable[[int], object] | None = None
 
     # The write-failure test injects errors by closing the raw fd directly.
     @property
@@ -74,6 +88,26 @@ class AuditLog:
     def stop(self) -> None:
         self._writer.stop()
 
+    def set_signer(
+        self, signer: Any, *, on_first_signed: Callable[[int], object] | None = None
+    ) -> None:
+        """Sign every entry written from now on (see module docstring).
+
+        Called by the hub once its secrets store is unlocked, which is after
+        `start()` and before the transport accepts a call — so in practice no
+        entry of a run is unsigned when a key exists. `on_first_signed` is
+        given the first signed entry's seq; a failure there is logged and
+        retried on the next write, never raised into the call being audited,
+        because a missing record degrades `audit verify` to hash-only for the
+        range rather than making anything unverifiable.
+        """
+        self._writer.signer = signer
+        self._on_first_signed = on_first_signed if signer is not None else None
+
+    @property
+    def signer(self) -> Any:
+        return self._writer.signer
+
     # --- writers ---
 
     def write_received(
@@ -93,7 +127,20 @@ class AuditLog:
         reason: str | None = None,
         decided_by: str | None = None,
         action_digest: str | None = None,
-    ) -> None:
+        policy_digest: str | None = None,
+        approver: dict[str, Any] | None = None,
+        attestation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """`approver` and `attestation` are set when a console approver
+        resolved a `prompt` (control_plane.approvals: console): who, as the
+        control plane's signature attests it, and the signature itself. Kept
+        here rather than only at the control plane because its approvals table
+        is a queue and this chain is the evidence — it lives with the hub, it
+        is hash-chained (and signed, when the hub signs), and the attestation
+        in it can be re-verified against the fleet's key set by somebody who
+        does not trust whoever operates the control plane. A terminal answer
+        leaves both absent: nobody authenticated, and the entry should not
+        imply otherwise with an empty object."""
         entry = {
             "phase": "received",
             "request_id": request_id,
@@ -113,11 +160,17 @@ class AuditLog:
         }
         if action_digest:
             entry["action_digest"] = action_digest
+        if policy_digest:
+            entry["policy_digest"] = policy_digest
         if reason:
             entry["reason"] = reason
         if decided_by:
             entry["decided_by"] = decided_by
-        self._write(entry)
+        if approver:
+            entry["approver"] = approver
+        if attestation:
+            entry["attestation"] = attestation
+        return self._write(entry)
 
     def write_completed(
         self,
@@ -129,7 +182,8 @@ class AuditLog:
         audit_level: str,
         prompt_response_ms: float | None = None,
         upstream_request_id: str | None = None,
-    ) -> None:
+        injection: list[str] | None = None,
+    ) -> dict[str, Any]:
         result_json = json.dumps(result, default=str) if result is not None else ""
         entry = {
             "phase": "completed",
@@ -144,7 +198,45 @@ class AuditLog:
             "upstream_request_id": upstream_request_id,
             "redactions_applied": audit_level == "standard",
         }
-        self._write(entry)
+        if injection:
+            # D-12: the shapes found in the result, by id. The reader sees
+            # that this result carried instructions without re-reading them.
+            entry["injection"] = list(injection)
+        return self._write(entry)
+
+    def write_interdicted(
+        self,
+        *,
+        request_id: str,
+        duration_ms: float,
+        interdicted_by: str,
+        reason: str,
+        prompt_response_ms: float | None = None,
+    ) -> None:
+        """The third phase (build-04). Closes a bracket whose forward was
+        cancelled while in flight because the principal became contained.
+
+        Distinct from `completed` with an error on purpose: a reader must be
+        able to tell "the upstream failed" from "the plane stopped this call"
+        without parsing an error string — today an interrupted call and a
+        crashed one look the same, and that ambiguity is what this removes.
+        No result is recorded because none was accepted: whatever the upstream
+        returned after cancellation was dropped, never audited, never returned.
+        """
+        self._write(
+            {
+                "phase": "interdicted",
+                "request_id": request_id,
+                "ts": utcnow().isoformat(),
+                "seq": self._next_seq(),
+                "duration_ms": round(duration_ms, 3),
+                "result": None,
+                "result_status": "interdicted",
+                "interdicted_by": interdicted_by,
+                "reason": reason,
+                "prompt_response_ms": prompt_response_ms,
+            }
+        )
 
     # --- internals ---
 
@@ -152,10 +244,17 @@ class AuditLog:
         self._seq += 1
         return self._seq
 
-    def _write(self, entry: dict[str, Any]) -> None:
+    def _write(self, entry: dict[str, Any]) -> dict[str, Any]:
         try:
-            self._writer.append(entry)
+            written = self._writer.append(entry)
         except RuntimeError:
             raise
         except Exception as exc:  # canonicalization surprises must not kill the hub silently
             raise RuntimeError(f"audit_error: {exc}") from exc
+        if self._on_first_signed is not None and "sig" in written:
+            try:
+                self._on_first_signed(int(written["seq"]))
+                self._on_first_signed = None
+            except Exception:  # noqa: BLE001 - see set_signer
+                logger.exception("audit: could not record where signing began; will retry")
+        return written

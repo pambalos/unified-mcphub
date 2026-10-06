@@ -83,6 +83,13 @@ class ListenConfig(BaseModel):
 
 class AuditConfig(BaseModel):
     retention_days: int = 365
+    #: The secrets-store entry holding this hub's Ed25519 signing key (a
+    #: base64 32-byte seed). Present: every audit entry written after start is
+    #: signed, and so is every evidence record shipped to a fleet — one key,
+    #: because a reporter whose chain and evidence are attributable to
+    #: different keys is one more thing to reconcile in an investigation.
+    #: Absent: unsigned, exactly as before. `fleet join` generates it.
+    signing_key_secret_ref: str = "hub-signing-key"
 
 
 class ApprovalConfig(BaseModel):
@@ -216,8 +223,105 @@ class DeploymentConfig(BaseModel):
         return self
 
 
+_VALID_ON_STALE = {"keep", "defer", "deny"}
+_VALID_FLEET_APPROVALS = {"console", "terminal"}
+
+
+class ControlPlaneConfig(BaseModel):
+    """Join this hub to a fleet (build-04 / build-07).
+
+    Unset (`url` empty) the hub is standalone: its workspace policy decides
+    everything and nothing leaves the machine — today's behaviour, unchanged.
+    Set, the hub polls the control plane for the signed policy bundle and the
+    signed **revocation list**, gates every call on containment *before* its
+    workspace policy (a contained agent is contained whatever the rules say),
+    ships decision evidence, and cancels a contained principal's calls that are
+    already in flight. This is the block that makes the Guardian's "contained
+    at its next action" true of a hub, not only of the Envoy sidecar.
+
+    The credential is a secret ref, never a literal: the hub reads it from its
+    own secrets store at start-up, alongside the servers' credentials.
+    """
+
+    url: str | None = None
+    fleet_id: str | None = None
+    #: The fleet's pinned root verification key (base64url). Everything the
+    #: control plane serves is verified against a chain that ends here; a
+    #: hostile or wrong control plane is a refused refresh, not a new policy.
+    root_public_key: str | None = None
+    credential_secret_ref: str = "control-plane-credential"
+    poll_seconds: float = 30.0
+    #: What an expired policy bundle does: keep enforcing the old rules
+    #: (default), defer everything to a human, or deny everything.
+    on_stale: str = "keep"
+    #: Where the last verified artifacts are cached, so a restart during an
+    #: incident does not become an unprovisioned outage. None → under the hub home.
+    cache_dir: str | None = None
+    #: Ship decision evidence to the control plane (what the Guardian reads).
+    evidence: bool = True
+    evidence_interval_seconds: float = 5.0
+    #: Where a `prompt` is answered once the hub is joined.
+    #:
+    #: `console` (default): the DEFER is queued at the control plane and an
+    #: authenticated approver answers it there; the hub accepts only a
+    #: resolution signed by the fleet's decision key and bound to this exact
+    #: action, and records the approver and the signature in its own chain.
+    #: This is what makes a joined hub's approvals *fleet* evidence — answered
+    #: at the hub's terminal, the control plane only ever saw an unresolved
+    #: deferral with nobody's name on it.
+    #:
+    #: `terminal`: today's behaviour — the hub's own keypress reader, or the
+    #: local control API when headless (`approval.remote`). For a joined hub
+    #: whose operator sits at it and wants it that way.
+    approvals: str = "console"
+    #: How long a console approval may stay unanswered before the call is
+    #: denied. Finite on purpose: silence is not consent, and an agent held on
+    #: a question nobody will answer should fail rather than hang.
+    approval_timeout_seconds: float = 300.0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.url)
+
+    @property
+    def console_approvals(self) -> bool:
+        return self.enabled and self.approvals == "console"
+
+    @field_validator("approvals")
+    @classmethod
+    def _check_approvals(cls, v: str) -> str:
+        if v not in _VALID_FLEET_APPROVALS:
+            raise ValueError(f"approvals must be one of {sorted(_VALID_FLEET_APPROVALS)}")
+        return v
+
+    @field_validator("on_stale")
+    @classmethod
+    def _check_on_stale(cls, v: str) -> str:
+        if v not in _VALID_ON_STALE:
+            raise ValueError(f"on_stale must be one of {sorted(_VALID_ON_STALE)}")
+        return v
+
+    @model_validator(mode="after")
+    def _check_complete(self) -> "ControlPlaneConfig":
+        if self.enabled and not (self.fleet_id and self.root_public_key):
+            raise ValueError(
+                "control_plane.url is set but fleet_id and root_public_key are missing; "
+                "without the pinned root key nothing the control plane serves can be verified"
+            )
+        if self.poll_seconds <= 0:
+            raise ValueError("control_plane.poll_seconds must be positive")
+        if self.evidence_interval_seconds <= 0:
+            # `EvidenceShipper` waits this long between flushes; zero is a
+            # thread spinning at full tilt against the control plane.
+            raise ValueError("control_plane.evidence_interval_seconds must be positive")
+        if self.approval_timeout_seconds <= 0:
+            raise ValueError("control_plane.approval_timeout_seconds must be positive")
+        return self
+
+
 class HubConfig(BaseModel):
     listen: ListenConfig = Field(default_factory=ListenConfig)
+    control_plane: ControlPlaneConfig = Field(default_factory=ControlPlaneConfig)
     audit: AuditConfig = Field(default_factory=AuditConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     secrets: SecretsConfig = Field(default_factory=SecretsConfig)

@@ -63,6 +63,9 @@ def build_app(hub) -> Starlette:
     async def mcp_endpoint(request: Request) -> Response:
         caller, token_id = _authenticate(request, hub)
         if caller is None:
+            hub.refuse_unidentified(
+                source=request.client.host if request.client else "", method="mcp"
+            )
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         message = await request.json()
         result = await hub.handle_mcp(message, caller, token_id)
@@ -116,6 +119,24 @@ def build_app(hub) -> Starlette:
         result = await hub.reload_now()
         return JSONResponse(result)
 
+    async def interdict_endpoint(request: Request) -> Response:
+        # Operator control surface (build-04), localhost-only and authenticated
+        # like `/reload`. Cancels a principal's calls that are in flight right
+        # now; `*` is every call. It does not contain the principal's *next*
+        # action — on a joined hub that is the control plane's revocation list,
+        # which triggers the same cancellation on its own when it moves. An
+        # agent gains nothing by reaching this route: it can only stop calls.
+        caller, _ = _authenticate(request, hub)
+        if caller is None:
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        body = await request.json()
+        principal = body.get("principal")
+        if not principal or not isinstance(principal, str):
+            return JSONResponse({"error": "principal required"}, status_code=400)
+        reason = str(body.get("reason") or "interdicted by operator")
+        interrupted = hub.interdict(principal, by=f"operator:{caller}", reason=reason)
+        return JSONResponse({"interdicted": interrupted})
+
     async def approvals_decision(request: Request) -> Response:
         caller, _ = _authenticate(request, hub)
         if caller is None:
@@ -142,6 +163,7 @@ def build_app(hub) -> Starlette:
             Route("/approvals/stream", approvals_stream, methods=["GET"]),
             Route("/approvals/decision", approvals_decision, methods=["POST"]),
             Route("/reload", reload_endpoint, methods=["POST"]),
+            Route("/interdict", interdict_endpoint, methods=["POST"]),
         ]
     )
 

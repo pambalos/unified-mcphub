@@ -41,7 +41,9 @@ def test_required_refs_collects_secret_and_oauth(hub_home):
         "fs": ServerSpec(upstream=Upstream(command="python")),  # no secret
         "off": _http(ref="nope", enabled=False),  # disabled → excluded
     }
-    assert hub._required_secret_refs() == ["hf-token", "linear-oauth-refresh"]
+    # The signing key is always listed: whether the hub signs depends on the
+    # store holding one, which only an unlocked store can answer.
+    assert hub._required_secret_refs() == ["hf-token", "hub-signing-key", "linear-oauth-refresh"]
 
 
 def test_gate_noop_when_no_store(hub_home, fake_keyring, monkeypatch):

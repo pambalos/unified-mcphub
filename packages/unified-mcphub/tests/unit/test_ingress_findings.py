@@ -57,7 +57,7 @@ async def hub(hub_home):
     h.audit.start()
     h._loop = asyncio.get_running_loop()
     h.evidence = Collecting()  # type: ignore[attr-defined]
-    h.authz._enforcer._evidence = h.evidence  # noqa: SLF001
+    h.authz._evidence = h.evidence  # noqa: SLF001
     try:
         yield h
     finally:

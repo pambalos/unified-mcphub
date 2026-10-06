@@ -203,3 +203,44 @@ def test_the_decision_names_the_compiled_policy_and_tracks_edits():
     assert digest(base) == digest(same)
     assert digest(edited_rule) != digest(base)
     assert digest(added_floor) != digest(base)
+
+
+# --- readable engine rule ids ------------------------------------------------
+#
+# The engine id is what leaves the hub (evidence, queued approvals); the hub's
+# own audit keeps mapping it back to the pattern. Both are pinned here.
+
+
+def test_engine_rule_id_is_the_hub_pattern():
+    r = mk([Rule(tool="mcp://shell/exec", effect="prompt")])
+    d = r.resolve("mcp://shell/exec", {"command": "ls"}, "x")
+    assert d.engine is not None and d.engine.rule_id == "mcp://shell/exec"
+    assert d.rule == "mcp://shell/exec", "audit authz_rule unchanged"
+
+
+def test_repeated_patterns_are_suffixed_in_list_order():
+    r = mk(
+        [
+            Rule(tool="mcp://gh/create", callers=["a"], effect="allow"),
+            Rule(tool="mcp://gh/create", callers=["b"], effect="deny"),
+            Rule(tool="mcp://gh/create", callers=["c"], effect="prompt"),
+        ]
+    )
+    ids = [r.resolve("mcp://gh/create", {}, c).engine.rule_id for c in "abc"]
+    assert ids == ["mcp://gh/create", "mcp://gh/create#2", "mcp://gh/create#3"]
+    # ...and the audit field is still the plain pattern for all three.
+    assert {r.resolve("mcp://gh/create", {}, c).rule for c in "abc"} == {"mcp://gh/create"}
+
+
+def test_floor_ids_are_prefixed_and_distinct_from_a_rule_on_the_same_tool():
+    r = mk([Rule(tool="mcp://*/*", effect="allow")], danger=["mcp://shell/exec:rm -rf*"])
+    d = r.resolve("mcp://shell/exec", {"command": "rm -rf /"}, "x")
+    assert d.source == "danger_floor"
+    assert d.engine.rule_id == "floor:mcp://shell/exec:rm -rf*"
+    assert d.rule == "mcp://shell/exec:rm -rf*", "audit authz_rule unchanged"
+
+
+def test_a_floor_repeated_in_the_list_still_compiles():
+    r = mk(danger=["mcp://db/drop", "mcp://db/drop"])
+    d = r.resolve("mcp://db/drop", {}, "x")
+    assert d.effect is Effect.PROMPT and d.engine.rule_id == "floor:mcp://db/drop"

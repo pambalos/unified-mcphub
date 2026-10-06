@@ -22,12 +22,23 @@ Allow-always is argument-scoped (ADR-0025): rather than one tool-wide grant, the
 operator allows *this command* (exact) or *this prefix*. Broad, whole-tool trust
 is a curated-policy decision, not something accreted here. Deny-always stays
 tool-wide.
+
+A hub joined to a fleet with `control_plane.approvals: console` is asked
+through an *engine* channel instead (`fleet.ConsoleApprovals`, over
+`unified_enforce.RemoteApprovals`): the DEFER is queued at the control plane,
+an authenticated approver answers it there, and only a resolution signed by
+the fleet's decision key for this exact action is honoured. That channel
+speaks the engine's protocol natively, so it is installed beneath the hub
+vocabulary rather than wrapped in it, and what it returns beyond a hub
+channel's — the attested approver and the signature — is carried out on
+`PromptOutcome` for the audit entry.
 """
 
 from __future__ import annotations
 
+import logging
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any, NamedTuple, Protocol
 
@@ -40,6 +51,8 @@ from unified_enforce import (
 )
 from unified_enforce.policy import Decision as EngineDecision
 from unified_enforce.policy import Verdict
+
+logger = logging.getLogger(__name__)
 
 
 class DecisionKind(str, Enum):
@@ -60,6 +73,14 @@ class PromptOutcome:
     reason: str | None = None  # e.g. no_approval_channel
     args_filter: dict | None = None  # set for the scoped allow-always variants
     decided_by: str | None = None  # responder identity for the audit trail
+    #: Console approvals only: the attested approver and the control plane's
+    #: signature over the resolution, as plain dicts for the audit entry.
+    approver: dict | None = None
+    attestation: dict | None = None
+    #: The engine's final decision (ALLOW/DENY, never DEFER), keeping the
+    #: deferring rule's id and policy digest — what a joined hub ships as the
+    #: evidence for this call, beside the audit entry that records it.
+    decision: EngineDecision | None = None
 
 
 class ChannelDecision(NamedTuple):
@@ -256,7 +277,16 @@ class Approval:
     and out of the hub's vocabulary.
     """
 
-    def __init__(self, enabled: bool, channel: ApprovalChannel | None) -> None:
+    def __init__(
+        self,
+        enabled: bool,
+        channel: ApprovalChannel | None,
+        *,
+        console: Any = None,
+    ) -> None:
+        """`console` is an engine-level channel (`fleet.ConsoleApprovals`)
+        and, when given, replaces `channel`: a joined hub in console mode has
+        exactly one approver, and it is not the local terminal."""
         self._approvals = Approvals(
             None,
             enabled=enabled,
@@ -265,7 +295,12 @@ class Approval:
             # which is the right default for every deployment except this one.
             when_disabled="allow",
         )
-        self.channel = channel
+        self._console = False
+        if console is not None:
+            self._approvals.channel = console
+            self._console = True
+        else:
+            self.channel = channel
 
     # `enabled` and `channel` are reassigned on config reload, so both stay
     # plain attributes from the caller's point of view.
@@ -280,12 +315,20 @@ class Approval:
 
     @property
     def channel(self) -> ApprovalChannel | None:
+        """The hub-vocabulary channel; None when there is none, including in
+        console mode (whose channel is engine-level — see `console`)."""
         wrapper = self._approvals.channel
-        return wrapper.inner if wrapper is not None else None
+        return wrapper.inner if isinstance(wrapper, _EngineChannel) else None
 
     @channel.setter
     def channel(self, value: ApprovalChannel | None) -> None:
         self._approvals.channel = _EngineChannel(value) if value is not None else None
+        self._console = False
+
+    @property
+    def console(self) -> bool:
+        """Whether decisions come from the fleet's control plane."""
+        return self._console
 
     async def resolve(
         self,
@@ -296,10 +339,18 @@ class Approval:
         *,
         floored: bool = False,
         action: Action | None = None,
+        deferral: EngineDecision | None = None,
     ) -> PromptOutcome:
         """`action` is the canonical Action the hub already built for this call;
         it is reconstructed here only for callers that do not have one (tests,
-        and any path that prompts outside `_handle_call`)."""
+        and any path that prompts outside `_handle_call`).
+
+        `deferral` is the engine's DEFER that caused this prompt. It travels
+        in the request — to a console approver it is the "why am I being
+        asked": the rule id (the readable hub pattern) and whether it was a
+        floor — and the resolved decision keeps its rule id and policy digest.
+        Without it the request names no rule at all, which is what every
+        approval looked like from the control plane before it was passed."""
         args = args or {}
         if action is None:
             action = Action.build(
@@ -309,23 +360,84 @@ class Approval:
                 resource="*",
                 params=args,
             )
+        if deferral is None:
+            deferral = EngineDecision(verdict=Verdict.DEFER, rule_id=None, source="prompt")
         outcome = await self._approvals.resolve(
             ApprovalRequest(
                 action=action,
-                decision=EngineDecision(verdict=Verdict.DEFER, rule_id=None, source="prompt"),
+                decision=deferral,
                 summary=summary,
                 floored=floored,
             )
         )
+        persistent = outcome.persistent
+        if (
+            self._console
+            and persistent
+            and outcome.allowed
+            and outcome.kind is ApprovalKind.ALLOW_ALWAYS
+            and not outcome.scope
+        ):
+            # ADR-0025: whole-tool trust is curated policy, reviewed where
+            # policy is reviewed. A tool-wide allow-always from the terminal is
+            # at least the hub operator editing their own hub; from the console
+            # it would be a click elsewhere silently writing a permanent allow
+            # into this machine's `.local.yaml` — policy accreting on the data
+            # plane, outside the fleet's bundle and its review. Honoured for
+            # this call (the approver did say yes), not persisted. A *scoped*
+            # allow-always names one command or prefix and persists as before.
+            logger.warning(
+                "console allow_always for %s by %s carried no scope; allowing this call "
+                "only and persisting no rule (tool-wide trust belongs in curated policy, "
+                "ADR-0025)",
+                tool_uri,
+                outcome.decided_by,
+            )
+            persistent = False
+        elif self._console and persistent and outcome.scope and not _is_args_filter(outcome.scope):
+            # The scope arrived from another system and becomes a rule in this
+            # one. A shape the hub's rule model does not understand would fail
+            # validation mid-call at best, and at worst be read as something
+            # its author did not mean; neither is worth a permanent rule.
+            logger.warning(
+                "console %s for %s carried a scope the hub cannot express as a rule (%r); "
+                "applying the decision to this call only",
+                outcome.kind.value if outcome.kind else "decision",
+                tool_uri,
+                outcome.scope,
+            )
+            persistent = False
         return PromptOutcome(
             allowed=outcome.allowed,
             authz_decision=_authz_decision(outcome),
-            persistent=outcome.persistent,
+            persistent=persistent,
             session=outcome.session,
             reason=outcome.reason,
             args_filter=outcome.scope,
             decided_by=outcome.decided_by,
+            approver=asdict(outcome.approver) if outcome.approver else None,
+            attestation=asdict(outcome.attestation) if outcome.attestation else None,
+            decision=outcome.decision,
         )
+
+
+_ARGS_OPERATORS = {"equals", "starts_with", "matches"}
+
+
+def _is_args_filter(scope: Any) -> bool:
+    """Whether `scope` has the hub's `args_filter` shape (ADR-0006):
+    `{arg: {equals|starts_with|matches: [str, ...]}}`."""
+    if not isinstance(scope, dict) or not scope:
+        return False
+    for arg, ops in scope.items():
+        if not isinstance(arg, str) or not isinstance(ops, dict) or not ops:
+            return False
+        for op, values in ops.items():
+            if op not in _ARGS_OPERATORS or not isinstance(values, list) or not values:
+                return False
+            if not all(isinstance(v, str) for v in values):
+                return False
+    return True
 
 
 def _authz_decision(outcome: Any) -> str:

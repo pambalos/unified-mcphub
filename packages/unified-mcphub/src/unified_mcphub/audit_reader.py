@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from unified_enforce.audit import HashChainWriter, VerifyResult
 
@@ -126,9 +127,22 @@ def lint(audit_dir: Path) -> list[str]:
     return problems
 
 
-def verify(audit_dir: Path) -> VerifyResult:
-    """Replay the hash chain offline: any edited or deleted entry breaks it."""
-    return HashChainWriter.verify(audit_dir)
+def verify(audit_dir: Path, signing: Any = None) -> VerifyResult:
+    """Replay the hash chain offline: any edited or deleted entry breaks it.
+
+    `signing` is the hub's `signing.SigningRecord`, when it has signed. Given,
+    every entry from its `since_seq` must also carry a valid signature by its
+    key — which is what turns "consistent" into "written by this hub": a hash
+    chain alone is happily recomputed end to end by anyone who can write the
+    files. Entries before `since_seq` predate the key and are checked by hash,
+    and are still covered by the first signature after them (see
+    `HashChainWriter.verify`).
+    """
+    if signing is None:
+        return HashChainWriter.verify(audit_dir)
+    return HashChainWriter.verify(
+        audit_dir, public_key=signing.public_bytes(), signed_from_seq=signing.since_seq
+    )
 
 
 def prune(audit_dir: Path, retention_days: int) -> list[str]:

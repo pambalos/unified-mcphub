@@ -85,6 +85,19 @@ already made on. Behaviour is unchanged and pinned by the existing suite,
 exception escaping into the call path — a 500 where a refusal belongs. The
 module used to promise this as "later phases"; this is that phase.
 
+A **joined hub** (`control_plane.approvals: console`, the default once a
+`control_plane:` block is set) installs `RemoteApprovals` beneath this adapter
+as an engine-level channel (`fleet.ConsoleApprovals`, bound to the fleet
+credential at start; unbound it raises, so every prompt denies). The request
+carries the real deferring decision — the readable rule id and the policy
+digest — and the same canonical Action the verdict was made on. The outcome's
+attested approver and signed resolution are written into the hub's `received`
+entry (`approver`, `attestation`; `decided_by` is the approver's subject). An
+`allow_always` from the console with no scope is honoured for the call and not
+persisted: whole-tool trust is curated policy (ADR-0025), and a remote click
+must not accrete it into the hub's `.local.yaml`. `approvals: terminal` keeps
+the local channels exactly as before.
+
 **SDK** — `check_async()` and the async `@action` decorator route DEFER through
 approvals. `check()` stays synchronous and never blocks: asking a person is a
 fundamentally different operation from evaluating policy, and code on a request

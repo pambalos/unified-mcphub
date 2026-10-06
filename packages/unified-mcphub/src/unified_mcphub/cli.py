@@ -327,12 +327,46 @@ def cmd_audit(args: argparse.Namespace) -> int:
         removed = audit_reader.prune(directory, load_hub_config().audit.retention_days)
         print(f"removed {len(removed)} file(s): {', '.join(removed) or '(none)'}")
     elif cmd == "verify":
-        result = audit_reader.verify(directory)
-        if result.ok:
-            print(f"chain OK: {result.entries} entries verified (anchor {result.anchor})")
+        from unified_mcphub.signing import load_record, signing_record_path
+
+        record = load_record()
+        result = audit_reader.verify(directory, record)
+        if record is None:
+            # Said every time, not only when it matters: "chain OK" from a
+            # hash-only check is a weaker statement, and the reader should not
+            # have to know that to read it correctly.
+            scope = f"hash chain only; no {signing_record_path().name}, signatures not checked"
         else:
-            print(f"chain BROKEN after {result.entries} entries: {result.error}")
+            scope = (
+                f"signatures by key {record.key_id} checked from seq {record.since_seq}; "
+                "hash chain before it"
+            )
+        if result.ok:
+            print(f"chain OK: {result.entries} entries verified (anchor {result.anchor}) — {scope}")
+        else:
+            print(f"chain BROKEN after {result.entries} entries: {result.error} — {scope}")
             return 1
+    return 0
+
+
+def cmd_fleet(args: argparse.Namespace) -> int:
+    from unified_mcphub import fleet_join
+
+    if args.fleet_command == "status":
+        fleet_join.print_status(fleet_join.status(), as_json=args.json)
+        return 0
+    try:
+        result = fleet_join.join(
+            url=args.url,
+            fleet=args.fleet,
+            join_token=args.join_token,
+            approvals=args.approvals,
+            force=args.force,
+        )
+    except fleet_join.JoinError as exc:
+        print(f"fleet join: {exc}", file=sys.stderr)
+        return 1
+    fleet_join.print_join(result, args.url)
     return 0
 
 
@@ -557,7 +591,35 @@ def build_parser() -> argparse.ArgumentParser:
     aud_sub.add_parser("tail").set_defaults(func=cmd_audit)
     aud_sub.add_parser("lint").set_defaults(func=cmd_audit)
     aud_sub.add_parser("prune").set_defaults(func=cmd_audit)
-    aud_sub.add_parser("verify", help="verify the audit hash chain").set_defaults(func=cmd_audit)
+    aud_sub.add_parser(
+        "verify", help="verify the audit hash chain (and its signatures, once signed)"
+    ).set_defaults(func=cmd_audit)
+
+    p_fleet = sub.add_parser("fleet", help="join this hub to a control plane's fleet")
+    fleet_sub = p_fleet.add_subparsers(dest="fleet_command", required=True)
+    p_join = fleet_sub.add_parser(
+        "join", help="enrol with a join token, register the signing key, write control_plane:"
+    )
+    p_join.add_argument("--url", required=True, help="control plane base URL")
+    p_join.add_argument("--fleet", required=True, help="the fleet the join token is for")
+    p_join.add_argument(
+        "--join-token",
+        required=True,
+        help="one-time token from `unified-control issue-join-token` (never printed)",
+    )
+    p_join.add_argument(
+        "--approvals",
+        choices=["console", "terminal"],
+        default="console",
+        help="where prompts are answered once joined (default: console)",
+    )
+    p_join.add_argument(
+        "--force", action="store_true", help="replace an existing enabled control_plane block"
+    )
+    p_join.set_defaults(func=cmd_fleet)
+    p_fstatus = fleet_sub.add_parser("status", help="fleet + signing configuration (offline)")
+    p_fstatus.add_argument("--json", action="store_true")
+    p_fstatus.set_defaults(func=cmd_fleet)
 
     return p
 

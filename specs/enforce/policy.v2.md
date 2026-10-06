@@ -61,7 +61,7 @@ Precedence (v0.2): ① exact rules (no wildcard in `tool`), file order →
 | danger pattern `mcp://s/t:<prefix>*` | floor `match.tool` + `args: {command: {starts_with: ["<prefix>"]}}` |
 | danger non-scheme pattern | floor `match.tool` = whole pattern as glob |
 | Decision `source: danger_floor` | engine `floor`, mapped back at the adapter |
-| Decision `rule` (= tool pattern) | engine `rule_id` → pattern via adapter map (ids are synthesized; hub rules have none) |
+| Decision `rule` (= tool pattern) | engine `rule_id` → pattern via adapter map. Hub rules have no ids, so the adapter derives them: a rule's id is its `tool` pattern, a floor's is `floor:<pattern>`, and a repeat of either takes `#2`, `#3`… in list order (ids share one namespace with constitutional rules). Readable because the engine id is what leaves the hub — evidence, queued approvals — where a positional `rule-22` named nothing and shifted whenever a learned rule was prepended |
 
 Caller ids are treated as literal principals; a caller id containing `*` would
 glob (documented; token-registry names make this unrealistic).

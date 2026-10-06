@@ -186,3 +186,20 @@ def test_danger_floor_non_scheme_pattern_is_glob():
     # A floor pattern without "://" is treated as a plain whole-URI glob (defensive path).
     r = mk([Rule(tool="mcp://*/*", effect="allow")], danger=["no-scheme-pattern"])
     assert r.resolve("mcp://x/y", {}, "u").effect is Effect.ALLOW  # doesn't match -> not floored
+
+
+def test_the_decision_names_the_compiled_policy_and_tracks_edits():
+    """The digest covers the whole compiled policy, so editing a workspace rule
+    or a dangerous-commands floor changes which policy the audit entry names."""
+    base = mk([Rule(tool="mcp://*/list_*", effect="allow")])
+    same = mk([Rule(tool="mcp://*/list_*", effect="allow")])
+    edited_rule = mk([Rule(tool="mcp://*/list_*", effect="prompt")])
+    added_floor = mk([Rule(tool="mcp://*/list_*", effect="allow")], danger=["mcp://*/delete_*"])
+
+    def digest(r: AuthzResolver) -> str | None:
+        return r.resolve("mcp://fs/list_files", {}, "x").policy_digest
+
+    assert digest(base) is not None
+    assert digest(base) == digest(same)
+    assert digest(edited_rule) != digest(base)
+    assert digest(added_floor) != digest(base)

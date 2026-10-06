@@ -100,6 +100,8 @@ def test_the_payload_is_an_allowlist():
     both describe *how the identity was arrived at* rather than what the agent
     did, which is the line this list draws. Neither can carry payload — one is
     a three-value enum, the other a principal id that already ships above it.
+    `policy_digest` likewise: a sha256 of the policy, which names which rules
+    decided and carries nothing the agent sent.
     """
     assert set(summarise(action(), decision())) == {
         "action_digest",
@@ -115,6 +117,7 @@ def test_the_payload_is_an_allowlist():
         "attestation",
         "parent_id",
         "decided_at",
+        "policy_digest",
     }
 
 
@@ -629,3 +632,16 @@ def test_an_unparseable_receipt_is_accepted_and_ignored():
         assert len(shipper.spool) == 0
     finally:
         server.close()
+
+
+def test_a_shipped_record_names_the_policy_that_decided():
+    from unified_enforce import Action, PolicyEngine, Principal
+    from unified_enforce.evidence import summarise
+
+    engine = PolicyEngine.from_yaml(
+        "version: 1\nrules:\n  - id: r\n    match: {tool: 'mcp://a/b'}\n    effect: allow\n"
+    )
+    act = Action.build(
+        principal=Principal(id="agent:a"), tool="mcp://a/b", verb="call", resource="*"
+    )
+    assert summarise(act, engine.decide(act))["policy_digest"] == engine.policy_digest

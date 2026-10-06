@@ -93,6 +93,7 @@ class AuditLog:
         reason: str | None = None,
         decided_by: str | None = None,
         action_digest: str | None = None,
+        policy_digest: str | None = None,
     ) -> None:
         entry = {
             "phase": "received",
@@ -113,6 +114,8 @@ class AuditLog:
         }
         if action_digest:
             entry["action_digest"] = action_digest
+        if policy_digest:
+            entry["policy_digest"] = policy_digest
         if reason:
             entry["reason"] = reason
         if decided_by:

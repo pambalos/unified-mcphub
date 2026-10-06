@@ -174,6 +174,7 @@ def _resolved(
         source=source,
         audit_level=request.decision.audit_level,
         reason=reason,
+        policy_digest=request.decision.policy_digest,
     )
 
 
@@ -317,6 +318,10 @@ class RecordedApproval:
     # strict canonicalization, and how long a human took is not worth a
     # non-portable digest.
     elapsed_us: int = 0
+    #: The policy that deferred this action -- and so the policy under which a
+    #: human was asked. Carried from the DEFER so "approved against which
+    #: policy?" is answered by this entry alone, without a join.
+    policy_digest: str | None = None
     scope: dict[str, Any] | None = field(default=None)
 
     #: The attested approver and the signature over their decision, when the
@@ -342,4 +347,5 @@ class RecordedApproval:
             scope=outcome.scope,
             approver=asdict(outcome.approver) if outcome.approver else None,
             attestation=asdict(outcome.attestation) if outcome.attestation else None,
+            policy_digest=outcome.decision.policy_digest,
         )

@@ -9,9 +9,30 @@ entries paired by request_id — which now additionally carry `prev_hash`/`hash`
 (strict=False chaining: hub args/results are pre-existing free-form JSON).
 `unified-mcphub audit verify` replays the chain offline.
 
-Denied calls write `received` only. audit_level controls payload capture
-(minimal/standard/detailed/full); secret-shape scrubbing at `standard` comes
-from `unified_enforce.redaction` (same patterns the engine uses).
+Denied calls write `received` only.
+
+**Arguments and results are recorded raw, whatever the rule's audit_level.**
+`args` (received) and `result` (completed) are *detached*
+(`unified_enforce.detach`): the entry hash covers a salted digest of each, and
+the value sits inline beside it. So the chain always holds exactly what the
+agent sent and what came back — the one thing an investigation cannot do
+without — and an export can still withhold it (a digests-only evidence pack)
+without breaking a link or a signature.
+
+`audit_level` (minimal/standard/detailed/full) is still recorded on both
+phases, but as the default *view*: `audit show/pair/tail/search` apply it when
+they print (`audit_reader.view`; `--raw` to see the record as written).
+Shaping at write time — `minimal` stored `null`, `standard` scrubbed
+secret-shaped strings — made the record itself lossy, and could not be undone
+for the one reader who needed the original. `completed` entries no longer carry
+`redactions_applied`: it described that write-time scrub, which no longer
+happens, and the display-time equivalent is a property of how an entry is
+printed, not of the entry. (The workspace `redact:` filter, spec §10.2, is a
+different thing and unchanged: it rewrites the result *before it reaches the
+agent*, so the recorded result is still exactly what came back to the agent.)
+
+`audit.record_payloads: false` is the loud escape hatch: digests and salts are
+kept, values are not, and each entry says so under `unrecorded`.
 
 Writes come only from the single asyncio event-loop thread (sync, no await in
 the write path), so no locking is needed.
@@ -41,7 +62,15 @@ from .util import utcnow
 logger = logging.getLogger(__name__)
 
 
-def _capture(payload: Any, audit_level: str) -> Any:
+#: The content-bearing fields of a hub entry, by phase. Everything else in an
+#: entry (who, which tool, the decision, timings, sizes) is the skeleton an
+#: auditor needs to read the log at all, and stays hashed directly.
+RECEIVED_PAYLOADS = ("args",)
+COMPLETED_PAYLOADS = ("result",)
+
+
+def capture(payload: Any, audit_level: str) -> Any:
+    """Apply an audit level to a payload for *display* (see module docstring)."""
     if audit_level == "minimal":
         return None
     if audit_level == "standard":
@@ -58,9 +87,11 @@ def new_span_id() -> str:
 
 
 class AuditLog:
-    def __init__(self, audit_dir: Path) -> None:
+    def __init__(self, audit_dir: Path, *, record_payloads: bool = True) -> None:
         # utcnow resolved late so tests can monkeypatch this module's clock.
-        self._writer = HashChainWriter(audit_dir, strict=False, clock=lambda: utcnow())
+        self._writer = HashChainWriter(
+            audit_dir, strict=False, clock=lambda: utcnow(), record_payloads=record_payloads
+        )
         self._seq = 0
         #: Called once with the seq of the first entry the current signer
         #: signs; cleared when it succeeds (retried on the next write if not).
@@ -152,7 +183,7 @@ class AuditLog:
             "caller_token_id": caller_token_id,
             "mcp_server": mcp_server,
             "tool": tool,
-            "args": _capture(args, audit_level),
+            "args": args,
             "args_size_bytes": len(json.dumps(args, default=str)),
             "authz_decision": authz_decision,
             "authz_rule": authz_rule,
@@ -170,7 +201,7 @@ class AuditLog:
             entry["approver"] = approver
         if attestation:
             entry["attestation"] = attestation
-        return self._write(entry)
+        return self._write(entry, detach=RECEIVED_PAYLOADS)
 
     def write_completed(
         self,
@@ -184,6 +215,8 @@ class AuditLog:
         upstream_request_id: str | None = None,
         injection: list[str] | None = None,
     ) -> dict[str, Any]:
+        """`audit_level` is recorded (the received entry's, carried over) so
+        the completed half can be shown at the same level without a join."""
         result_json = json.dumps(result, default=str) if result is not None else ""
         entry = {
             "phase": "completed",
@@ -191,18 +224,18 @@ class AuditLog:
             "ts": utcnow().isoformat(),
             "seq": self._next_seq(),
             "duration_ms": round(duration_ms, 3),
-            "result": _capture(result, audit_level),
+            "result": result,
             "result_status": result_status,
             "result_size_bytes": len(result_json),
             "prompt_response_ms": prompt_response_ms,
             "upstream_request_id": upstream_request_id,
-            "redactions_applied": audit_level == "standard",
+            "audit_level": audit_level,
         }
         if injection:
             # D-12: the shapes found in the result, by id. The reader sees
             # that this result carried instructions without re-reading them.
             entry["injection"] = list(injection)
-        return self._write(entry)
+        return self._write(entry, detach=COMPLETED_PAYLOADS)
 
     def write_interdicted(
         self,
@@ -244,9 +277,9 @@ class AuditLog:
         self._seq += 1
         return self._seq
 
-    def _write(self, entry: dict[str, Any]) -> dict[str, Any]:
+    def _write(self, entry: dict[str, Any], *, detach: tuple[str, ...] = ()) -> dict[str, Any]:
         try:
-            written = self._writer.append(entry)
+            written = self._writer.append(entry, detach=detach)
         except RuntimeError:
             raise
         except Exception as exc:  # canonicalization surprises must not kill the hub silently

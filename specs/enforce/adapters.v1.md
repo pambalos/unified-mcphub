@@ -92,11 +92,15 @@ API keys never reach the evidence chain. An adapter cannot ask the developer
 per tool — it sees whatever the model passed — so it captures everything by
 default, which reintroduces exactly what explicit capture solved.
 
-Two mitigations, in order of strength: the audit capture level scrubs
-secret-shaped values before anything is written, and `ToolGuard(capture=[...])`
-drops arguments before they enter the Action at all. The second is stronger and
-is the right answer for a tool that takes a credential — do not rely on the
-scrubber to recognise a token format it has never seen.
+The chain records what the Action carries **raw** (e2.v1.md §2: payloads are
+detached, and the capture level only shapes what a reader is shown and what an
+export withholds), so the one mitigation that keeps a credential out of the
+evidence file is `ToolGuard(capture=[...])`, which drops arguments before they
+enter the Action at all. It is the right answer for a tool that takes a
+credential. (Before payloads were detachable, the `standard` capture level
+scrubbed secret-shaped strings at write time; that was never a dependable
+control — it only recognised token formats it had seen — and it is now a
+display-time scrub.)
 
 ## §4 Argument binding
 

@@ -3,6 +3,12 @@
 Pure read-side functions over an audit directory of <UTC-date>.jsonl files
 written by audit.py. Backs `audit show | pair | search | tail | lint | prune |
 verify`.
+
+The readers return entries exactly as written: `args` and `result` raw (see
+audit.py). `view` is the display step the CLI applies before printing — it
+shows each payload at the entry's recorded `audit_level` and drops the salts —
+so `audit tail` on a terminal or in a screen share does not print a secret
+just because the record, correctly, kept it. `--raw` skips it.
 """
 
 from __future__ import annotations
@@ -12,7 +18,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from unified_enforce import detach
 from unified_enforce.audit import HashChainWriter, VerifyResult
+
+from .audit import capture
 
 _ALLOWED_DECISIONS = {"allow", "prompt_allowed", "approval_disabled"}
 #: The phases that close a `received` bracket. `interdicted` (build-04) is a
@@ -37,6 +46,38 @@ def _iter_entries(audit_dir: Path):
                 yield path.name, lineno, json.loads(line)
             except json.JSONDecodeError:
                 yield path.name, lineno, None  # malformed; lint reports, others skip
+
+
+#: Shown in place of a payload that the entry commits to but does not hold.
+WITHHELD = "«withheld: committed to by digest, not present in this copy»"
+NOT_RECORDED = "«not recorded: audit.record_payloads was off»"
+
+
+def view(entry: dict[str, Any] | None) -> dict[str, Any] | None:
+    """An entry as the CLI shows it by default.
+
+    Each detached payload is shaped by the entry's own `audit_level` (the rule
+    that decided the call said how sensitive it is); an absent one is replaced
+    by a marker saying why it is absent; salts are dropped (they are noise to a
+    reader, and printing one beside a withheld value would undo the point of
+    salting). Entries written before payloads were detachable were already
+    shaped when written and are returned as they are — applying the level
+    again would be harmless, but it would also suggest they were raw.
+    """
+    if entry is None or detach.DETACHED not in entry:
+        return entry
+    level = str(entry.get("audit_level") or "standard")
+    unrecorded = set(entry.get(detach.UNRECORDED) or ())
+    out = {k: v for k, v in entry.items() if k != detach.SALTS}
+    for path in entry[detach.DETACHED]:
+        if "." in path:
+            continue  # hub payloads are top-level; nothing else is shaped here
+        found, value = detach.get(entry, path)
+        if found:
+            out[path] = capture(value, level)
+        else:
+            out[path] = NOT_RECORDED if path in unrecorded else WITHHELD
+    return out
 
 
 def read_day(audit_dir: Path, date_str: str) -> list[dict]:

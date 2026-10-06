@@ -87,24 +87,43 @@ def test_standard_capture_untouched_when_no_secrets():
     assert stored == dump
 
 
-def test_chain_stores_redacted_copy_but_full_digest(audit_dir):
+def _entries(audit_dir):
     import json
 
-    entries = [
+    return [
         json.loads(line)
         for p in sorted(audit_dir.glob("*.jsonl"))
         for line in p.read_text().splitlines()
     ]
+
+
+def test_chain_stores_the_raw_action_whatever_the_audit_level(audit_dir):
+    """audit_level no longer shapes what is written: it is the default view.
+    The record holds exactly what the agent asked for, and the hash commits to
+    it through a salted digest so an export can still withhold it."""
+    entries = _entries(audit_dir)
     secret_entry = next(
-        e
-        for e in entries
-        if e["payload"]["action"]["tool"] == "mcp://github/list_prs" and e["payload"]["redacted"]
+        e for e in entries if e["payload"]["action"]["params"].get("token", "").startswith("ghp_")
     )
-    assert secret_entry["payload"]["action"]["params"]["token"] == "«redacted»"
+    assert secret_entry["payload"]["action"]["params"]["token"] == "ghp_" + "a" * 24
+    assert secret_entry["payload"]["redacted"] is False
+    assert secret_entry["payload"]["audit_level"] == "standard"  # the view, recorded
     minimal_entry = next(e for e in entries if e["payload"]["audit_level"] == "minimal")
-    assert minimal_entry["payload"]["action"]["params"] is None
+    assert minimal_entry["payload"]["action"]["params"] == {"path": "prod/db"}
+    assert set(minimal_entry["detached"]) == {
+        "payload.action.params",
+        "payload.action.context.extra",
+    }
     assert len(minimal_entry["payload"]["action_digest"]) == 64  # full digest kept
-    assert AuditChain.verify(audit_dir).ok  # chain covers the stored (redacted) copy
+    result = AuditChain.verify(audit_dir)
+    assert result.ok and result.payloads_verified == 10 and result.payloads_withheld == 0
+
+
+def test_capture_levels_still_shape_the_view(audit_dir):
+    """What a reader is shown by default still follows the rule's level."""
+    minimal_entry = next(e for e in _entries(audit_dir) if e["payload"]["audit_level"] == "minimal")
+    shown, hidden = capture_action(minimal_entry["payload"]["action"], "minimal")
+    assert hidden and shown["params"] is None
 
 
 # --- SQLite index ---
@@ -141,12 +160,41 @@ def test_index_rejects_unknown_filter(tmp_path):
 # --- replay ---
 
 
-def test_replay_same_policy_is_clean_except_minimal(audit_dir, engine):
+def test_replay_same_policy_is_clean_including_minimal(audit_dir, engine):
+    """Recorded raw, a `minimal` rule's decision replays like any other — it
+    used to be skipped because its params were never kept."""
     report = replay(audit_dir, engine)
     assert report.total == 5
-    assert report.skipped == 1  # the minimal-capture vault entry
-    assert report.replayed == 4
+    assert report.skipped == 0
+    assert report.replayed == 5
     assert report.clean
+
+
+def test_replay_reads_the_params_it_recorded(audit_dir):
+    """A condition on params is re-evaluated against the recorded value: the
+    990000-cent refund is over the cap whatever policy replays it."""
+    raised = PolicyEngine.from_yaml(POLICY.replace("<= 5000", "<= 1000000"))
+    report = replay(audit_dir, raised)
+    refund = next(d for d in report.divergences if d.tool == "sdk://payments/refund")
+    assert refund.recorded_rule == "refunds-defer"
+    assert refund.replayed_rule == "refunds-capped"
+
+
+def test_replay_skips_withheld_params_rather_than_reading_them_as_empty(audit_dir, engine):
+    """A digests-only excerpt has no params. Replaying it as `params: {}` would
+    turn "we don't know" into a confident verdict — so it is counted instead."""
+    import json
+
+    from unified_enforce import detach
+
+    for path in audit_dir.glob("*.jsonl"):
+        lines = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        path.write_text("".join(json.dumps(detach.redact(e)) + "\n" for e in lines))
+    assert AuditChain.verify(audit_dir).ok, "redaction must not break the chain"
+    report = replay(audit_dir, engine)
+    assert report.total == 5
+    assert report.skipped == report.withheld == 5
+    assert report.replayed == 0
 
 
 def test_replay_candidate_policy_reports_divergences(audit_dir):

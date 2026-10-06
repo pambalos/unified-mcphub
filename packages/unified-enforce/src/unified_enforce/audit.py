@@ -14,6 +14,15 @@ Two layers:
 
 `verify()` replays every file offline and reports the first break. It works on
 anything a HashChainWriter wrote, whichever layer shaped the entries.
+
+**Content is recorded raw and detached** (detach.py). Both layers can name
+content-bearing fields — the engine's `payload.action.params` and
+`payload.action.context.extra`, the hub's `args` and `result` — which are then
+committed to by a salted digest inside the hashed body while the value stays
+inline. The chain therefore always holds exactly what was sent and returned,
+and an export can still withhold it (`detach.redact`) without breaking a link
+or a signature. Entries without detached fields hash exactly as they always
+have, so chains written before this keep verifying unchanged.
 """
 
 from __future__ import annotations
@@ -22,14 +31,15 @@ import fcntl
 import json
 import logging
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
+from . import detach as _detach
 from .action import Action
-from .canonical import GENESIS_HASH, canonical_bytes, sha256_hex
+from .canonical import GENESIS_HASH, _check, canonical_bytes, sha256_hex
 from .policy import Decision
 
 
@@ -45,6 +55,15 @@ class VerifyResult:
     # unless retention pruning truncated the chain head. Head truncation is
     # indistinguishable from pruning by design — pin the anchor out-of-band
     # (control plane, C2 evidence) when that distinction matters.
+    #: Detached values present and matching their digest (detach.py).
+    payloads_verified: int = 0
+    #: Detached values absent. A writer's own chain should report none: content
+    #: is only withheld from exports. A local chain with withheld values has had
+    #: content deleted — not altered, which would fail — and that is worth a look.
+    payloads_withheld: int = 0
+    #: Detached values the writer was configured not to store
+    #: (`record_payloads=False`), as the signed entries themselves say.
+    payloads_unrecorded: int = 0
 
 
 class HashChainWriter:
@@ -55,10 +74,20 @@ class HashChainWriter:
         strict: bool = True,
         clock: Callable[[], datetime] | None = None,  # UTC now; injectable for rotation tests
         signer: Any = None,  # unified_enforce.Signer; signs each entry hash
+        record_payloads: bool = True,
     ) -> None:
+        """`record_payloads=False` is the explicit escape hatch for deployments
+        that must not keep content at all: detached values are digested (with a
+        salt kept locally) and then dropped, and each entry says so under
+        `unrecorded`. The chain then proves *that* a call happened and *which*
+        content it carried — a copy held elsewhere can be checked against it —
+        but cannot by itself say what that content was. Logged loudly at start,
+        because a deployment that turned this on by accident has quietly lost
+        the ability to reconstruct what its agents did."""
         self._dir = Path(audit_dir)
         self._strict = strict
         self._signer = signer
+        self._record_payloads = record_payloads
         self._clock = clock or (lambda: datetime.now(UTC))
         self._fd: int | None = None
         self._lock_fd: int | None = None
@@ -80,6 +109,16 @@ class HashChainWriter:
             raise RuntimeError(f"audit chain is locked by another writer: {exc}") from exc
         self._recover()
         self._open_for_today()
+        if not self._record_payloads:
+            log.warning(
+                "%s: record_payloads is OFF — tool inputs and outputs are committed to by "
+                "salted digest but NOT stored. This chain will prove that a call happened and "
+                "which content it carried, but cannot show what that content was; an "
+                "investigation will need a copy held elsewhere. (Hub: audit.record_payloads; "
+                "engine: AuditChain(record_payloads=...).) To keep content out of an export "
+                "instead, record it and build a digests-only evidence pack.",
+                self._dir,
+            )
 
     def stop(self) -> None:
         if self._fd is not None:
@@ -120,17 +159,37 @@ class HashChainWriter:
         """
         self._signer = value
 
+    @property
+    def record_payloads(self) -> bool:
+        return self._record_payloads
+
     # --- writing ---
 
-    def append(self, entry: dict[str, Any]) -> dict[str, Any]:
+    def append(self, entry: dict[str, Any], *, detach: Iterable[str] = ()) -> dict[str, Any]:
         """Chain and write one flat entry. `hash`/`prev_hash` are stamped here
-        and must not be present on the way in."""
+        and must not be present on the way in.
+
+        `detach` names the content-bearing fields (dotted paths) to commit to by
+        salted digest rather than directly (see detach.py): recorded raw and
+        inline, but removable from an export without breaking the chain.
+
+        A strict chain checks the *whole* entry, detached values included,
+        before anything is digested: detaching a value takes it out of the
+        hashed bytes, and must not take it out of the engine's no-floats rule
+        with it.
+        """
         if self._fd is None:
             raise RuntimeError("HashChainWriter not started")
         if "hash" in entry or "prev_hash" in entry:
             raise ValueError("entry must not pre-set hash/prev_hash")
+        if _detach.DETACHED in entry or _detach.SALTS in entry or _detach.UNRECORDED in entry:
+            raise ValueError("entry must not pre-set detached/salts/unrecorded; pass detach=")
         body = {**entry, "prev_hash": self._head}
-        entry_hash = sha256_hex(canonical_bytes(body, strict=self._strict))
+        if self._strict:
+            _check(body, "$")
+        if detach:
+            body = _detach.detach(body, detach, record=self._record_payloads)
+        entry_hash = sha256_hex(canonical_bytes(_detach.hashable_body(body), strict=False))
         full = {**body, "hash": entry_hash}
         if self._signer is not None:
             # Sign the entry hash, which already covers the payload and the
@@ -194,6 +253,12 @@ class HashChainWriter:
         N attests the whole history up to N, exactly as `append` says of every
         signed entry — what the prefix lacks is only a per-entry signature, and
         it never needed one.
+
+        Detached content (detach.py) is checked after the hash: the hash covers
+        each value's digest, and `detach.check` recomputes the digest of every
+        value present. A present value that does not match is tampering; an
+        absent one is counted (`payloads_withheld`) rather than failed, because
+        withholding content is what an export is allowed to do.
         """
         if signed_from_seq is not None and public_key is None:
             raise ValueError("signed_from_seq needs public_key: there is nothing to check from it")
@@ -201,10 +266,17 @@ class HashChainWriter:
         anchor: str | None = None
         prev: str | None = None
         count = 0
+        verified = withheld = unrecorded = 0
         #: Whether signatures are required from here on. Latches True at the
         #: first entry at/after `signed_from_seq` (and from the start when no
         #: start point was given): see the docstring for why it never unlatches.
         must_sign = public_key is not None and signed_from_seq is None
+
+        def _fail(where: str, what: str) -> VerifyResult:
+            return VerifyResult(
+                False, count, f"{where}: {what}", anchor, verified, withheld, unrecorded
+            )
+
         for path in files:
             with path.open("rb") as fh:
                 for lineno, raw in enumerate(fh, start=1):
@@ -216,21 +288,24 @@ class HashChainWriter:
                         entry = json.loads(raw)
                     except json.JSONDecodeError as exc:
                         return VerifyResult(False, count, f"{where}: unparseable: {exc}", anchor)
-                    signature = entry.pop("sig", None)
-                    key_id = entry.pop("key_id", None)
-                    claimed = entry.pop("hash", None)
+                    signature = entry.get("sig")
+                    key_id = entry.get("key_id")
+                    claimed = entry.get("hash")
                     if prev is None:
                         # First retained entry is the trust anchor (GENESIS unless
                         # retention pruning removed older day-files).
                         anchor = prev = entry.get("prev_hash")
                     if entry.get("prev_hash") != prev:
-                        return VerifyResult(
-                            False, count, f"{where}: chain break (prev_hash)", anchor
-                        )
-                    if sha256_hex(canonical_bytes(entry, strict=False)) != claimed:
-                        return VerifyResult(
-                            False, count, f"{where}: hash mismatch (tampered)", anchor
-                        )
+                        return _fail(where, "chain break (prev_hash)")
+                    body = _detach.hashable_body(entry)
+                    if sha256_hex(canonical_bytes(body, strict=False)) != claimed:
+                        return _fail(where, "hash mismatch (tampered)")
+                    checked = _detach.check(entry)
+                    if not checked.ok:
+                        return _fail(where, f"detached content: {checked.problem}")
+                    verified += checked.present
+                    withheld += checked.withheld
+                    unrecorded += checked.unrecorded
                     if public_key is not None and not must_sign:
                         seq = entry.get("seq")
                         # An entry with no usable seq cannot be shown to sit
@@ -243,11 +318,9 @@ class HashChainWriter:
 
                         assert public_key is not None
                         if signature is None:
-                            return VerifyResult(False, count, f"{where}: entry is unsigned", anchor)
+                            return _fail(where, "entry is unsigned")
                         if not verify_bytes(public_key, signature, claimed.encode("ascii")):
-                            return VerifyResult(
-                                False, count, f"{where}: bad signature (key_id={key_id})", anchor
-                            )
+                            return _fail(where, f"bad signature (key_id={key_id})")
                     prev = claimed
                     count += 1
         if signed_from_seq is not None and not must_sign:
@@ -258,8 +331,11 @@ class HashChainWriter:
                 "after it: the signed tail is missing, which would leave the unsigned "
                 "history before it rewritable",
                 anchor,
+                verified,
+                withheld,
+                unrecorded,
             )
-        return VerifyResult(True, count, None, anchor)
+        return VerifyResult(True, count, None, anchor, verified, withheld, unrecorded)
 
     # --- internals ---
 
@@ -343,8 +419,17 @@ class HashChainWriter:
             self._open_for_today()
 
 
+#: The content-bearing fields of an engine decision entry: what the agent asked
+#: to do with, and the free-form context its integration attached. Everything
+#: else in the entry (tool, verb, resource, principal, verdict, rule) is the
+#: skeleton an auditor needs to read the log at all, and stays hashed directly.
+DECISION_PAYLOADS = ("payload.action.params", "payload.action.context.extra")
+
+
 class AuditChain:
-    def __init__(self, audit_dir: str | Path, *, signer: Any = None) -> None:
+    def __init__(
+        self, audit_dir: str | Path, *, signer: Any = None, record_payloads: bool = True
+    ) -> None:
         """`signer` upgrades the chain from tamper-*evident* to
         tamper-evident-and-*attributable*.
 
@@ -353,9 +438,16 @@ class AuditChain:
         recomputes and `verify()` is perfectly happy. With it, that rewrite also
         needs the private key. Still not a defence against a compromised *live*
         writer (it holds the key), which is what external anchoring is for.
+
+        `record_payloads=False` keeps a digest of each action's `params` and
+        `context.extra` but not the values (see `HashChainWriter`). Off by
+        default; nothing that only wants a smaller *export* should use it —
+        that is what `detach.redact` and a digests-only evidence pack are for.
         """
         self._dir = Path(audit_dir)
-        self._writer = HashChainWriter(audit_dir, strict=True, signer=signer)
+        self._writer = HashChainWriter(
+            audit_dir, strict=True, signer=signer, record_payloads=record_payloads
+        )
         self._seq = 0
 
     # --- lifecycle ---
@@ -402,8 +494,12 @@ class AuditChain:
 
     # --- writers ---
 
-    def append(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Append one chained entry. Returns the entry as written (with hash)."""
+    def append(
+        self, kind: str, payload: dict[str, Any], *, detach: Iterable[str] = ()
+    ) -> dict[str, Any]:
+        """Append one chained entry. Returns the entry as written (with hash).
+
+        `detach` paths are relative to the entry (`payload.action.params`)."""
         self._seq += 1
         try:
             return self._writer.append(
@@ -412,7 +508,8 @@ class AuditChain:
                     "seq": self._seq,
                     "ts": datetime.now(UTC).isoformat(timespec="microseconds"),
                     "payload": payload,
-                }
+                },
+                detach=detach,
             )
         except Exception:
             self._seq -= 1  # nothing was written; keep seq contiguous
@@ -427,8 +524,17 @@ class AuditChain:
     ) -> dict[str, Any]:
         """The standard record: what was attempted, what was decided, and why.
 
-        The digest always covers the full action; the stored copy is shaped by
-        the rule's audit_level (see redaction.py).
+        The action is stored **raw**: its `params` and `context.extra` are
+        detached (detach.py) — committed to by salted digest inside the hashed
+        body, with the values inline beside them. The rule's `audit_level` is
+        still recorded, but it no longer shapes what is written: it is the
+        default *view* (what a reader shows) and the default *export* level.
+        Shaping at write time made the record itself lossy — `minimal` kept no
+        parameters at all, so neither an investigation nor a replay could ever
+        see what the agent asked for — and gained nothing an export cannot do
+        without touching the chain. `redacted` is therefore always false on new
+        entries; it stays in the shape because entries written before this
+        carry `true` where their stored copy was scrubbed, and replay reads it.
 
         `counters` values are stored as **strings**, like every other number
         that crosses this boundary: canonical bytes refuse floats, because a
@@ -437,24 +543,23 @@ class AuditChain:
 
         `counters` is what this action added to each cumulative total (UAI-147),
         written down rather than left to be recomputed. Recomputing it would
-        mean re-reading `params` from the *stored* action, which redaction may
-        have removed -- so a payments policy that redacts amounts would rebuild
-        a budget of zero from a chain that recorded every spend correctly. It is
-        also the honest record: the entry says what this action cost.
+        mean re-reading `params` from the *stored* action, which may not be
+        there -- withheld from an export, never recorded (`record_payloads`),
+        or scrubbed by a pre-detach `minimal` rule -- so a payments policy
+        would rebuild a budget of zero from a chain that recorded every spend
+        correctly. It is also the honest record: the entry says what this
+        action cost.
         """
-        from .redaction import capture_action
-
-        stored, redacted = capture_action(action.model_dump(mode="json"), decision.audit_level)
         return self.append(
             "decision",
             {
                 "action_digest": action.digest(),
-                "action": stored,
+                "action": action.model_dump(mode="json"),
                 "verdict": decision.verdict.value,
                 "rule_id": decision.rule_id,
                 "source": decision.source,
                 "audit_level": decision.audit_level,
-                "redacted": redacted,
+                "redacted": False,
                 "reason": decision.reason,
                 "elapsed_us": int(decision.elapsed_ms * 1000),
                 # Omitted for structural verdicts, which no policy made.
@@ -472,6 +577,7 @@ class AuditChain:
                 # key every reader has to learn to ignore.
                 **({"context": decision.context} if decision.context else {}),
             },
+            detach=DECISION_PAYLOADS,
         )
 
     def append_approval(self, recorded: Any) -> dict[str, Any]:
@@ -483,6 +589,12 @@ class AuditChain:
         and the chain is append-only anyway, so the earlier entry stands.
 
         `action_digest` is the join back to the decision entry.
+
+        Nothing here is detached. The one field that can echo the action's
+        content is `scope` (an `*_always` persistence filter), and it is part
+        of what the control plane signed: an export that withheld it could no
+        longer have its approval signature checked, which is the point of
+        exporting an approval at all.
         """
         return self.append("approval", asdict(recorded))
 

@@ -491,3 +491,91 @@ def test_plain_decision_has_no_context_key(tmp_path) -> None:
     chain.start()
     entry = chain.append_decision(action, engine.decide(action))
     assert "context" not in entry["payload"]
+
+
+@pytest.mark.parametrize("effect", ["deny", "defer"])
+def test_an_attestation_floor_never_widens_a_rules_minimal(effect: str) -> None:
+    """The floor's own `audit_level` is about the identity check, not the
+    data. A `minimal` rule over the same action stays `minimal` -- otherwise
+    the action a floor stopped, the suspicious one, is the one whose arguments
+    are shipped (payload evidence) and shown in full (audit views)."""
+    from unified_enforce import AuditChain, Enforcer
+
+    engine = PolicyEngine.from_dict(
+        {
+            "version": 1,
+            "attestation_floors": [
+                {
+                    "id": "hr-needs-derived",
+                    "match": {"tool": "mcp://hr/*"},
+                    "minimum": "derived",
+                    "effect": effect,
+                }
+            ],
+            "rules": [
+                {
+                    "id": "hr-records-sensitive",
+                    "match": {"tool": "mcp://hr/*"},
+                    "effect": "allow",
+                    "audit_level": "minimal",
+                },
+                {"id": "detailed-elsewhere", "match": {"tool": "mcp://ops/*"}, "effect": "allow",
+                 "audit_level": "full"},
+            ],
+        }
+    )  # fmt: skip
+
+    def act(tool: str, grade: str) -> Action:
+        return Action.build(
+            principal=Principal(id="agent:x", attestation=grade),
+            tool=tool,
+            verb="call",
+            resource="*",
+            params={"ssn": "123-45-6789"},
+        )
+
+    weak = engine.decide(act("mcp://hr/get", "assigned"))
+    assert weak.source == "attestation_floor" and weak.verdict.value == effect
+    assert weak.audit_level == "minimal"
+    assert engine.decide(act("mcp://hr/get", "derived")).audit_level == "minimal"
+
+    # Through an Enforcer with an evidence sink: nothing offered for shipping.
+    offered: list[str] = []
+
+    class Sink:
+        def record(self, action, decision, entry=None):
+            return True
+
+        def record_payload(self, entry, path):
+            offered.append(path)
+
+    import tempfile
+
+    chain = AuditChain(tempfile.mkdtemp())
+    chain.start()
+    try:
+        Enforcer(engine, chain=chain, evidence=Sink()).enforce(act("mcp://hr/get", "assigned"))
+    finally:
+        chain.stop()
+    assert offered == []
+
+
+def test_a_floor_keeps_its_own_level_when_it_is_the_stricter() -> None:
+    engine = PolicyEngine.from_dict(
+        {
+            "version": 1,
+            "attestation_floors": [
+                {"id": "f", "match": {}, "minimum": "derived", "audit_level": "minimal"}
+            ],
+            "rules": [{"id": "r", "match": {}, "effect": "allow", "audit_level": "full"}],
+        }
+    )
+    d = engine.decide(
+        Action.build(
+            principal=Principal(id="agent:x", attestation="assigned"),
+            tool="mcp://a/b",
+            verb="call",
+            resource="*",
+        )
+    )
+    assert d.source == "attestation_floor" and d.audit_level == "minimal"

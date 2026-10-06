@@ -45,6 +45,13 @@ floor can only make an outcome stricter, never turn a refusal into something a
 human can approve. An empty `attestation_floors` is omitted from the document's
 serialisation, so policies that do not use it keep their `policy_digest`.
 
+A decision an attestation floor settles carries the **most restrictive**
+`audit_level` of the floor and of the rule ①–③ that matched the same action
+(evaluated even when a `deny` floor has already decided): `minimal` <
+`standard` < `detailed` < `full`. The floor's level describes the identity
+check, not the data, so it never widens a rule's `minimal` — which governs
+payload shipping (payload-evidence.v1) and the default audit view.
+
 ## Intentional divergences from the hub (all stricter / fail-closed)
 
 - **Unknown operator** — hub: operator evaluates False at runtime (rule can

@@ -560,9 +560,13 @@ class PolicyEngine:
         # one got DENY. So it waits, and replaces only an allow (or a defer, to
         # carry the identity reason and its context).
         floor = self._attestation_check(action)
-        if floor is not None and floor.verdict is Verdict.DENY:
-            return done(floor)
 
+        # The rule tiers run even when a `deny` floor has already settled the
+        # verdict: the rule that matched still says how sensitive this traffic
+        # is. A floor's `audit_level` describes the identity check, not the
+        # data, and letting it replace a rule's `minimal` made the one action
+        # an attestation floor stopped -- the suspicious one -- the one whose
+        # arguments were shipped and shown in full.
         ruled: Decision | None = None
         for tier, source in (
             (self._exact, "exact"),
@@ -572,9 +576,13 @@ class PolicyEngine:
             ruled = scan(tier, source)
             if ruled is not None:
                 break
+
+        if floor is not None and ruled is not None:
+            floor.audit_level = _most_restrictive(floor.audit_level, ruled.audit_level)
+        if floor is not None and floor.verdict is Verdict.DENY:
+            return done(floor)
         if ruled is None:
             ruled = Decision(Verdict.DENY, None, "default", "standard", "no rule matched")
-
         if floor is not None and ruled.verdict is not Verdict.DENY:
             return done(floor)
         return done(ruled)
@@ -683,6 +691,24 @@ class PolicyEngine:
                 continue
             out[compiled.id] = out.get(compiled.id, 0.0) + value
         return out
+
+
+#: Audit levels, least disclosing first. "Most restrictive" is the earlier.
+_AUDIT_LEVELS = ("minimal", "standard", "detailed", "full")
+
+
+def _most_restrictive(a: str, b: str) -> str:
+    """The audit level that discloses less, of two.
+
+    Used where two parts of a policy both speak to one decision (an
+    attestation floor and the rule that matched): neither may widen what the
+    other said is safe to ship or show. An unknown level ranks as most
+    restrictive -- an unrecognised word is not permission."""
+
+    def rank(level: str) -> int:
+        return _AUDIT_LEVELS.index(level) if level in _AUDIT_LEVELS else -1
+
+    return a if rank(a) <= rank(b) else b
 
 
 def policy_digest(doc: PolicyDoc) -> str:

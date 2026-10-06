@@ -1,0 +1,31 @@
+packages/unified-enforce/src/unified_enforce/audit.py
+  s_57443f001e84f6::t_afa9158296847e 102-122
+packages/unified-mcphub/tests/unit/test_fleet_join.py
+  s_57443f001e84f6::t_03e697fa7d48eb 1-191
+packages/unified-mcphub/src/unified_mcphub/signing.py
+  s_57443f001e84f6::t_8a288182dba68f 1-134
+packages/unified-enforce/src/unified_enforce/evidence.py
+  s_57443f001e84f6::t_e44327b8cd143a 261-275
+packages/unified-mcphub/src/unified_mcphub/fleet_join.py
+  s_57443f001e84f6::t_460dd9101b90a7 1-18,25-170,173-178,180-181,183-254,256,258-260,265-275
+packages/unified-mcphub/tests/unit/test_hub_signing.py
+  s_57443f001e84f6::t_faf33bb36e2813 1-211
+packages/unified-mcphub/tests/unit/test_console_approvals.py
+  s_57443f001e84f6::t_855c69aff75c19 1-36,38-451
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "91cf0cc23315a87e1ea7a8292b74bd249d879c34",
+  "prompts": {},
+  "sessions": {
+    "s_57443f001e84f6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "870a3f2c-bcad-432a-ac61-8f82694fa6d9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

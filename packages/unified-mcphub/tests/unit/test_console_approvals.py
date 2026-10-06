@@ -235,6 +235,7 @@ def test_bind_builds_the_engine_client_with_the_fleets_keys_and_timeout():
         "fleet_id": "acme",
         "keys": keys,
         "deadline_seconds": 42,
+        "share_params": True,
     }
 
 
@@ -449,3 +450,64 @@ async def test_a_rewritten_approver_denies(monkeypatch):
     outcome = await _resolve(_signed_channel(monkeypatch, forge=True))
     assert not outcome.allowed and outcome.reason == "approval_channel_error"
     assert outcome.approver is None and outcome.attestation is None
+
+
+@pytest.mark.parametrize(
+    ("url", "usable"),
+    [
+        ("https://cp.example", True),
+        ("http://127.0.0.1:8443", True),
+        ("http://cp.example", False),
+    ],
+)
+async def test_console_approvals_need_https_or_loopback(url, usable):
+    """A queued approval carries the call's arguments to the approver, so it
+    follows the payload stream's transport rule: https, or loopback http. A
+    plain-http console is refused -- every prompt denies -- never downgraded."""
+    cfg = ControlPlaneConfig(url=url, fleet_id="acme", root_public_key="k")
+    channel = ConsoleApprovals(cfg, lambda: {}, factory=lambda *a, **k: FakeRemote())
+    channel.bind("uc_cred")
+    assert channel.bound is usable
+    approval = Approval(enabled=True, channel=None, console=channel)
+    outcome = await approval.resolve("mcp://filesystem/read_file", "crew-1", "s", {"path": "x"})
+    assert outcome.allowed is usable
+    if not usable:
+        assert channel.disabled == "insecure_transport"
+        assert "not https" in (outcome.decision.reason or "")
+
+
+def test_payloads_off_withholds_arguments_from_approvers():
+    built: dict[str, Any] = {}
+
+    def factory(url, credential, **kwargs):
+        built.update(kwargs)
+        return FakeRemote()
+
+    cfg = ControlPlaneConfig(
+        url="https://cp.example", fleet_id="acme", root_public_key="k", payloads="off"
+    )
+    ConsoleApprovals(cfg, lambda: {}, factory=factory).bind("uc_cred")
+    assert built["share_params"] is False
+
+
+async def test_a_console_timeout_is_recorded_as_a_timeout(hub_home, plane):
+    """Console mode relies on RemoteApprovals' own deadline; it used to
+    surface as `approval_error`. It is `approval_timeout` now, end to end."""
+    import asyncio as _asyncio
+
+    from unified_enforce.remote_approvals import ApprovalTimeout
+
+    class Silent:
+        async def ask(self, request):
+            await _asyncio.sleep(0)
+            raise ApprovalTimeout("no answer within 0s")
+
+    cfg = ControlPlaneConfig(url="https://cp.example", fleet_id="acme", root_public_key="k")
+    channel = ConsoleApprovals(cfg, lambda: {}, factory=lambda *a, **k: Silent())
+    channel.bind("uc_cred")
+    outcome = await Approval(enabled=True, channel=None, console=channel).resolve(
+        "mcp://filesystem/read_file", "crew-1", "s", {"path": "x"}
+    )
+    assert not outcome.allowed
+    assert outcome.decision.source == "approval_timeout"
+    assert outcome.reason == "approval_timed_out"

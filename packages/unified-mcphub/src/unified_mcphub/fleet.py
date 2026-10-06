@@ -168,9 +168,28 @@ class ConsoleApprovals:
         self._keys = keys
         self._factory = factory
         self._remote: Any = None
+        #: Why console approvals cannot run at all, when they cannot. Reported
+        #: by `ask` (a deny) and by `FleetLink.status()`.
+        self.disabled: str | None = None
+        if not payload_transport_ok(cfg.url):
+            # A queued approval carries the action's arguments (unless the
+            # rule is `minimal` or payloads are off) -- the customer's
+            # content, which the request proof does nothing to keep
+            # confidential. Same rule as payload evidence: https, or plain
+            # http to this machine only. Refused, not downgraded: every
+            # prompt denies, and the log says why once.
+            self.disabled = "insecure_transport"
+            logger.error(
+                "control plane %s does not use https; console approvals are disabled and every "
+                "prompt will be denied (approvals send arguments to approvers). Use https, "
+                "or `control_plane.approvals: terminal`.",
+                cfg.url,
+            )
 
     def bind(self, credential: str) -> None:
         assert self._cfg.url is not None and self._cfg.fleet_id is not None
+        if self.disabled is not None:
+            return
         self._remote = self._factory(
             self._cfg.url,
             credential,
@@ -180,6 +199,10 @@ class ConsoleApprovals:
             # with `asyncio.sleep` and checks the deadline between polls, so
             # the whole wait is one bounded loop with a single reason to end.
             deadline_seconds=self._cfg.approval_timeout_seconds,
+            # `payloads: off` means no content leaves this hub: the approver
+            # sees the tool, rule and reason, not the arguments. A `minimal`
+            # rule withholds them in any mode (RemoteApprovals._queue).
+            share_params=self._cfg.payloads != "off",
         )
 
     @property
@@ -187,6 +210,10 @@ class ConsoleApprovals:
         return self._remote is not None
 
     async def ask(self, request: Any) -> Any:
+        if self.disabled is not None:
+            raise ApprovalTransportError(
+                f"console approvals disabled ({self.disabled}): the control plane URL is not https"
+            )
         if self._remote is None:
             raise ApprovalTransportError(
                 "control plane credential not yet bound; console approvals unavailable"
@@ -323,6 +350,11 @@ class FleetLink:
             "evidence_signed": self.evidence is not None and self.evidence.signer is not None,
             "payloads": self._payload_status(),
             "approvals": self.config.approvals,
+            **(
+                {"approvals_disabled": self.approvals.disabled}
+                if self.approvals is not None and self.approvals.disabled
+                else {}
+            ),
         }
 
     def _payload_status(self) -> dict[str, Any]:

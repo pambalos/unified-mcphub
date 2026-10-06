@@ -257,8 +257,10 @@ class Approvals:
                 response = await self.channel.ask(request)
             else:
                 response = await asyncio.wait_for(self.channel.ask(request), self._timeout_s)
-        except asyncio.TimeoutError:
-            # Nobody answered. Silence is not consent.
+        except (asyncio.TimeoutError, TimeoutError):
+            # Nobody answered -- whether `timeout_s` expired here or the
+            # channel enforced its own deadline (a polling channel must, and
+            # raises a TimeoutError). Silence is not consent.
             return done(
                 ApprovalOutcome(
                     decision=_resolved(

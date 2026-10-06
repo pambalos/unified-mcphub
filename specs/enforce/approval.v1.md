@@ -98,6 +98,35 @@ persisted: whole-tool trust is curated policy (ADR-0025), and a remote click
 must not accrete it into the hub's `.local.yaml`. `approvals: terminal` keeps
 the local channels exactly as before.
 
+**What a queued approval shows the approver** (`RemoteApprovals._queue`). The
+control plane keys the queue on `action_digest` and the decision key signs that
+digest; it does not recompute the digest from the posted action, and the
+reporter verifies the signed resolution against the digest *it* computed. So
+the posted action is for display, and content can be withheld from it without
+weakening the binding:
+
+- `context.extra` is never sent (integration bookkeeping, not what the agent
+  asked to do — payload evidence excludes it for the same reason).
+- `params` are withheld, and the `summary` replaced with
+  `<tool> (arguments withheld: <reason>)`, when the deferring rule is
+  `audit_level: minimal` (`audit_level_minimal`) or the deployment said no
+  content leaves (`share_params=False`; the hub's `control_plane.payloads:
+  off` → `payloads_off`). The body then carries `params_withheld: <reason>`.
+  The approver decides on the tool, principal, rule and reason, and is told
+  the arguments were withheld. Otherwise approvers *do* see the arguments —
+  deciding whether `rm -rf build/` may run needs the command — so a console
+  approval is a copy of that content to the control plane, and follows the
+  payload stream's transport rule: a hub refuses console approvals to a
+  control plane that is not `https://` (loopback `http://` excepted), denying
+  every prompt and reporting `fleet.approvals_disabled: insecure_transport`.
+- The body also carries `deadline_seconds` (how long the reporter will wait, so
+  the control plane can expire the item) and `decision.policy_digest`. Both are
+  optional; an older control plane ignores them.
+
+A deadline that passes with no answer raises `ApprovalTimeout` (a
+`TimeoutError`) and is recorded as `approval_timeout` / `approval_timed_out`,
+not as a channel error.
+
 **SDK** — `check_async()` and the async `@action` decorator route DEFER through
 approvals. `check()` stays synchronous and never blocks: asking a person is a
 fundamentally different operation from evaluating policy, and code on a request

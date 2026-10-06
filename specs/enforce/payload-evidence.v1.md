@@ -107,6 +107,13 @@ The receipt of `POST /api/v1/evidence` gains `payloads` (`"accept"` or
   payloads, neither arguments nor result. The chain still records the content
   (detach.py); `minimal` is the default view and export, and this copy is an
   export.
+- **Approvals are a separate copy.** A console approval request shows the
+  approver the action's arguments, governed by approval.v1 §5 rather than by
+  this stream's gate: never `context.extra`; no arguments for a `minimal` rule
+  or a hub with `control_plane.payloads: off`; and only over https (loopback
+  http excepted). The decision binding is unaffected — the control plane keys
+  and signs on `action_digest`, which the reporter computed over the full
+  action.
 - **Only beside a row.** Payloads are offered only for a decision row that was
   actually queued, under the same `action_digest` (a hub: the lenient digest
   its `received` entry records). Findings (`count=False` records) ship none.

@@ -246,3 +246,33 @@ def test_payload_digest_matches_detach():
     salt, digest = entry["salts"]["args"], entry["detached"]["args"]
     assert attest.payload_content_digest(salt, entry["args"]) == digest
     assert base64.b64decode(salt)
+
+
+@pytest.mark.parametrize("original,moved,forged", [(123, b"1", 23), (-500, b"-", 500)])
+def test_bytes_moved_from_a_value_into_its_salt_fail_check(original, moved, forged):
+    """The digest has no framing between salt and content; only the salt's
+    length fixes the boundary. Without the length check this edited value
+    "matched" the signed digest."""
+    e = detach.detach({"n": original}, ["n"])
+    raw = base64.b64decode(e["salts"]["n"])
+    forged_entry = {
+        **e,
+        "n": forged,
+        "salts": {"n": base64.b64encode(raw + moved).decode()},
+    }
+    assert detach.digest(raw + moved, forged) == e["detached"]["n"], "the attack is real"
+
+    checked = detach.check(forged_entry)
+
+    assert not checked.ok
+    assert "salt is 17 bytes" in (checked.problem or "")
+    assert detach.check(e).ok
+
+
+def test_detach_writes_salts_of_exactly_salt_bytes():
+    e = detach.detach({"a": 1, "b": {"c": [1.5]}}, ["a", "b"])
+    assert (
+        {len(base64.b64decode(s, validate=True)) for s in e["salts"].values()}
+        == {detach.SALT_BYTES}
+        == {16}
+    )

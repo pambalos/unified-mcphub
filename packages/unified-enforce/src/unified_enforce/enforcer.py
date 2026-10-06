@@ -14,6 +14,8 @@ which is a different kind of operation entirely — hence the separate
 
 from __future__ import annotations
 
+import logging
+
 from .action import Action
 from .approval import ApprovalOutcome, ApprovalRequest, Approvals, RecordedApproval
 from .audit import AuditChain
@@ -23,6 +25,8 @@ from .evidence import EvidenceShipper
 from .shadow import ShadowEvaluator
 from .policy import Decision, PolicyEngine, Verdict
 from .telemetry import Telemetry
+
+log = logging.getLogger("unified_enforce.enforcer")
 
 
 class Enforcer:
@@ -144,7 +148,7 @@ class Enforcer:
         # be corroborated against the evidence it claims to summarise -- and
         # the dashboard is the copy, not the record.
         if self._evidence is not None and audit_error is None:
-            self._evidence.record(action, decision, entry=entry)
+            queued = self._evidence.record(action, decision, entry=entry)
             # The arguments, for a control plane that has asked for them
             # (payload-evidence.v1; the shipper holds the gate and does
             # nothing without a payload stream). From the entry as written, so
@@ -157,12 +161,35 @@ class Enforcer:
             # control plane's access rules were written for, so it stays in
             # the chain only.
             #
+            # Not at all when:
+            # - the decision row was not queued (`record` returned anything
+            #   but True): a payload hangs off its row, and one with no row is
+            #   a value the console cannot place;
+            # - this is a finding (`count=False`): it describes an action
+            #   already decided, and its `params` are an empty placeholder --
+            #   shipping them is a signed, encrypted, stored `{}` per finding;
+            # - the deciding rule says `audit_level: minimal`: the customer
+            #   marked this traffic sensitive. The chain still records the
+            #   content raw (detach.py); `minimal` is the default view and
+            #   export, and a copy to another system is an export.
+            #
             # Looked up rather than called: anything that only implements
             # `record` (a test double, an older custom shipper) is still a
-            # valid evidence sink, and must not start failing decisions.
+            # valid evidence sink. And guarded: a custom shipper's
+            # `record_payload` that raises must not fail a decision that is
+            # already made and chained.
             ship_payload = getattr(self._evidence, "record_payload", None)
-            if entry is not None and ship_payload is not None:
-                ship_payload(entry, "payload.action.params")
+            if (
+                queued is True
+                and count
+                and entry is not None
+                and ship_payload is not None
+                and decision.audit_level != "minimal"
+            ):
+                try:
+                    ship_payload(entry, "payload.action.params")
+                except Exception:
+                    log.exception("payload evidence raised; the decision is unaffected")
 
         # Last, and after the decision is final. A candidate policy exists to
         # be measured, not consulted: evaluating it before this point would put

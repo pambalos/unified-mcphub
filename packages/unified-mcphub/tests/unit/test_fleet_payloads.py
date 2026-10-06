@@ -72,13 +72,23 @@ def keys():
     return Key(), Key()
 
 
-def _hub(hub_home, plane: PayloadPlane, root: Key, *, extra: str = "") -> Hub:
+def _hub(
+    hub_home, plane: PayloadPlane, root: Key, *, extra: str = "", audit_level: str | None = None
+) -> Hub:
     """`test_fleet._joined_hub`, with config lines added first.
 
     `extra` is YAML appended to config.yaml after the control_plane block,
     which `_permissive` writes last -- so an indented line lands inside it.
+    `audit_level` is set on the workspace's one (allow-all) rule.
     """
     _permissive(hub_home, control_plane=True)
+    if audit_level is not None:
+        ws = hub_home / "workspaces" / "default.yaml"
+        ws.write_text(
+            ws.read_text().replace(
+                "effect: allow\n", f"effect: allow\n      audit_level: {audit_level}\n"
+            )
+        )
     cfg = hub_home / "config.yaml"
     cfg.write_text(cfg.read_text() + extra)
     config = load_config()
@@ -96,12 +106,17 @@ def _hub(hub_home, plane: PayloadPlane, root: Key, *, extra: str = "") -> Hub:
         FleetLink.__init__ = original  # type: ignore[method-assign]
 
 
-async def _call(hub: Hub, caller: str = "crew-1", req_id: int = 1) -> dict:
+async def _call(
+    hub: Hub, caller: str = "crew-1", req_id: int = 1, arguments: dict | None = None
+) -> dict:
     async def forward(*a):
         return RESULT
 
     hub._forward = forward  # type: ignore[method-assign]
-    return await hub._handle_call(_message(caller, req_id), caller)
+    message = _message(caller, req_id)
+    if arguments is not None:
+        message["params"]["arguments"] = arguments
+    return await hub._handle_call(message, caller)
 
 
 def _ship(hub: Hub) -> None:
@@ -335,3 +350,154 @@ def test_the_real_transport_carries_a_payload_sink(hub_home):
     link = FleetLink(config.hub.control_plane)
     assert link.payloads is not None
     assert link.evidence is not None and link.evidence.payloads is link.payloads
+
+
+# --- the decision row and its payloads agree --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_float_argument_ships_its_row_and_payloads_under_one_digest(hub_home, keys):
+    """The hub records `action.digest(strict=False)`, because MCP arguments may
+    hold floats. The decision summary used the strict digest, which raises on
+    a float: the row was silently lost, and the payloads -- offered anyway --
+    pointed at an action digest no row carried."""
+    root, policy_key = keys
+    plane = PayloadPlane(root, policy_key)
+    hub = _hub(hub_home, plane, root)
+    signer = Signer.generate("hub")
+    public = attest.b64u(signer.public_bytes())
+    hub.audit.start()
+    try:
+        assert hub.fleet is not None and hub.fleet.evidence is not None
+        hub.fleet.evidence.signer = signer
+        hub.fleet.distribution.refresh(now=NOW)
+
+        body = await _call(hub, arguments={"path": "x", "temp": 0.7})
+        assert "result" in body
+        _ship(hub)
+
+        (received,) = audit_reader.search(audit_dir(), phase="received")
+        (decision,) = plane.evidence
+        assert decision["action_digest"] == received["action_digest"]
+        assert decision["chain_hash"] == received["hash"]
+        assert {r["path"] for r in plane.payload_records} == {"args", "result"}
+        for record in plane.payload_records:
+            assert record["action_digest"] == decision["action_digest"]
+            assert attest.accept_payload_evidence(record, public)
+        (args,) = [r for r in plane.payload_records if r["path"] == "args"]
+        assert args["value"] == {"path": "x", "temp": 0.7}
+    finally:
+        hub.audit.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_decision_that_fails_to_record_ships_no_payloads(hub_home, keys, monkeypatch):
+    import unified_enforce.evidence as evidence_mod
+
+    def broken(*a, **k):
+        raise RuntimeError("summary bug")
+
+    root, policy_key = keys
+    plane = PayloadPlane(root, policy_key)
+    hub = _hub(hub_home, plane, root)
+    hub.audit.start()
+    try:
+        assert hub.fleet is not None and hub.fleet.evidence is not None
+        hub.fleet.evidence.signer = Signer.generate("hub")
+        hub.fleet.distribution.refresh(now=NOW)
+        monkeypatch.setattr(evidence_mod, "summarise", broken)
+
+        body = await _call(hub)
+        assert "result" in body, "the call is unaffected"
+        hub.fleet.evidence.submit({"probe": 1})  # a receipt to open the gate
+        _ship(hub)
+
+        assert hub.fleet.payloads is not None and hub.fleet.payloads.accepting
+        assert plane.payload_records == [], "payloads for a row that never left"
+    finally:
+        hub.audit.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_minimal_rule_ships_no_payloads(hub_home, keys):
+    """`audit_level: minimal` marks the traffic sensitive. The chain still
+    records it raw; no copy leaves. The decision row (metadata) still ships."""
+    root, policy_key = keys
+    plane = PayloadPlane(root, policy_key)
+    hub = _hub(hub_home, plane, root, audit_level="minimal")
+    hub.audit.start()
+    try:
+        assert hub.fleet is not None and hub.fleet.evidence is not None
+        hub.fleet.evidence.signer = Signer.generate("hub")
+        hub.fleet.distribution.refresh(now=NOW)
+
+        body = await _call(hub)
+        assert "result" in body
+        _ship(hub)
+
+        assert len(plane.evidence) == 1
+        assert plane.payload_records == []
+        (received,) = audit_reader.search(audit_dir(), phase="received")
+        assert received["audit_level"] == "minimal"
+    finally:
+        hub.audit.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_payload_shipper_that_raises_cannot_fail_a_call(hub_home, keys):
+    root, policy_key = keys
+    plane = PayloadPlane(root, policy_key)
+    hub = _hub(hub_home, plane, root)
+
+    class Hostile:
+        on_receipt = None
+
+        def record(self, *a, **k):
+            return True
+
+        def record_payload(self, *a, **k):
+            raise RuntimeError("custom shipper bug")
+
+    hub.authz._evidence = Hostile()  # noqa: SLF001
+    hub.audit.start()
+    try:
+        assert hub.fleet is not None
+        hub.fleet.distribution.refresh(now=NOW)
+        body = await _call(hub)
+        assert "result" in body and "rows: 3" in str(body["result"])
+    finally:
+        hub.audit.stop()
+
+
+# --- https only ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url,built",
+    [
+        ("https://cp.example", True),
+        ("http://cp.example", False),
+        ("http://127.0.0.1:8443", True),
+        ("http://localhost:8443", True),
+    ],
+)
+def test_payloads_need_an_https_control_plane(keys, url, built, caplog):
+    root, policy_key = keys
+    cfg = ControlPlaneConfig(url=url, fleet_id=FLEET, root_public_key=root.public)
+    with caplog.at_level("WARNING", logger="unified_mcphub.fleet"):
+        link = FleetLink(cfg, transport=PayloadPlane(root, policy_key))
+
+    assert (link.payloads is not None) is built
+    if not built:
+        assert link.status()["payloads"]["reason"] == "insecure_transport"
+        assert sum("not https" in r.message for r in caplog.records) == 1
+
+
+def test_the_real_transport_has_no_payload_sink_over_http():
+    from unified_mcphub.fleet import _BoundLater
+
+    cfg = ControlPlaneConfig(url="http://cp.example", fleet_id="a", root_public_key="k")
+    transport = _BoundLater(cfg)
+    transport.bind("uai_test")
+    with pytest.raises(ConnectionError):
+        transport.payloads.send([{"value": "secret"}])

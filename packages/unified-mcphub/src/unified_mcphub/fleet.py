@@ -45,6 +45,7 @@ from unified_enforce.evidence import (
     EvidenceShipper,
     HttpSink,
     PayloadShipper,
+    payload_transport_ok,
 )
 from unified_enforce.remote_approvals import ApprovalTransportError, RemoteApprovals
 
@@ -78,8 +79,18 @@ class _BoundLater:
         assert self._cfg.url is not None
         self._source = ControlPlaneSource(self._cfg.url, credential)
         self._sink = HttpSink(self._cfg.url, credential)
-        self._payload_sink = HttpSink(
-            self._cfg.url, credential, path=PAYLOADS_PATH, field=PAYLOADS_FIELD
+        # Never built for a plain-http control plane (FleetLink logs why), so
+        # even a stream wired by mistake would have nothing to send through.
+        self._payload_sink = (
+            HttpSink(
+                self._cfg.url,
+                credential,
+                path=PAYLOADS_PATH,
+                field=PAYLOADS_FIELD,
+                ensure_ascii=False,
+            )
+            if payload_transport_ok(self._cfg.url)
+            else None
         )
 
     @property
@@ -213,10 +224,25 @@ class FleetLink:
         # sends nothing until the control plane's receipt says it accepts.
         # Its sink is the transport's `payloads`; a transport without one (a
         # test double that predates payloads) simply gets no stream.
+        #
+        # And not built for a control plane reached over plain http (loopback
+        # excepted): decision rows are metadata, but this stream is the
+        # customer's content, and http would put it on the network in the
+        # clear. Said once, here, rather than per value.
         payload_sink = getattr(self._transport, "payloads", None)
+        #: Why there is no payload stream, when `auto` was asked for and none
+        #: was built. Reported by `status()`.
+        self.payloads_disabled: str | None = None
+        if cfg.ship_payloads and not payload_transport_ok(cfg.url):
+            self.payloads_disabled = "insecure_transport"
+            logger.warning(
+                "control plane %s is not https; payload evidence (arguments and results) "
+                "will not be shipped. Decision evidence is unaffected.",
+                cfg.url,
+            )
         self.payloads: PayloadShipper | None = (
             PayloadShipper(payload_sink, interval_seconds=cfg.evidence_interval_seconds)
-            if cfg.ship_payloads and payload_sink is not None
+            if cfg.ship_payloads and payload_sink is not None and self.payloads_disabled is None
             else None
         )
         self.evidence: EvidenceShipper | None = (
@@ -302,7 +328,10 @@ class FleetLink:
     def _payload_status(self) -> dict[str, Any]:
         """Where the payload stream stands, and every reason a value was not sent."""
         if self.payloads is None:
-            return {"configured": self.config.payloads, "mode": "off"}
+            status: dict[str, Any] = {"configured": self.config.payloads, "mode": "off"}
+            if self.payloads_disabled is not None:
+                status["reason"] = self.payloads_disabled
+            return status
         stats = self.payloads.payload_stats
         spool = self.payloads.spool.stats
         return {

@@ -281,6 +281,9 @@ class ControlPlaneConfig(BaseModel):
     #: default, a hosted one only if the fleet opted in -- and the hub sends
     #: nothing until it has said yes. Signed, built from the chain entry, and
     #: never for a value the chain did not record (`audit.record_payloads`).
+    #: Never for a call whose rule says `audit_level: minimal` -- that marks the
+    #: traffic sensitive, and this copy is an export -- and never to a control
+    #: plane whose `url` is not https (plain http to loopback excepted).
     #:
     #: `off`: never, whatever the control plane says. The local veto, for an
     #: operator whose data must not leave this machine even to their own

@@ -29,6 +29,7 @@ Tool URIs: mcp://<server>/<tool>, mcp://built-in/<tool>, sdk://..., agent://...
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -42,6 +43,8 @@ from unified_enforce.policy import PolicyDoc, PolicyEngine, Verdict
 from unified_enforce.policy import Rule as EngineRule
 
 from .config import DangerousCommands, DeploymentConfig, Rule, Workspace, mcphub_home
+
+logger = logging.getLogger(__name__)
 
 # Filesystem write tools that could edit/replace/remove a policy file, each paired
 # with the argument that carries their write target. Reads are intentionally left
@@ -278,7 +281,14 @@ class AuthzResolver:
         ):
             evidence.on_receipt = distribution.on_receipt
 
-    def ship(self, action: Action, decision: EngineDecision, entry: dict[str, Any] | None) -> None:
+    def ship(
+        self,
+        action: Action,
+        decision: EngineDecision,
+        entry: dict[str, Any] | None,
+        *,
+        action_digest: str | None = None,
+    ) -> bool:
         """Report one decision to the fleet, pointing at the hub entry that holds it.
 
         `decision` is what that entry records: the engine's verdict for a call
@@ -292,25 +302,53 @@ class AuthzResolver:
         mode the approval itself is a signed row of its own at the control
         plane, joined on the same digest.
 
-        No-op for a standalone hub. Cannot raise (`EvidenceShipper.record`).
-        """
-        if self._evidence is not None:
-            self._evidence.record(action, decision, entry=entry)
+        `action_digest` is the digest the cited entry recorded. For a call,
+        the hub records `action.digest(strict=False)` -- MCP arguments may
+        hold floats, which the strict digest refuses -- and the row must carry
+        that same digest: computed strictly, the summary raised, and every
+        call with a float argument silently lost its row (`summarise`).
 
-    def ship_payload(self, entry: dict[str, Any], path: str, *, action_digest: str | None) -> None:
+        Returns whether the row was queued, which is what `ship_payload`'s
+        callers gate on. False for a standalone hub. Cannot raise: guarded
+        here as well as in `EvidenceShipper.record`, because this runs on the
+        call path and the shipper is only ever a copy.
+        """
+        if self._evidence is None:
+            return False
+        try:
+            if action_digest is None:
+                queued = self._evidence.record(action, decision, entry=entry)
+            else:
+                queued = self._evidence.record(
+                    action, decision, entry=entry, action_digest=action_digest
+                )
+        except Exception:
+            logger.exception("could not record decision evidence; the call is unaffected")
+            return False
+        return queued is True
+
+    def ship_payload(
+        self, entry: dict[str, Any] | None, path: str, *, action_digest: str | None
+    ) -> None:
         """Offer a detached value from a hub entry to the fleet (payload-evidence.v1).
 
         `args` from a `received` entry, `result` from a `completed` one. The
-        shipper decides whether anything leaves: the control plane must have
-        accepted payloads, the hub must sign, and the entry must actually hold
-        the value (not `record_payloads: false`). No-op for a standalone hub
-        and for `control_plane.payloads: off`. Cannot raise.
+        caller offers one only for a call whose decision row `ship` queued
+        and whose rule is not `audit_level: minimal`. The shipper then decides
+        whether anything leaves: the control plane must have accepted
+        payloads, the hub must sign, and the entry must actually hold the
+        value (not `record_payloads: false`). No-op for a standalone hub and
+        for `control_plane.payloads: off`. Cannot raise.
         """
         # Looked up, as in `Enforcer.record`: an evidence sink that only
         # implements `record` is still valid, and must not start failing calls.
         ship = getattr(self._evidence, "record_payload", None)
-        if ship is not None:
+        if ship is None or entry is None:
+            return
+        try:
             ship(entry, path, action_digest=action_digest)
+        except Exception:
+            logger.exception("could not offer payload evidence; the call is unaffected")
 
     # --- structural records (build-14): refusals and findings the policy
     # --- engine never saw, landed in the chain and the evidence like verdicts

@@ -832,3 +832,110 @@ def test_a_malformed_salt_is_refused_not_raised():
     verdict = attest.accept_payload_evidence({**signed, "salt": "%%% not base64 %%%"}, public)
 
     assert not verdict
+
+
+# --- payload evidence: the salt fixes the boundary ---------------------------------
+#
+# sha256(salt || canonical(value)) has no framing between the two, so only the
+# salt's length says where it ends. Accept any length and bytes of a recorded
+# value can be moved into the salt with the digest still matching.
+
+
+def _shifted(record, moved: bytes, value):
+    import base64
+
+    raw = base64.b64decode(record["salt"])
+    return {**record, "salt": base64.b64encode(raw + moved).decode(), "value": value}
+
+
+@pytest.mark.parametrize("original,moved,forged", [(123, b"1", 23), (-500, b"-", 500)])
+def test_bytes_moved_from_a_value_into_its_salt_are_refused(original, moved, forged):
+    import base64
+
+    signer, public = _reporter()
+    signed = attest.sign_payload_evidence(_payload(value=original), signer)
+    attack = _shifted(signed, moved, forged)
+    # The attack is real: the digest still matches the forged pair.
+    raw = base64.b64decode(attack["salt"])
+    assert hashlib.sha256(raw + json.dumps(forged).encode()).hexdigest() == signed["digest"]
+
+    verdict = attest.accept_payload_evidence(attack, public)
+
+    assert not verdict
+    assert verdict.reason is attest.Reason.MALFORMED
+    assert "salt" in verdict.detail
+
+
+@pytest.mark.parametrize(
+    "salt",
+    [
+        "c2hvcnQ=",  # 5 bytes
+        "AAAAAAAAAAAAAAAAAAAAAAAA",  # 18 bytes
+        "AAAAAAAAAAAAAAAAAAAA AA==",  # 16 bytes once the lenient decoder skips the space
+    ],
+)
+def test_a_salt_that_is_not_exactly_16_strict_base64_bytes_is_refused(salt):
+    signer, public = _reporter()
+    signed = attest.sign_payload_evidence(_payload(), signer)
+    verdict = attest.accept_payload_evidence({**signed, "salt": salt}, public)
+    assert not verdict and verdict.reason is attest.Reason.MALFORMED
+
+
+def test_a_genuine_salt_is_16_bytes():
+    """What detach writes, and so what every existing chain carries: the length
+    check refuses nothing genuine."""
+    import base64
+
+    assert len(base64.b64decode(_payload()["salt"], validate=True)) == 16
+
+
+# --- payload evidence: never raises -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "record",
+    [None, [], "payload", 7, {"sig": 1}, {"sig": "x", "salt": None}],
+)
+def test_a_payload_that_is_not_a_record_is_refused_not_raised(record):
+    _, public = _reporter()
+    verdict = attest.accept_payload_evidence(record, public)  # type: ignore[arg-type]
+    assert not verdict and verdict.reason is attest.Reason.MALFORMED
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("chain_seq", "12"), ("chain_seq", None), ("chain_seq", True), ("size_bytes", "40")],
+)
+def test_a_signed_binding_with_a_non_integer_seq_or_size_is_refused(field, value):
+    """Signed as given -- the reporter's own signature verifies -- and still
+    refused: a receiver storing `chain_seq` into an integer column must not be
+    the one to discover it is a string."""
+    signer, public = _reporter()
+    signed = attest.sign_payload_evidence(_payload(**{field: value}), signer)
+
+    verdict = attest.accept_payload_evidence(signed, public)
+
+    assert not verdict and verdict.reason is attest.Reason.MALFORMED
+    assert "integer" in verdict.detail
+
+
+def test_a_signed_size_the_value_does_not_have_is_refused():
+    """Content matches its digest, signature verifies, but the size the console
+    would show -- and limits are judged by -- is false."""
+    signer, public = _reporter()
+    honest = _payload()
+    signed = attest.sign_payload_evidence(
+        {**honest, "size_bytes": honest["size_bytes"] + 1}, signer
+    )
+
+    verdict = attest.accept_payload_evidence(signed, public)
+
+    assert not verdict and verdict.reason is attest.Reason.MALFORMED
+    assert "size_bytes" in verdict.detail
+
+
+def test_a_garbage_public_key_is_refused_not_raised():
+    signer, _ = _reporter()
+    signed = attest.sign_payload_evidence(_payload(), signer)
+    for key in ("", "!!!", None, 5):
+        assert not attest.accept_payload_evidence(signed, key)  # type: ignore[arg-type]

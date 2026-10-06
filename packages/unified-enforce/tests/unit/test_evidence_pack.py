@@ -219,7 +219,13 @@ def world(tmp_path: Path) -> dict:
         keyset_path=keyset_file,
     )
     pack = build(out=tmp_path / "pack", **build_kwargs)
-    return {"pack": pack, "chain_dir": chain_dir, "build": build_kwargs, "tmp": tmp_path}
+    return {
+        "pack": pack,
+        "chain_dir": chain_dir,
+        "build": build_kwargs,
+        "tmp": tmp_path,
+        "signer": signer,
+    }
 
 
 def _failures(pack: Path) -> list[str]:
@@ -438,3 +444,35 @@ def test_a_salt_left_beside_a_withheld_value_fails(world):
 
     _tamper(pack, "chains/sidecar/chain.jsonl", leak_a_salt)
     assert any("salt present without its content" in f for f in _failures(pack))
+
+
+@pytest.mark.parametrize("original,moved,forged", [(123, b"1", 23), (-500, b"-", 500)])
+def test_bytes_moved_from_a_value_into_its_salt_fail_the_pack(world, original, moved, forged):
+    """The digest has no framing between salt and content, so a detached number
+    could be edited by moving its leading bytes into the salt -- `123` as
+    salt+"1" and `23` -- and still "match". The pack's verifier (detach.check)
+    pins the salt to 16 bytes, which pins the boundary."""
+    chain = AuditChain(world["chain_dir"], signer=world["signer"])
+    chain.start()
+    try:
+        chain.append("note", {"n": original}, detach=["payload.n"])
+    finally:
+        chain.stop()
+    pack = build(out=world["tmp"] / f"shifted{original}", **world["build"])
+    assert verify_pack(pack).ok, _failures(pack)  # genuine first: the attack is the edit
+
+    def shift(s: str) -> str:
+        lines = s.splitlines()
+        out = []
+        for line in lines:
+            e = json.loads(line)
+            if e.get("kind") == "note":
+                raw = base64.b64decode(e["salts"]["payload.n"])
+                e["payload"]["n"] = forged
+                e["salts"]["payload.n"] = base64.b64encode(raw + moved).decode()
+            out.append(json.dumps(e, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+        return "\n".join(out) + "\n"
+
+    _tamper(pack, "chains/sidecar/chain.jsonl", shift)
+
+    assert any("salt is 17 bytes" in f for f in _failures(pack)), _failures(pack)

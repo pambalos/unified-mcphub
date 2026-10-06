@@ -579,3 +579,42 @@ def test_a_floor_keeps_its_own_level_when_it_is_the_stricter() -> None:
         )
     )
     assert d.source == "attestation_floor" and d.audit_level == "minimal"
+
+
+def test_a_dropped_delegation_chain_survives_a_digests_only_export(tmp_path) -> None:
+    """The dropped-on_behalf_of signal is a security event, so it is recorded
+    in the decision's (non-detached) context as well as `context.extra`:
+    withholding payloads from an export -- which removes `extra` -- must not
+    remove the record that somebody tried to assert a chain."""
+    import json as _json
+
+    from unified_enforce import AuditChain, Enforcer
+    from unified_enforce import detach
+
+    engine = PolicyEngine.from_dict(
+        {"version": 1, "rules": [{"id": "allow-all", "match": {}, "effect": "allow"}]}
+    )
+    chain = AuditChain(tmp_path / "audit")
+    chain.start()
+    try:
+        core = ExtAuthzCore(enforcer=Enforcer(engine, chain=chain))
+        result = core.check(
+            CheckInput(
+                principal_id="agent:child",
+                method="POST",
+                path="/x",
+                host="h",
+                scheme="https",
+                headers={ON_BEHALF_OF_HEADER: '[{"id":"user:victim","attestation":"attested"}]'},
+            )
+        )
+    finally:
+        chain.stop()
+    assert result.decision.context["identity_assertion"] == "on_behalf_of header dropped"
+    (line,) = [
+        ln for f in (tmp_path / "audit").glob("*.jsonl") for ln in f.read_text().splitlines()
+    ]
+    exported = detach.redact(_json.loads(line))
+    assert "extra" not in exported["payload"]["action"]["context"], "extra is withheld"
+    assert exported["payload"]["context"]["identity_assertion"] == "on_behalf_of header dropped"
+    assert AuditChain.verify(tmp_path / "audit").ok

@@ -83,6 +83,13 @@ class ListenConfig(BaseModel):
 
 class AuditConfig(BaseModel):
     retention_days: int = 365
+    #: The secrets-store entry holding this hub's Ed25519 signing key (a
+    #: base64 32-byte seed). Present: every audit entry written after start is
+    #: signed, and so is every evidence record shipped to a fleet — one key,
+    #: because a reporter whose chain and evidence are attributable to
+    #: different keys is one more thing to reconcile in an investigation.
+    #: Absent: unsigned, exactly as before. `fleet join` generates it.
+    signing_key_secret_ref: str = "hub-signing-key"
 
 
 class ApprovalConfig(BaseModel):
@@ -217,6 +224,7 @@ class DeploymentConfig(BaseModel):
 
 
 _VALID_ON_STALE = {"keep", "defer", "deny"}
+_VALID_FLEET_APPROVALS = {"console", "terminal"}
 
 
 class ControlPlaneConfig(BaseModel):
@@ -252,10 +260,39 @@ class ControlPlaneConfig(BaseModel):
     #: Ship decision evidence to the control plane (what the Guardian reads).
     evidence: bool = True
     evidence_interval_seconds: float = 5.0
+    #: Where a `prompt` is answered once the hub is joined.
+    #:
+    #: `console` (default): the DEFER is queued at the control plane and an
+    #: authenticated approver answers it there; the hub accepts only a
+    #: resolution signed by the fleet's decision key and bound to this exact
+    #: action, and records the approver and the signature in its own chain.
+    #: This is what makes a joined hub's approvals *fleet* evidence — answered
+    #: at the hub's terminal, the control plane only ever saw an unresolved
+    #: deferral with nobody's name on it.
+    #:
+    #: `terminal`: today's behaviour — the hub's own keypress reader, or the
+    #: local control API when headless (`approval.remote`). For a joined hub
+    #: whose operator sits at it and wants it that way.
+    approvals: str = "console"
+    #: How long a console approval may stay unanswered before the call is
+    #: denied. Finite on purpose: silence is not consent, and an agent held on
+    #: a question nobody will answer should fail rather than hang.
+    approval_timeout_seconds: float = 300.0
 
     @property
     def enabled(self) -> bool:
         return bool(self.url)
+
+    @property
+    def console_approvals(self) -> bool:
+        return self.enabled and self.approvals == "console"
+
+    @field_validator("approvals")
+    @classmethod
+    def _check_approvals(cls, v: str) -> str:
+        if v not in _VALID_FLEET_APPROVALS:
+            raise ValueError(f"approvals must be one of {sorted(_VALID_FLEET_APPROVALS)}")
+        return v
 
     @field_validator("on_stale")
     @classmethod
@@ -277,6 +314,8 @@ class ControlPlaneConfig(BaseModel):
             # `EvidenceShipper` waits this long between flushes; zero is a
             # thread spinning at full tilt against the control plane.
             raise ValueError("control_plane.evidence_interval_seconds must be positive")
+        if self.approval_timeout_seconds <= 0:
+            raise ValueError("control_plane.approval_timeout_seconds must be positive")
         return self
 
 

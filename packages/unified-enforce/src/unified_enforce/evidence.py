@@ -258,6 +258,21 @@ class EvidenceShipper:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
 
+    @property
+    def signer(self) -> Any:
+        return self._signer
+
+    @signer.setter
+    def signer(self, value: Any) -> None:
+        """Attach the signer after construction, before the first `record()`.
+
+        Same reason as `HashChainWriter.signer`: a host may have to build the
+        shipper before the store holding its key is unlocked. Records are
+        signed when summarised, on the decision path, so whatever is set here
+        when a decision is recorded is what signs it.
+        """
+        self._signer = value
+
     # --- the decision path's only entry point --------------------------------
 
     def submit(self, record: dict[str, Any]) -> None:

@@ -26,7 +26,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .action import Action
 from .canonical import GENESIS_HASH, canonical_bytes, sha256_hex
@@ -99,6 +99,27 @@ class HashChainWriter:
         """The most recent entry on disk (recovered at start, tracked after)."""
         return self._last_entry
 
+    @property
+    def signer(self) -> Any:
+        return self._signer
+
+    @signer.setter
+    def signer(self, value: Any) -> None:
+        """Attach (or replace) the signer after `start()`.
+
+        For a host whose key is not available when the chain opens. The MCP hub
+        takes the chain's lock first — so a second hub fails before it touches
+        anything else — and only then unlocks the secrets store its signing key
+        lives in. Constructing the writer late instead would move the
+        single-writer check behind a keychain prompt.
+
+        Only entries appended after this carry a signature. A chain that gains
+        a key mid-life is therefore unsigned up to some seq and signed after
+        it; `verify(signed_from_seq=...)` is how that shape is checked, and the
+        host is responsible for recording where signing began.
+        """
+        self._signer = value
+
     # --- writing ---
 
     def append(self, entry: dict[str, Any]) -> dict[str, Any]:
@@ -134,7 +155,13 @@ class HashChainWriter:
     # --- verification (offline, no lock needed) ---
 
     @classmethod
-    def verify(cls, audit_dir: str | Path, *, public_key: bytes | None = None) -> VerifyResult:
+    def verify(
+        cls,
+        audit_dir: str | Path,
+        *,
+        public_key: bytes | None = None,
+        signed_from_seq: int | None = None,
+    ) -> VerifyResult:
         """Re-serialization of parsed JSON is deterministic without the strict
         type checks, so one verifier covers strict and lenient chains alike.
 
@@ -145,11 +172,39 @@ class HashChainWriter:
         wrote it, which is the part a hash chain cannot give you: an attacker
         with write access can rewrite an unsigned chain end to end and it will
         verify perfectly.
+
+        `signed_from_seq` is for a chain that *started* unsigned and was given
+        a key later — a hub that ran for months before joining a fleet. Entries
+        with `seq` below it may be unsigned; from the first entry at or above
+        it, every entry must carry a valid signature, **including any later
+        entry whose `seq` claims to be lower** (the requirement latches, so
+        renumbering a tail entry is not a way to shed its signature). And at
+        least one entry at or above it must exist: a chain that recorded
+        signing from seq N and now ends before N has had its signed tail
+        removed, which is the one edit that would leave the unsigned prefix
+        rewritable, so it is reported rather than passed.
+
+        Why the unsigned prefix is still protected by the signatures after it:
+        each signed entry's signature covers its `hash`, and that hash covers
+        its `prev_hash` — the hash of the entry before, which covers *its*
+        `prev_hash`, and so on back to the anchor. Rewriting any entry before N
+        changes the hash the first signed entry must point at; making the link
+        line up again means changing that entry's `prev_hash`, which changes its
+        hash, which its signature no longer matches. So one valid signature at
+        N attests the whole history up to N, exactly as `append` says of every
+        signed entry — what the prefix lacks is only a per-entry signature, and
+        it never needed one.
         """
+        if signed_from_seq is not None and public_key is None:
+            raise ValueError("signed_from_seq needs public_key: there is nothing to check from it")
         files = sorted(Path(audit_dir).glob("*.jsonl"))
         anchor: str | None = None
         prev: str | None = None
         count = 0
+        #: Whether signatures are required from here on. Latches True at the
+        #: first entry at/after `signed_from_seq` (and from the start when no
+        #: start point was given): see the docstring for why it never unlatches.
+        must_sign = public_key is not None and signed_from_seq is None
         for path in files:
             with path.open("rb") as fh:
                 for lineno, raw in enumerate(fh, start=1):
@@ -176,9 +231,17 @@ class HashChainWriter:
                         return VerifyResult(
                             False, count, f"{where}: hash mismatch (tampered)", anchor
                         )
-                    if public_key is not None:
+                    if public_key is not None and not must_sign:
+                        seq = entry.get("seq")
+                        # An entry with no usable seq cannot be shown to sit
+                        # before the start point, so it is held to the stricter
+                        # rule rather than given the benefit of the doubt.
+                        if not isinstance(seq, int) or seq >= cast(int, signed_from_seq):
+                            must_sign = True
+                    if must_sign:
                         from .signing import verify_bytes
 
+                        assert public_key is not None
                         if signature is None:
                             return VerifyResult(False, count, f"{where}: entry is unsigned", anchor)
                         if not verify_bytes(public_key, signature, claimed.encode("ascii")):
@@ -187,6 +250,15 @@ class HashChainWriter:
                             )
                     prev = claimed
                     count += 1
+        if signed_from_seq is not None and not must_sign:
+            return VerifyResult(
+                False,
+                count,
+                f"signing began at seq {signed_from_seq} but the chain holds no entry at or "
+                "after it: the signed tail is missing, which would leave the unsigned "
+                "history before it rewritable",
+                anchor,
+            )
         return VerifyResult(True, count, None, anchor)
 
     # --- internals ---
@@ -409,5 +481,13 @@ class AuditChain:
     # --- verification ---
 
     @classmethod
-    def verify(cls, audit_dir: str | Path, *, public_key: bytes | None = None) -> VerifyResult:
-        return HashChainWriter.verify(audit_dir, public_key=public_key)
+    def verify(
+        cls,
+        audit_dir: str | Path,
+        *,
+        public_key: bytes | None = None,
+        signed_from_seq: int | None = None,
+    ) -> VerifyResult:
+        return HashChainWriter.verify(
+            audit_dir, public_key=public_key, signed_from_seq=signed_from_seq
+        )

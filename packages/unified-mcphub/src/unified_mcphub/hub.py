@@ -54,6 +54,7 @@ from .config import (
 from .policy_diff import policy_broadening
 from .redaction import Redactor
 from .secrets import SecretsKeyError, SecretsStore
+from . import signing as signing_mod
 from .supervisor import SupervisedServer
 from .tokens import TokenStore
 from .tools import BuiltinRegistry
@@ -210,13 +211,23 @@ class Hub:
         approval_cfg = config.hub.approval
         self.approval_events = ApprovalEventBroadcaster()
         self.pending = PendingRegistry(publish=self.approval_events.publish)
+        # A joined hub in console mode answers to the fleet's approvers and to
+        # nobody else: the local channel is not selected at all, so a hub that
+        # cannot reach the control plane denies rather than falling back to a
+        # keypress. Terminal mode, and every standalone hub, choose exactly as
+        # before.
+        console = self.fleet.approvals if self.fleet is not None else None
         self.approval = Approval(
             enabled=approval_cfg.enabled,
-            channel=self._select_approval_channel(approval_cfg),
+            channel=None if console is not None else self._select_approval_channel(approval_cfg),
+            console=console,
         )
         self.audit = audit_mod.AuditLog(audit_dir())
         self.tokens = TokenStore()
         self.secrets = SecretsStore.from_config(config.hub.secrets)
+        #: Set by `_gate_secrets` when it unlocked the store; the signing key
+        #: is read only then, so loading it never adds a keychain prompt.
+        self._secrets_unlocked = False
         self._transport = TransportServer(build_app(self), config.hub.listen)
         self._started_at = now_iso()
         self._reload_task: asyncio.Task | None = None
@@ -256,6 +267,13 @@ class Hub:
                 refs.add(spec.auth_secret_ref)
         if self.fleet is not None:
             refs.add(self.fleet.credential_secret_ref)
+        # The signing key, always: whether this hub signs is decided by the
+        # store holding one, and the store can only be asked once unlocked.
+        # Listing it unconditionally means a hub that has a key signs whether
+        # or not anything else needed the store this run — an unsigned stretch
+        # after `signing.json`'s start point fails `audit verify`, and must
+        # not happen because a server with a credential was disabled.
+        refs.add(self.config.hub.audit.signing_key_secret_ref)
         return sorted(refs)
 
     def _gate_secrets(self) -> None:
@@ -290,6 +308,29 @@ class Hub:
             # not a crash. Failing here rather than at the first server that
             # needs a credential means the operator learns it at start-up.
             raise SystemExit(f"secrets: {exc}") from None
+        self._secrets_unlocked = True
+
+    def _load_signer(self) -> signing_mod.Signer | None:
+        """The hub's audit/evidence signer, or None to run unsigned (signing.py).
+
+        Read only from a store the gate already unlocked. A key that is present
+        but malformed stops start-up: the operator asked this hub to sign, and
+        a joined hub that silently stopped would have every evidence batch
+        refused by a control plane that holds its public key.
+        """
+        if not self._secrets_unlocked:
+            return None
+        ref = self.config.hub.audit.signing_key_secret_ref
+        value = self.secrets.get(ref)
+        if value is None:
+            logger.info("audit: no signing key under secret ref %r; running unsigned", ref)
+            return None
+        try:
+            signer = signing_mod.signer_from_secret(value)
+        except ValueError as exc:
+            raise SystemExit(f"audit: signing key under secret ref {ref!r} is unusable: {exc}")
+        logger.info("audit: signing the chain and evidence with key %s", signer.key_id)
+        return signer
 
     async def start(self) -> None:
         mcphub_home().mkdir(parents=True, exist_ok=True)
@@ -297,6 +338,14 @@ class Hub:
         self.audit.start()
         self.builtins.load_user_tools(mcphub_home() / "tools")
         self._gate_secrets()
+        # Attached before anything can write: the transport is not up yet, so
+        # the first entry of this run is already signed when a key exists.
+        signer = self._load_signer()
+        if signer is not None:
+            self.audit.set_signer(
+                signer,
+                on_first_signed=lambda seq: signing_mod.note_first_signed(signer, seq),
+            )
         self._loop = asyncio.get_running_loop()
         if self.fleet is not None:
             credential = (
@@ -304,7 +353,7 @@ class Hub:
                 if self.secrets.exists()
                 else None
             )
-            await self.fleet.start(credential)
+            await self.fleet.start(credential, signer=signer)
 
         for name, spec in self.config.workspace.servers.items():
             if not spec.enabled:
@@ -437,6 +486,7 @@ class Hub:
                 args,
                 floored=decision.source == "danger_floor",
                 action=action,  # same canonical Action the verdict was made on
+                deferral=decision.engine,  # the rule that asked, for the approver
             )
             prompt_ms = (time.monotonic() - t0) * 1000
             authz_decision = outcome.authz_decision
@@ -447,12 +497,16 @@ class Hub:
             denied_reason = outcome.reason
             allowed = outcome.allowed
             decided_by = outcome.decided_by
+            approver, attestation = outcome.approver, outcome.attestation
+            final = outcome.decision
         else:
             allowed = decision.effect is Effect.ALLOW
             denied_reason = None
             decided_by = None
+            approver = attestation = None
+            final = decision.engine
 
-        self.audit.write_received(
+        received = self.audit.write_received(
             request_id=request_id,
             trace_id=trace_id,
             span_id=span_id,
@@ -468,7 +522,12 @@ class Hub:
             decided_by=decided_by,
             action_digest=action.digest(strict=False),
             policy_digest=decision.policy_digest,
+            approver=approver,
+            attestation=attestation,
         )
+        # After the entry exists, and pointing at it (AuthzResolver.ship).
+        if final is not None:
+            self.authz.ship(action, final, received)
 
         if not allowed:
             # deny / prompt_denied / no_approval_channel -> received only (spec §6.2)
@@ -525,7 +584,7 @@ class Hub:
         finally:
             self._inflight.pop(request_id, None)
 
-        self.audit.write_completed(
+        completed = self.audit.write_completed(
             request_id=request_id,
             duration_ms=(time.monotonic() - t0) * 1000,
             result=result,
@@ -534,6 +593,15 @@ class Hub:
             prompt_response_ms=prompt_ms,
             injection=hits,
         )
+        if hits:
+            # The finding is shipped after the entry that records it (the
+            # `completed` line's `injection`), for the same reason as the
+            # verdict above. Still a finding, never a filter: a failure here is
+            # logged and the result goes back.
+            try:
+                self.authz.record_ingress(action, hits, completed)
+            except Exception:  # noqa: BLE001
+                logger.exception("could not record injection finding request=%s", request_id)
         return _ok(req_id, result)
 
     def refuse_unidentified(self, *, source: str, method: str = "mcp") -> None:
@@ -554,7 +622,7 @@ class Hub:
         if suppressed is None:
             return
         try:
-            self.audit.write_received(
+            entry = self.audit.write_received(
                 request_id=str(ULID()),
                 trace_id=audit_mod.new_trace_id(),
                 span_id=audit_mod.new_span_id(),
@@ -568,7 +636,7 @@ class Hub:
                 audit_level="standard",
                 reason="no valid credential presented",
             )
-            self.authz.record_unidentified(source=source, method=method)
+            self.authz.record_unidentified(source=source, method=method, entry=entry)
         except Exception:  # noqa: BLE001 - a refusal must stay a refusal
             logger.exception("could not record an unidentified caller")
 
@@ -620,7 +688,6 @@ class Hub:
                 logger.warning(
                     "INJECTION SHAPES in result request=%s tool=%s: %s", request_id, tool_uri, hits
                 )
-                self.authz.record_ingress(action, hits)
             return hits
         except Exception:  # noqa: BLE001 - a finding must never change an outcome
             logger.exception("injection pass failed request=%s tool=%s", request_id, tool_uri)
@@ -742,12 +809,11 @@ class Hub:
         )
         # Immediate effect: prepend in-memory so the next call sees it before reload.
         self.config.workspace.authz.rules.insert(0, rule)
-        self.authz = AuthzResolver(
-            self.config.workspace,
-            self.config.dangerous,
-            telemetry=self.telemetry,
-            deployment=self.config.hub.deployment,
-        )
+        # Through `_build_authz`, like every other rebuild: constructing the
+        # resolver by hand here dropped the fleet's distribution and evidence,
+        # so the first `*_always` answer on a joined hub silently stopped
+        # containment checks and evidence until the next reload.
+        self.authz = self._build_authz(self.config)
         # Persist to the machine-managed `.local.yaml` (ADR-0024). The curated
         # workspace file is never rewritten by the hub, so a plain YAML dump of a
         # flat rule list is enough — no comments to preserve. The args_filter

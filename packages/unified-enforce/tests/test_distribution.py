@@ -659,6 +659,36 @@ def test_a_candidate_does_not_block_the_enforcing_bundle_reaching_its_version(
     assert dist.snapshot.shadow_version is None
 
 
+def test_polling_back_what_is_already_held_is_quiet(source, root, policy_key, caplog):
+    """The control plane re-signs on a schedule; a sidecar polls every thirty
+    seconds. Most polls therefore fetch exactly the documents already held, and
+    that is not a refusal. Reported as one, it logged a `stale_refresh` warning
+    every poll -- noise that trains an operator to ignore the one line a real
+    replayed refresh would appear on (the two tests either side of this)."""
+    import logging
+
+    source.revocations_doc = revocations(policy_key, version=1)
+    source.bundle_doc = with_shadow(
+        bundle(policy_key, version=1), bundle(policy_key, version=2, mode="shadow"), 2
+    )
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+    assert dist.snapshot.version == 1 and dist.snapshot.revocations_version == 1
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="unified_enforce.distribution"):
+        for minutes in (1, 2, 3):
+            report = dist.refresh(now=NOW + timedelta(minutes=minutes))
+            assert not report.problems, report.problems
+            assert not report.alarming()
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    # Unchanged is not the same as fresh: an identical document that has since
+    # expired still reads as stale.
+    dist.refresh(now=NOW + timedelta(hours=2))
+    assert dist.snapshot.revocations_health.value == "stale"
+
+
 def test_a_replayed_revocation_list_is_refused(source, root, policy_key):
     """Same freshness rule, on the artifact where staleness matters most.
 

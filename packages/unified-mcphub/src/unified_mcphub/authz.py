@@ -297,6 +297,21 @@ class AuthzResolver:
         if self._evidence is not None:
             self._evidence.record(action, decision, entry=entry)
 
+    def ship_payload(self, entry: dict[str, Any], path: str, *, action_digest: str | None) -> None:
+        """Offer a detached value from a hub entry to the fleet (payload-evidence.v1).
+
+        `args` from a `received` entry, `result` from a `completed` one. The
+        shipper decides whether anything leaves: the control plane must have
+        accepted payloads, the hub must sign, and the entry must actually hold
+        the value (not `record_payloads: false`). No-op for a standalone hub
+        and for `control_plane.payloads: off`. Cannot raise.
+        """
+        # Looked up, as in `Enforcer.record`: an evidence sink that only
+        # implements `record` is still valid, and must not start failing calls.
+        ship = getattr(self._evidence, "record_payload", None)
+        if ship is not None:
+            ship(entry, path, action_digest=action_digest)
+
     # --- structural records (build-14): refusals and findings the policy
     # --- engine never saw, landed in the chain and the evidence like verdicts
 

@@ -39,7 +39,13 @@ from unified_enforce.distribution import (
     SourceUnavailable,
     StaleAction,
 )
-from unified_enforce.evidence import EvidenceShipper, HttpSink
+from unified_enforce.evidence import (
+    PAYLOADS_FIELD,
+    PAYLOADS_PATH,
+    EvidenceShipper,
+    HttpSink,
+    PayloadShipper,
+)
 from unified_enforce.remote_approvals import ApprovalTransportError, RemoteApprovals
 
 from .config import ControlPlaneConfig, mcphub_home
@@ -63,11 +69,18 @@ class _BoundLater:
         self._cfg = cfg
         self._source: ControlPlaneSource | None = None
         self._sink: HttpSink | None = None
+        self._payload_sink: HttpSink | None = None
+        #: The payload stream's sink: same credential, bound at the same
+        #: moment, a different endpoint (payload-evidence.v1).
+        self.payloads = _BoundPayloads(self)
 
     def bind(self, credential: str) -> None:
         assert self._cfg.url is not None
         self._source = ControlPlaneSource(self._cfg.url, credential)
         self._sink = HttpSink(self._cfg.url, credential)
+        self._payload_sink = HttpSink(
+            self._cfg.url, credential, path=PAYLOADS_PATH, field=PAYLOADS_FIELD
+        )
 
     @property
     def bound(self) -> bool:
@@ -93,6 +106,24 @@ class _BoundLater:
         if self._sink is None:
             raise ConnectionError("control plane credential not yet bound")
         return self._sink.send(batch)
+
+
+class _BoundPayloads:
+    """`_BoundLater`'s payload sink: refuses until the credential is bound.
+
+    A refusal requeues, and the payload shipper holds what it has queued until
+    a receipt opens its gate anyway -- which cannot happen before the decision
+    sink is bound either.
+    """
+
+    def __init__(self, owner: _BoundLater) -> None:
+        self._owner = owner
+
+    def send(self, batch: list[dict[str, Any]]) -> Any:
+        sink = self._owner._payload_sink
+        if sink is None:
+            raise ConnectionError("control plane credential not yet bound")
+        return sink.send(batch)
 
 
 class ConsoleApprovals:
@@ -176,8 +207,24 @@ class FleetLink:
             on_stale=StaleAction(cfg.on_stale),
             on_containment=on_containment,
         )
+        # The payload stream (payload-evidence.v1), when this hub may copy
+        # arguments and results at all. Not built for `payloads: off`, so
+        # there is no code path that could send one; built for `auto`, it
+        # sends nothing until the control plane's receipt says it accepts.
+        # Its sink is the transport's `payloads`; a transport without one (a
+        # test double that predates payloads) simply gets no stream.
+        payload_sink = getattr(self._transport, "payloads", None)
+        self.payloads: PayloadShipper | None = (
+            PayloadShipper(payload_sink, interval_seconds=cfg.evidence_interval_seconds)
+            if cfg.ship_payloads and payload_sink is not None
+            else None
+        )
         self.evidence: EvidenceShipper | None = (
-            EvidenceShipper(self._transport, interval_seconds=cfg.evidence_interval_seconds)
+            EvidenceShipper(
+                self._transport,
+                interval_seconds=cfg.evidence_interval_seconds,
+                payloads=self.payloads,
+            )
             if cfg.evidence
             else None
         )
@@ -248,5 +295,27 @@ class FleetLink:
             },
             "evidence": self.evidence is not None,
             "evidence_signed": self.evidence is not None and self.evidence.signer is not None,
+            "payloads": self._payload_status(),
             "approvals": self.config.approvals,
+        }
+
+    def _payload_status(self) -> dict[str, Any]:
+        """Where the payload stream stands, and every reason a value was not sent."""
+        if self.payloads is None:
+            return {"configured": self.config.payloads, "mode": "off"}
+        stats = self.payloads.payload_stats
+        spool = self.payloads.spool.stats
+        return {
+            "configured": self.config.payloads,
+            # "pending" until the control plane has said either way.
+            "mode": self.payloads.mode or "pending",
+            "max_payload_bytes": self.payloads.max_payload_bytes or None,
+            "queued": spool.queued,
+            "shipped": spool.shipped,
+            "dropped": spool.dropped,
+            "declined": stats.declined,
+            "oversize": stats.oversize,
+            "unsigned": stats.unsigned,
+            "unrecorded": stats.unrecorded,
+            "refused": stats.refused + spool.rejected,
         }

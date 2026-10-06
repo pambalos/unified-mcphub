@@ -23,6 +23,13 @@ log at the far end. The payload is built by naming the fields to include, not
 by removing the ones to exclude — an allowlist survives a new field being added
 to `Action`; a denylist does not.
 
+**Content travels only on its own stream, and only when asked for**
+(payload-evidence.v1, `PayloadShipper`). A self-hosted control plane may want
+the arguments and results too; those go to a different endpoint, in records
+built from the chain entry that committed to them, signed, and only after the
+control plane's receipt has said it accepts them. Decision records stay
+metadata whatever that stream does.
+
 **Loss is counted and reported, never silent.** A dashboard built on evidence
 that quietly went missing is worse than one that admits a gap: the first is
 believed. `dropped` is exposed for exactly that, and `chain_seq` travels with
@@ -35,12 +42,13 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from . import detach as _detach
 from .action import Action
-from .attest import sign_evidence
+from .attest import sign_evidence, sign_payload_evidence
 from .policy import Decision
 
 log = logging.getLogger("unified_enforce.evidence")
@@ -115,14 +123,31 @@ class EvidenceSpool:
     """
 
     capacity: int = DEFAULT_CAPACITY
+    #: An optional second bound, in whatever unit `weigh` returns. Decision
+    #: records are a few hundred bytes each and a count bounds them well
+    #: enough; payload records carry raw arguments and results, where ten
+    #: thousand of them could be gigabytes. Unset, the spool behaves exactly
+    #: as it always has.
+    max_bytes: int | None = None
+    weigh: Callable[[dict[str, Any]], int] | None = None
     _items: deque[dict[str, Any]] = field(default_factory=deque, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _bytes: int = field(default=0, init=False)
     stats: SpoolStats = field(default_factory=SpoolStats, init=False)
 
+    def _weight(self, record: dict[str, Any]) -> int:
+        return self.weigh(record) if self.weigh is not None else 0
+
+    def _full(self, incoming: int) -> bool:
+        if len(self._items) >= self.capacity:
+            return True
+        return self.max_bytes is not None and self._bytes + incoming > self.max_bytes
+
     def add(self, record: dict[str, Any]) -> None:
+        weight = self._weight(record)
         with self._lock:
-            if len(self._items) >= self.capacity:
-                self._items.popleft()
+            while self._items and self._full(weight):
+                self._bytes -= self._weight(self._items.popleft())
                 self.stats.dropped += 1
                 if self.stats.dropped == 1 or self.stats.dropped % 1000 == 0:
                     log.warning(
@@ -131,13 +156,30 @@ class EvidenceSpool:
                         self.stats.dropped,
                     )
             self._items.append(record)
+            self._bytes += weight
             self.stats.queued = len(self._items)
 
     def take(self, limit: int) -> list[dict[str, Any]]:
         with self._lock:
             batch = [self._items.popleft() for _ in range(min(limit, len(self._items)))]
+            self._bytes -= sum(self._weight(r) for r in batch)
             self.stats.queued = len(self._items)
             return batch
+
+    def discard(self, predicate: Callable[[dict[str, Any]], bool]) -> int:
+        """Remove every queued record `predicate` selects. Returns how many.
+
+        Not counted as `dropped`: the caller is discarding on purpose (a
+        receiver that has stopped accepting what is queued) and counts it under
+        its own name, so `dropped` keeps meaning "we were too full".
+        """
+        with self._lock:
+            kept = deque(r for r in self._items if not predicate(r))
+            removed = len(self._items) - len(kept)
+            self._items = kept
+            self._bytes = sum(self._weight(r) for r in kept)
+            self.stats.queued = len(self._items)
+            return removed
 
     def put_back(self, batch: Iterable[dict[str, Any]]) -> None:
         """Return an unshipped batch to the front of the queue.
@@ -150,10 +192,12 @@ class EvidenceSpool:
         """
         with self._lock:
             for record in reversed(list(batch)):
-                if len(self._items) >= self.capacity:
+                weight = self._weight(record)
+                if self._items and self._full(weight):
                     self.stats.dropped += 1
                     continue
                 self._items.appendleft(record)
+                self._bytes += weight
             self.stats.queued = len(self._items)
 
     def __len__(self) -> int:
@@ -246,7 +290,17 @@ class EvidenceShipper:
         interval_seconds: float = 5.0,
         signer: Any = None,
         on_receipt: Any = None,
+        payloads: PayloadShipper | None = None,
     ) -> None:
+        #: The payload stream, when this reporter may ship arguments and
+        #: results (payload-evidence.v1). A separate shipper with its own spool
+        #: and thread, never a second field in this one's batches: the receiver
+        #: validates the two kinds at different endpoints, a payload batch can
+        #: be orders of magnitude larger, and nothing about one failing may
+        #: hold up decisions. It lives here only because the *gate* does: the
+        #: control plane says whether it accepts payloads in the receipt for
+        #: decision evidence, and this is where that receipt arrives.
+        self.payloads = payloads
         #: Called with each receipt the sink returns, on the shipping thread.
         #: The control plane's receipt carries `revocations_version`, and a
         #: sidecar that sees it move can refresh containment at once rather than
@@ -320,6 +374,25 @@ class EvidenceShipper:
         except Exception:
             log.exception("could not summarise evidence; the decision is unaffected")
 
+    def record_payload(
+        self, entry: Mapping[str, Any], path: str, *, action_digest: str | None = None
+    ) -> None:
+        """Offer the value detached at `path` in a written chain entry. Cannot raise.
+
+        Signed with this shipper's signer -- the key the receiver registered for
+        this reporter's decision evidence, which is the one it will check the
+        payload against. A no-op without a payload stream; whether anything is
+        actually queued is `PayloadShipper.record_payload`'s decision.
+        """
+        if self.payloads is None:
+            return
+        try:
+            self.payloads.record_payload(
+                entry, path, signer=self._signer, action_digest=action_digest
+            )
+        except Exception:
+            log.exception("could not queue payload evidence; the decision is unaffected")
+
     # --- shipping -------------------------------------------------------------
 
     def flush(self) -> int:
@@ -352,6 +425,14 @@ class EvidenceShipper:
                 return shipped
             shipped += len(batch)
             self.spool.stats.shipped += len(batch)
+            if receipt and self.payloads is not None:
+                # Before `on_receipt`, and guarded on its own: a payload gate
+                # that cannot read the receipt must not stop containment from
+                # refreshing off it, and the reverse.
+                try:
+                    self.payloads.observe(receipt)
+                except Exception:
+                    log.exception("payload gate could not read the evidence receipt")
             if receipt and self.on_receipt is not None:
                 try:
                     self.on_receipt(receipt)
@@ -362,14 +443,32 @@ class EvidenceShipper:
                     # twice.
                     log.exception("evidence receipt handler raised")
 
+    #: The worker thread's name; the payload shipper sets its own so a stack
+    #: dump says which stream is stuck.
+    _thread_name = "unified-evidence"
+
     def start(self) -> None:
+        if self.payloads is not None:
+            self.payloads.start()
         if self._thread is not None:
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="unified-evidence", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=self._thread_name, daemon=True)
         self._thread.start()
 
     def stop(self, *, timeout: float = 5.0) -> None:
+        """Stop this stream, then the payload stream with whatever budget is left.
+
+        Decisions first: they are what the console's rows are made of, and a
+        payload that arrives with no row to attach to is the less useful half.
+        `timeout` stays the budget for the whole shutdown, both streams.
+        """
+        deadline = time.monotonic() + timeout
+        self._stop_shipping(timeout=timeout)
+        if self.payloads is not None:
+            self.payloads.stop(timeout=max(0.0, deadline - time.monotonic()))
+
+    def _stop_shipping(self, *, timeout: float) -> None:
         """Stop shipping, with one last attempt only when it is safe to make.
 
         A shutdown that hangs waiting on an unreachable control plane is a
@@ -434,6 +533,283 @@ class EvidenceShipper:
                 # A flush that raises must not kill the thread, or evidence
                 # stops for the life of the process and nothing says so.
                 log.exception("evidence flush raised")
+
+
+#: Where payload evidence goes, and the key its batch travels under
+#: (payload-evidence.v1).
+PAYLOADS_PATH = "/api/v1/evidence/payloads"
+PAYLOADS_FIELD = "payloads"
+
+#: Payload records held while the receiver is unavailable (or before it has
+#: said whether it accepts any). Far fewer than decisions: each one carries an
+#: argument or a result, not a summary.
+DEFAULT_PAYLOAD_CAPACITY = 1_000
+
+#: And a byte bound over the same spool, counted in `size_bytes`. The count
+#: alone would let a run of large results hold a gigabyte in a sidecar's
+#: memory; this keeps the worst case to a known figure whatever the receiver
+#: says its per-value limit is.
+DEFAULT_PAYLOAD_SPOOL_BYTES = 64 * 1024 * 1024
+
+#: Records per payload request. Small, because each may be as large as the
+#: receiver's `max_payload_bytes`.
+DEFAULT_PAYLOAD_BATCH = 20
+
+
+@dataclass
+class PayloadStats:
+    """Why values were not shipped, by cause. All counted, none silent.
+
+    Each of these is a value the console will show as "held only in the
+    customer's chain", and an operator asking why deserves a number per reason
+    rather than a single total that mixes "the plane said no" with "this hub
+    has no key".
+    """
+
+    #: The receiver had not accepted payloads (or had stopped): never queued,
+    #: or discarded from the queue when it said so.
+    declined: int = 0
+    #: Larger than the receiver's `max_payload_bytes`.
+    oversize: int = 0
+    #: No signer. The receiver refuses unsigned payloads, so sending one would
+    #: put content on the wire to be thrown away.
+    unsigned: int = 0
+    #: The entry holds no value to send at that path: written with
+    #: `record_payloads=False`, withheld, or never detached.
+    unrecorded: int = 0
+    #: Records the receiver refused individually (`refused` in its response).
+    refused: int = 0
+
+
+class PayloadShipper(EvidenceShipper):
+    """Ships detached argument and result values (payload-evidence.v1).
+
+    The same machinery as decision evidence -- bounded spool, background
+    thread, requeue on failure, discard on permanent refusal -- because every
+    reason behind that machinery applies here too. What is added is a **gate**,
+    and the gate is the point of this class:
+
+    - **Nothing is sent until the control plane has said it accepts.** The
+      answer arrives in a receipt (`"payloads": "accept"`, plus
+      `max_payload_bytes`), first on decision evidence and then on every
+      payload response. Before any receipt, values are *held* in the spool --
+      never sent -- so the calls a sidecar makes in the seconds after a restart
+      are not lost to the race with its first decision batch. The first
+      receipt settles it either way, and a refusal discards what was held.
+    - **Any receipt that does not say `accept` means refuse.** A control plane
+      that predates payloads says nothing about them; silence is not consent to
+      receive somebody's tool arguments.
+    - **A larger value than the receiver will take is not sent**, checked when
+      offered and again when shipped, because the limit can move between the
+      two.
+    - **Unsigned or unrecorded values are never queued.** See `PayloadStats`.
+
+    The local decision -- `control_plane.payloads: off` -- is made by not
+    building one of these at all, so no code path exists that could send.
+
+    A payload failure costs a payload and nothing else: this has its own spool
+    and its own thread, and `EvidenceShipper.record_payload` swallows anything
+    that escapes from here.
+    """
+
+    _thread_name = "unified-evidence-payloads"
+
+    def __init__(
+        self,
+        sink: Sink,
+        *,
+        capacity: int = DEFAULT_PAYLOAD_CAPACITY,
+        max_spool_bytes: int = DEFAULT_PAYLOAD_SPOOL_BYTES,
+        batch_size: int = DEFAULT_PAYLOAD_BATCH,
+        interval_seconds: float = 5.0,
+        signer: Any = None,
+    ) -> None:
+        super().__init__(
+            sink,
+            capacity=capacity,
+            batch_size=batch_size,
+            interval_seconds=interval_seconds,
+            signer=signer,
+            on_receipt=self._payload_receipt,
+        )
+        self.spool = EvidenceSpool(
+            capacity=capacity,
+            max_bytes=max_spool_bytes,
+            weigh=lambda record: int(record.get("size_bytes") or 0),
+        )
+        self.payload_stats = PayloadStats()
+        #: None until a receipt has said anything; then "accept" or "refuse".
+        self.mode: str | None = None
+        #: The receiver's per-value limit, from the same receipt. Meaningless
+        #: unless `mode` is "accept".
+        self.max_payload_bytes: int = 0
+
+    @property
+    def accepting(self) -> bool:
+        return self.mode == "accept"
+
+    # --- the gate --------------------------------------------------------------
+
+    def observe(self, receipt: Mapping[str, Any]) -> None:
+        """Read the gate from a receipt. Any receipt settles it.
+
+        The receipt is trusted for one thing only: whether to *withhold*
+        content. A forged "refuse" costs copies; a forged "accept" sends a
+        signed copy of what the reporter's own chain recorded to the control
+        plane it is already authenticated to -- which is where the receipt
+        came from. Neither can alter a decision or the chain.
+        """
+        if not isinstance(receipt, Mapping):
+            return
+        limit = receipt.get("max_payload_bytes")
+        usable = isinstance(limit, int) and not isinstance(limit, bool) and limit > 0
+        if receipt.get("payloads") == "accept" and usable:
+            assert isinstance(limit, int)
+            if self.mode != "accept":
+                log.info("control plane accepts payload evidence (max %d bytes)", limit)
+            self.mode, self.max_payload_bytes = "accept", limit
+            return
+        if receipt.get("payloads") == "accept":
+            # Accepting with no limit we can apply is not something to guess
+            # at: a value the receiver turns away for size has still crossed
+            # the wire. Treated as a refusal, and said so.
+            log.warning(
+                "control plane accepts payloads but sent no usable max_payload_bytes (%r); "
+                "not shipping payloads",
+                limit,
+            )
+        if self.mode == "accept":
+            log.info("control plane no longer accepts payload evidence")
+        self.mode, self.max_payload_bytes = "refuse", 0
+
+    def _payload_receipt(self, receipt: Mapping[str, Any]) -> None:
+        refused = receipt.get("refused") if isinstance(receipt, Mapping) else None
+        if isinstance(refused, list) and refused:
+            self.payload_stats.refused += len(refused)
+            # Not retried: the receiver judged these records on their merits
+            # (a digest that does not match, a signature it cannot check), and
+            # it would judge them the same way again.
+            log.warning(
+                "control plane refused %d payload record(s): %s",
+                len(refused),
+                "; ".join(str(r.get("reason")) for r in refused[:3] if isinstance(r, Mapping)),
+            )
+        self.observe(receipt)
+
+    # --- offering a value ------------------------------------------------------
+
+    def record_payload(
+        self,
+        entry: Mapping[str, Any],
+        path: str,
+        *,
+        signer: Any = None,
+        action_digest: str | None = None,
+    ) -> None:
+        """Queue the value detached at `path` in a written chain entry. Cannot raise.
+
+        Built from the entry *as written* -- its `seq`, `hash`, `detached[path]`
+        and `salts[path]` -- rather than from the caller's copy of the value,
+        so the record names exactly the bytes the signed chain committed to.
+        A value that drifted between the call and the write would otherwise be
+        shipped with a digest it does not match, and refused.
+
+        `action_digest` defaults to the entry's own (a hub `received` entry
+        carries it at the top level, an engine decision entry under
+        `payload`); a hub `completed` entry has none, so the hub passes the
+        received entry's.
+        """
+        try:
+            self._record_payload(entry, path, signer=signer, action_digest=action_digest)
+        except Exception:
+            log.exception("could not queue payload evidence; nothing else is affected")
+
+    def _record_payload(
+        self,
+        entry: Mapping[str, Any],
+        path: str,
+        *,
+        signer: Any,
+        action_digest: str | None,
+    ) -> None:
+        # Cheapest refusals first: this runs on the caller's thread, and a
+        # control plane that does not want payloads should cost the hot path a
+        # comparison, not a canonicalisation of the result.
+        if self.mode == "refuse":
+            self.payload_stats.declined += 1
+            return
+        signer = signer if signer is not None else self.signer
+        if signer is None:
+            self.payload_stats.unsigned += 1
+            return
+
+        detached = entry.get(_detach.DETACHED) or {}
+        salts = entry.get(_detach.SALTS) or {}
+        unrecorded = entry.get(_detach.UNRECORDED) or ()
+        found, value = _detach.get(dict(entry), path)
+        # `unrecorded` is checked by name, not only by absence: with
+        # record_payloads=False the salt is still kept locally (detach.py), so
+        # "has a salt" is not "has a value", and the signed entry saying the
+        # content was never stored is the authority.
+        if (
+            path in unrecorded
+            or not found
+            or not isinstance(detached.get(path), str)
+            or not isinstance(salts.get(path), str)
+        ):
+            self.payload_stats.unrecorded += 1
+            return
+
+        digest = action_digest or entry.get("action_digest")
+        if not digest and isinstance(entry.get("payload"), Mapping):
+            digest = entry["payload"].get("action_digest")
+        if not isinstance(digest, str) or not digest:
+            # Without it the receiver cannot attach the value to an action,
+            # and would refuse it. Counted with the values it cannot use.
+            self.payload_stats.unrecorded += 1
+            return
+
+        size = len(_detach.canonical(value))
+        if self.mode == "accept" and size > self.max_payload_bytes:
+            self.payload_stats.oversize += 1
+            return
+
+        self.submit(
+            sign_payload_evidence(
+                {
+                    "action_digest": digest,
+                    "chain_seq": entry.get("seq"),
+                    "chain_hash": entry.get("hash"),
+                    "path": path,
+                    "digest": detached[path],
+                    "size_bytes": size,
+                    "salt": salts[path],
+                    "value": value,
+                },
+                signer,
+            )
+        )
+
+    # --- shipping ----------------------------------------------------------------
+
+    def flush(self) -> int:
+        """Ship what is queued -- only if, and only what, the receiver accepts."""
+        if self.mode is None:
+            return 0  # held: nothing has said yes or no yet
+        if self.mode != "accept":
+            declined = self.spool.discard(lambda _record: True)
+            if declined:
+                self.payload_stats.declined += declined
+                log.info(
+                    "discarded %d held payload record(s): the control plane does not accept "
+                    "payloads (they remain in the audit chain)",
+                    declined,
+                )
+            return 0
+        limit = self.max_payload_bytes
+        oversize = self.spool.discard(lambda record: int(record.get("size_bytes") or 0) > limit)
+        self.payload_stats.oversize += oversize
+        return super().flush()
 
 
 class HttpSink:
@@ -510,3 +886,16 @@ class HttpSink:
         except ValueError:
             return None
         return receipt if isinstance(receipt, dict) else None
+
+
+def payload_shipper(
+    base_url: str, credential: str, *, channel: Any = None, **kwargs: Any
+) -> PayloadShipper:
+    """A payload stream: the decisions sink, on the payloads path, gated.
+
+    Hand the result to the decision shipper (`EvidenceShipper(...,
+    payloads=...)`), whose receipts open the gate. Same credential and request
+    proof as decision evidence, which is what the receiver checks.
+    """
+    sink = HttpSink(base_url, credential, path=PAYLOADS_PATH, field=PAYLOADS_FIELD, channel=channel)
+    return PayloadShipper(sink, **kwargs)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -235,6 +236,7 @@ class DeploymentConfig(BaseModel):
 
 _VALID_ON_STALE = {"keep", "defer", "deny"}
 _VALID_FLEET_APPROVALS = {"console", "terminal"}
+_VALID_FLEET_PAYLOADS = {"auto", "off"}
 
 
 class ControlPlaneConfig(BaseModel):
@@ -270,6 +272,20 @@ class ControlPlaneConfig(BaseModel):
     #: Ship decision evidence to the control plane (what the Guardian reads).
     evidence: bool = True
     evidence_interval_seconds: float = 5.0
+    #: Whether this hub may copy call arguments and results to the control
+    #: plane (payload-evidence.v1). The chain records them either way; this is
+    #: only about the copy.
+    #:
+    #: `auto` (default): follow the control plane. It says in its evidence
+    #: receipt whether it accepts payloads -- a self-hosted plane does by
+    #: default, a hosted one only if the fleet opted in -- and the hub sends
+    #: nothing until it has said yes. Signed, built from the chain entry, and
+    #: never for a value the chain did not record (`audit.record_payloads`).
+    #:
+    #: `off`: never, whatever the control plane says. The local veto, for an
+    #: operator whose data must not leave this machine even to their own
+    #: control plane. Needs `evidence` on to mean anything.
+    payloads: str = "auto"
     #: Where a `prompt` is answered once the hub is joined.
     #:
     #: `console` (default): the DEFER is queued at the control plane and an
@@ -302,6 +318,25 @@ class ControlPlaneConfig(BaseModel):
     def _check_approvals(cls, v: str) -> str:
         if v not in _VALID_FLEET_APPROVALS:
             raise ValueError(f"approvals must be one of {sorted(_VALID_FLEET_APPROVALS)}")
+        return v
+
+    @property
+    def ship_payloads(self) -> bool:
+        return self.enabled and self.evidence and self.payloads == "auto"
+
+    @field_validator("payloads", mode="before")
+    @classmethod
+    def _check_payloads(cls, v: Any) -> str:
+        # YAML 1.1 reads a bare `off` as false (and `on` as true), which is
+        # exactly what an operator will type. Taken at its word rather than
+        # refused: `payloads: off` meaning anything but off would be the worst
+        # possible surprise for this key.
+        if v is False:
+            return "off"
+        if v is True:
+            return "auto"
+        if v not in _VALID_FLEET_PAYLOADS:
+            raise ValueError(f"payloads must be one of {sorted(_VALID_FLEET_PAYLOADS)}")
         return v
 
     @field_validator("on_stale")

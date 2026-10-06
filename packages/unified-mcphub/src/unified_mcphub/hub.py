@@ -528,8 +528,15 @@ class Hub:
             attestation=attestation,
         )
         # After the entry exists, and pointing at it (AuthzResolver.ship).
+        # The arguments follow the row they belong to, from the same entry --
+        # denied calls included, since what an agent *tried* is what a reviewer
+        # of a denial needs. Only where a row was shipped: a payload with no
+        # decision to attach to is a value the console cannot place.
+        shipped = False
         if final is not None:
+            shipped = True
             self.authz.ship(action, final, received)
+            self.authz.ship_payload(received, "args", action_digest=received.get("action_digest"))
 
         if not allowed:
             # deny / prompt_denied / no_approval_channel -> received only (spec §6.2)
@@ -574,7 +581,7 @@ class Hub:
             return _err(req_id, -32004, f"interdicted: {flight.interdiction.reason}")
         except Exception as exc:  # noqa: BLE001
             duration = (time.monotonic() - t0) * 1000
-            self.audit.write_completed(
+            failed = self.audit.write_completed(
                 request_id=request_id,
                 duration_ms=duration,
                 result={"error": str(exc)},
@@ -582,6 +589,10 @@ class Hub:
                 audit_level=decision.audit_level,
                 prompt_response_ms=prompt_ms,
             )
+            if shipped:
+                self.authz.ship_payload(
+                    failed, "result", action_digest=received.get("action_digest")
+                )
             return _err(req_id, -32000, f"tool execution failed: {exc}")
         finally:
             self._inflight.pop(request_id, None)
@@ -595,6 +606,14 @@ class Hub:
             prompt_response_ms=prompt_ms,
             injection=hits,
         )
+        # The result, pointing at the `completed` entry that committed to it,
+        # under the received entry's action digest (a completed line carries
+        # none of its own). An interdicted call ships nothing here: no result
+        # was accepted, and `write_interdicted` records none.
+        if shipped:
+            self.authz.ship_payload(
+                completed, "result", action_digest=received.get("action_digest")
+            )
         if hits:
             # The finding is shipped after the entry that records it (the
             # `completed` line's `injection`), for the same reason as the

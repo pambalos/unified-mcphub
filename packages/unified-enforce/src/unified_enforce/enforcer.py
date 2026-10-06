@@ -145,6 +145,24 @@ class Enforcer:
         # the dashboard is the copy, not the record.
         if self._evidence is not None and audit_error is None:
             self._evidence.record(action, decision, entry=entry)
+            # The arguments, for a control plane that has asked for them
+            # (payload-evidence.v1; the shipper holds the gate and does
+            # nothing without a payload stream). From the entry as written, so
+            # the copy is provably the chain's. `params` only: the entry also
+            # detaches `context.extra`, but that is whatever the integration
+            # attached -- gateway headers, session metadata, its own
+            # bookkeeping -- not what the agent asked to do. The contract and
+            # the console promise "arguments and result"; shipping extra would
+            # widen what leaves the customer's environment beyond what the
+            # control plane's access rules were written for, so it stays in
+            # the chain only.
+            #
+            # Looked up rather than called: anything that only implements
+            # `record` (a test double, an older custom shipper) is still a
+            # valid evidence sink, and must not start failing decisions.
+            ship_payload = getattr(self._evidence, "record_payload", None)
+            if entry is not None and ship_payload is not None:
+                ship_payload(entry, "payload.action.params")
 
         # Last, and after the decision is final. A candidate policy exists to
         # be measured, not consulted: evaluating it before this point would put

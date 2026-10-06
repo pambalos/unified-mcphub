@@ -415,6 +415,14 @@ class Distribution:
         #: receipts, from the evidence shipper's thread. Serialised, so two
         #: refreshes cannot interleave their snapshot writes.
         self._refresh_lock = threading.Lock()
+        #: The signed envelopes last applied, by artifact. A poll that fetches
+        #: back exactly what is held is the ordinary case -- the control plane
+        #: re-signs on a schedule, not every thirty seconds -- and must not be
+        #: run through the freshness rules, which correctly refuse an equal
+        #: version without a later expiry and log it as a warning. Logged on
+        #: every poll, that warning trained operators to ignore the one place a
+        #: replayed refresh would be reported.
+        self._held_envelopes: dict[str, Any] = {}
         self.snapshot = Snapshot()
         #: The keys from the last key set that verified. Retained so anything
         #: else needing to check a control-plane signature -- the approval
@@ -518,6 +526,8 @@ class Distribution:
             else None
         )
         envelope = doc.get("manifest") if isinstance(doc, dict) else doc
+        if self._unchanged("bundle", envelope):
+            return
 
         verdict = accept_manifest(
             envelope,
@@ -548,6 +558,7 @@ class Distribution:
         self.snapshot.expires_at_ms = verdict.payload["expires_at_ms"]
         self.snapshot.files = files
         report.applied_bundle = True
+        self._held_envelopes["bundle"] = envelope
         self._write_cache("bundle.json", doc)
 
     def _apply_shadow(
@@ -589,12 +600,15 @@ class Distribution:
             self.snapshot.shadow_version = None
             self.snapshot.shadow_files = {}
             self._shadow_expire_at = None
+            self._held_envelopes.pop("shadow", None)
             return
 
         # The real expiry, not a zero. Passing 0 here makes the equal-version
         # refresh rule compare against nothing, so any replayed artifact at the
         # same version passes — which defeats the whole point of tracking a
         # freshness line for the candidate.
+        if self._unchanged("shadow", shadow.get("manifest")):
+            return
         held = (
             BundleState(self.snapshot.shadow_version, self._shadow_expire_at or 0)
             if self.snapshot.shadow_version is not None
@@ -633,6 +647,7 @@ class Distribution:
         self.snapshot.shadow_version = verdict.payload["version"]
         self.snapshot.shadow_files = files
         self._shadow_expire_at = verdict.payload["expires_at_ms"]
+        self._held_envelopes["shadow"] = shadow.get("manifest")
         report.applied_shadow = True
 
     def _apply_revocations(
@@ -650,6 +665,8 @@ class Distribution:
             else None
         )
         envelope = doc.get("revocations") if isinstance(doc, dict) else doc
+        if self._unchanged("revocations", envelope):
+            return
 
         verdict = accept_revocations(
             envelope,
@@ -676,6 +693,7 @@ class Distribution:
         self.snapshot.revocations_version = verdict.payload["version"]
         self._revocations_expire_at = verdict.payload["expires_at_ms"]
         report.applied_revocations = True
+        self._held_envelopes["revocations"] = envelope
         self._write_cache("revocations.json", doc)
         if not hydrating:
             self._announce_containment(before, self.snapshot.containment)
@@ -698,6 +716,19 @@ class Distribution:
 
     _revocations_expire_at: int | None = None
     _shadow_expire_at: int | None = None
+
+    def _unchanged(self, what: str, envelope: Any) -> bool:
+        """True when `envelope` is exactly the signed document already applied.
+
+        Exact equality of the parsed envelope, signatures included -- not "same
+        version": an equal version with a *different* expiry still goes through
+        the freshness rules, and an earlier expiry is still refused and warned
+        about, because that is what a replayed refresh looks like. Health is
+        unaffected: it is recomputed from what is held on every refresh, so an
+        unchanged document that has since expired still reads as stale.
+        """
+        held = self._held_envelopes.get(what)
+        return held is not None and envelope == held
 
     def _refuse(self, report: RefreshReport, what: str, reason: Reason | None, detail: str) -> None:
         # Everything that reaches here is worth an operator's attention: a

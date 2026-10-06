@@ -139,17 +139,18 @@ def policy_from_hub() -> PolicySource:
     """The hub compiles workspace rules, danger floors and constitutional rules
     into one document; that compiled document is what its `policy_digest` names,
     so it is what goes in the pack. Imported lazily: the engine never depends on
-    the hub, and a sidecar-only deployment has no hub to read."""
-    from unified_mcphub.authz import AuthzResolver
-    from unified_mcphub.config import (
-        load_dangerous_commands,
-        load_hub_config,
-        load_workspace,
-    )
+    the hub, and a sidecar-only deployment has no hub to read. By name rather
+    than an import statement for the same reason: the engine is type-checked on
+    its own, where the hub is an untyped stranger."""
+    import importlib
 
-    hub = load_hub_config()
-    resolver = AuthzResolver(
-        load_workspace(hub.active_workspace), load_dangerous_commands(), deployment=hub.deployment
+    authz = importlib.import_module("unified_mcphub.authz")
+    config = importlib.import_module("unified_mcphub.config")
+    hub = config.load_hub_config()
+    resolver = authz.AuthzResolver(
+        config.load_workspace(hub.active_workspace),
+        config.load_dangerous_commands(),
+        deployment=hub.deployment,
     )
     return PolicySource(
         label=f"hub workspace {hub.active_workspace!r} (compiled)", doc=resolver._engine._doc

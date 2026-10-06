@@ -527,9 +527,24 @@ class Hub:
             approver=approver,
             attestation=attestation,
         )
-        # After the entry exists, and pointing at it (AuthzResolver.ship).
+        # After the entry exists, and pointing at it (AuthzResolver.ship),
+        # under the digest that entry recorded -- the lenient one, which a
+        # float argument does not break.
+        # The arguments follow the row they belong to, from the same entry --
+        # denied calls included, since what an agent *tried* is what a reviewer
+        # of a denial needs. Only where a row was actually queued: a payload
+        # with no decision to attach to is a value the console cannot place.
+        # And never under `audit_level: minimal` -- the customer marked that
+        # rule's traffic sensitive; the chain keeps the content (detach.py),
+        # but a copy to another system is an export, and `minimal` is the
+        # export default. Neither half of the call is offered.
+        recorded_digest = received.get("action_digest")
+        shipped = False
         if final is not None:
-            self.authz.ship(action, final, received)
+            shipped = self.authz.ship(action, final, received, action_digest=recorded_digest)
+        ship_payloads = shipped and decision.audit_level != "minimal"
+        if ship_payloads:
+            self.authz.ship_payload(received, "args", action_digest=recorded_digest)
 
         if not allowed:
             # deny / prompt_denied / no_approval_channel -> received only (spec §6.2)
@@ -574,7 +589,7 @@ class Hub:
             return _err(req_id, -32004, f"interdicted: {flight.interdiction.reason}")
         except Exception as exc:  # noqa: BLE001
             duration = (time.monotonic() - t0) * 1000
-            self.audit.write_completed(
+            failed = self.audit.write_completed(
                 request_id=request_id,
                 duration_ms=duration,
                 result={"error": str(exc)},
@@ -582,6 +597,8 @@ class Hub:
                 audit_level=decision.audit_level,
                 prompt_response_ms=prompt_ms,
             )
+            if ship_payloads:
+                self.authz.ship_payload(failed, "result", action_digest=recorded_digest)
             return _err(req_id, -32000, f"tool execution failed: {exc}")
         finally:
             self._inflight.pop(request_id, None)
@@ -595,6 +612,12 @@ class Hub:
             prompt_response_ms=prompt_ms,
             injection=hits,
         )
+        # The result, pointing at the `completed` entry that committed to it,
+        # under the received entry's action digest (a completed line carries
+        # none of its own). An interdicted call ships nothing here: no result
+        # was accepted, and `write_interdicted` records none.
+        if ship_payloads:
+            self.authz.ship_payload(completed, "result", action_digest=recorded_digest)
         if hits:
             # The finding is shipped after the entry that records it (the
             # `completed` line's `injection`), for the same reason as the

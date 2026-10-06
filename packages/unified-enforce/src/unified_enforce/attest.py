@@ -844,6 +844,169 @@ def accept_evidence(
     return Verdict(ok=True, payload=dict(record))
 
 
+# --- payload evidence ------------------------------------------------------------
+#
+# **What this is.** Decision evidence (above) is metadata only. A control plane
+# that runs inside the customer's own perimeter -- the self-hosted deployment --
+# can also hold the exact arguments and results, so its console, history and
+# exports show what an agent actually sent and got back. A hosted control plane
+# receives them only for fleets that opted in. Either way the customer's signed
+# chain stays the record; this is a verifiable copy of part of it.
+#
+# **Why a separate record, not more fields on decision evidence.** A result
+# exists only after the call returns, long after its decision was shipped, and
+# the control plane keeps one decision row per action. Each detached value
+# (`args`, `result`, `payload.action.params`, ...) therefore travels on its own,
+# naming the chain entry it was detached from.
+#
+# **What makes the copy checkable.** The reporter signs the *binding* -- which
+# action, which chain entry, which path, which digest -- and the receiver checks
+# that the content hashes to that digest under its salt (detach.py's rule). A
+# receiver that stored altered content would hold bytes that no longer match a
+# digest the reporter signed, and the reporter's own chain entry commits to the
+# same digest. The content itself is not inside the signature: the digest is,
+# and the digest commits to the content.
+
+#: Inside the signature, so a change of shape is a change of meaning.
+PAYLOAD_EVIDENCE_VERSION = 1
+
+#: Exactly what a reporter signs for a payload, in order.
+PAYLOAD_EVIDENCE_FIELDS = (
+    "action_digest",
+    "chain_seq",
+    "chain_hash",
+    "path",
+    "digest",
+    "size_bytes",
+)
+
+
+#: The salt's length in bytes, as detach.py writes it. Enforced, not just
+#: expected: see `_payload_salt`.
+PAYLOAD_SALT_BYTES = 16
+
+
+def _payload_salt(salt_b64: str) -> bytes:
+    """Decode a payload salt, refusing anything but exactly 16 bytes of strict base64.
+
+    The digest is `sha256(salt || canonical(value))` with no framing between
+    the two, so the boundary between salt and content is fixed only by the
+    salt's length. Accept a salt of any length and bytes can be moved across
+    that boundary while the digest still verifies: a recorded `123` re-presented
+    as salt+"1" and value `23`, a `-500` as salt+"-" and `500`. Pinning the
+    length pins the boundary. The formula itself is unchanged -- every chain
+    already written keeps verifying, because detach.py has only ever written
+    16-byte salts. `validate=True` because the lenient decoder skips characters
+    outside the alphabet, which would let two different strings name one salt.
+    """
+    if not isinstance(salt_b64, str):
+        raise ValueError("salt is not a string")
+    raw = base64.b64decode(salt_b64, validate=True)
+    if len(raw) != PAYLOAD_SALT_BYTES:
+        raise ValueError(f"salt is {len(raw)} bytes, not {PAYLOAD_SALT_BYTES}")
+    return raw
+
+
+def _payload_body(value: Any) -> bytes:
+    """detach.canonical: the bytes a value's digest and `size_bytes` are over."""
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+    ).encode("utf-8")
+
+
+def payload_content_digest(salt_b64: str, value: Any) -> str:
+    """detach.py's digest rule: sha256(salt || canonical(value)).
+
+    Restated here rather than imported because this module is vendored by hash
+    into the control plane and copied into evidence packs, and must stand
+    alone. `test_payload_digest_matches_detach` pins the two to the same bytes.
+    Raises ValueError for a salt that is not 16 bytes of base64 (`_payload_salt`).
+    """
+    return hashlib.sha256(_payload_salt(salt_b64) + _payload_body(value)).hexdigest()
+
+
+def payload_evidence_payload(record: Mapping[str, Any]) -> dict[str, Any]:
+    """The signable form of one payload record (the binding, not the content)."""
+    return {
+        "v": PAYLOAD_EVIDENCE_VERSION,
+        **{field: record.get(field) for field in PAYLOAD_EVIDENCE_FIELDS},
+    }
+
+
+def sign_payload_evidence(record: Mapping[str, Any], signer: Any) -> dict[str, Any]:
+    """Return `record` with the reporter's signature over its binding attached.
+
+    `record` carries the binding fields plus `salt` and `value`; only the
+    binding is signed. Same key and encoding as `sign_evidence`.
+    """
+    raw = base64.b64decode(signer.sign_bytes(canonical(payload_evidence_payload(record))))
+    return {**record, "sig": b64u(raw), "key_id": signer.key_id}
+
+
+def accept_payload_evidence(record: Mapping[str, Any], public_key_b64: str) -> Verdict:
+    """Check a payload record: the reporter signed this binding, and the content
+    hashes to the digest it names.
+
+    Never raises. Unlike decision evidence, a payload that fails is *refused*
+    rather than stored as unattested: its only value is being the exact bytes
+    the chain committed to, and content that does not match its digest is not
+    those bytes. Refusing it suppresses nothing -- the decision row, and the
+    customer's chain, still record that the action happened.
+    """
+    # Every check below is a guard, not a hope: this runs on a control plane
+    # against whatever a client posted, and an exception escaping it would turn
+    # one malformed record into a failed batch -- or a 500 the reporter retries
+    # forever.
+    if not isinstance(record, Mapping):
+        return _refuse(Reason.MALFORMED, "payload record is not an object")
+    signature_b64 = record.get("sig")
+    if not isinstance(signature_b64, str):
+        return _refuse(Reason.MALFORMED, "payload carries no signature")
+    for name in ("action_digest", "chain_hash", "path", "digest", "salt"):
+        if not isinstance(record.get(name), str) or not record.get(name):
+            return _refuse(Reason.MALFORMED, f"payload is missing {name}")
+    # bool is an int to Python and not to anyone else; refused for the same
+    # reason the decision side refuses it.
+    for name in ("chain_seq", "size_bytes"):
+        if not isinstance(record.get(name), int) or isinstance(record.get(name), bool):
+            return _refuse(Reason.MALFORMED, f"payload {name} is not an integer")
+    if "value" not in record:
+        return _refuse(Reason.MALFORMED, "payload carries no value")
+
+    try:
+        signed = canonical(payload_evidence_payload(record))
+    except CanonicalisationError as exc:
+        return _refuse(Reason.MALFORMED, str(exc))
+    try:
+        Ed25519PublicKey.from_public_bytes(unb64u(public_key_b64)).verify(
+            unb64u(signature_b64), signed
+        )
+    except (InvalidSignature, ValueError, TypeError):
+        return _refuse(Reason.BAD_SIGNATURE, "payload signature did not verify")
+
+    # After the signature, so a rewritten binding is reported as what it is
+    # (bad_signature) rather than as whichever field check it trips first.
+    try:
+        salt = _payload_salt(record["salt"])
+    except (ValueError, TypeError) as exc:
+        return _refuse(Reason.MALFORMED, f"payload salt must be 16 bytes of base64: {exc}")
+    try:
+        body = _payload_body(record["value"])
+    except (ValueError, TypeError, RecursionError) as exc:
+        return _refuse(Reason.MALFORMED, f"payload value cannot be canonicalised: {exc}")
+    if hashlib.sha256(salt + body).hexdigest() != record["digest"]:
+        return _refuse(Reason.BAD_SIGNATURE, "payload content does not match its signed digest")
+    # After the digest, so altered content is reported as altered content. What
+    # is left for this to catch is a reporter that signed a size its own value
+    # does not have -- and `size_bytes` is what the console shows and what
+    # limits are judged by, so a false one is refused too. Its own message, so
+    # a receiver can tell "the size is wrong" from "the content is wrong".
+    if record["size_bytes"] != len(body):
+        return _refuse(Reason.MALFORMED, "payload size_bytes does not match its value")
+
+    return Verdict(ok=True, payload=dict(record))
+
+
 # --- binding a credential to the key that holds it ------------------------------
 #
 # The bearer credential is possession-is-identity: a stolen one works until it is

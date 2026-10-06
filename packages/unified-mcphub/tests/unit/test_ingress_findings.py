@@ -46,8 +46,9 @@ class Collecting:
         self.records: list[tuple] = []
         self.on_receipt = None
 
-    def record(self, action, decision, *, entry=None) -> None:
+    def record(self, action, decision, *, entry=None, action_digest=None) -> bool:
         self.records.append((action, decision))
+        return True
 
 
 @pytest.fixture

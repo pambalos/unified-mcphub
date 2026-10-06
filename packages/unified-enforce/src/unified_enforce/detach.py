@@ -277,6 +277,20 @@ def check(entry: dict[str, Any]) -> Checked:
                 raw = base64.b64decode(salt_b64, validate=True)
             except (binascii.Error, ValueError):
                 return Checked(False, present, withheld, never, f"{path}: salt is not base64")
+            # The digest has no framing between salt and content, so only the
+            # salt's length fixes where one ends and the other begins. Without
+            # this a recorded `123` verifies as salt+"1" and `23`, or `-500` as
+            # salt+"-" and `500` -- an edited value that still "matches". Every
+            # salt this module writes is SALT_BYTES long, so no genuine chain is
+            # affected.
+            if len(raw) != SALT_BYTES:
+                return Checked(
+                    False,
+                    present,
+                    withheld,
+                    never,
+                    f"{path}: salt is {len(raw)} bytes, not {SALT_BYTES}",
+                )
             if digest(raw, value) != committed:
                 return Checked(
                     False,

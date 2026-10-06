@@ -476,3 +476,41 @@ def test_bytes_moved_from_a_value_into_its_salt_fail_the_pack(world, original, m
     _tamper(pack, "chains/sidecar/chain.jsonl", shift)
 
     assert any("salt is 17 bytes" in f for f in _failures(pack)), _failures(pack)
+
+
+def test_only_entries_with_inline_content_are_called_legacy(world, tmp_path):
+    """A digests-only pack calls an entry "legacy" only when it predates
+    detachable payloads *and* carries content inline. The world's approval
+    entry has no `detached` because it has nothing to detach -- counting it
+    told the auditor that undisclosable content was present in a chain
+    written entirely after the format existed."""
+    pack = build(out=world["tmp"] / "digests-legacy", payloads="digests-only", **world["build"])
+    meta = json.loads((pack / "chains" / "sidecar" / "meta.json").read_text())
+    assert meta["legacy_inline_entries"] == 0
+    report = verify_pack(pack)
+    assert not any("predate detachable payloads" in c.detail for c in report.checks)
+
+    # A genuinely pre-format decision (params inline, no `detached`) still is,
+    # and is said so.
+    from unified_enforce.audit import HashChainWriter
+
+    legacy_dir = tmp_path / "legacy-chain"
+    writer = HashChainWriter(legacy_dir, strict=False)
+    writer.start()
+    writer.append(
+        {
+            "kind": "decision",
+            "seq": 1,
+            "ts": datetime.now(UTC).isoformat(),
+            "payload": {"action": {"params": {"account": "inline"}}, "verdict": "allow"},
+        }
+    )
+    writer.append(
+        {"kind": "approval", "seq": 2, "ts": datetime.now(UTC).isoformat(), "payload": {}}
+    )
+    writer.stop()
+    kwargs = {**world["build"], "chains": [ChainSource(name="old", directory=legacy_dir)]}
+    kwargs["csv_path"] = None
+    pack = build(out=tmp_path / "legacy-pack", payloads="digests-only", **kwargs)
+    meta = json.loads((pack / "chains" / "old" / "meta.json").read_text())
+    assert meta["legacy_inline_entries"] == 1

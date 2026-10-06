@@ -99,6 +99,59 @@ class ChainSource:
     public_key: str | None = None
     reporter_id: str | None = None
     signed_from_seq: int | None = None
+    #: Every key the chain was signed with, as `{public_key, key_id,
+    #: since_seq}` — for a reporter that rotated its key. One `public_key`
+    #: cannot describe that chain: the entries before the rotation are signed
+    #: by a key the pack would not hold, and would fail as forged. See
+    #: `key_ranges_from_signing_record` for the hub's `signing.json`.
+    key_ranges: list[dict[str, Any]] | None = None
+
+
+def key_ranges_from_signing_record(path: Path) -> list[dict[str, Any]]:
+    """A hub's `signing.json` as key ranges, oldest first.
+
+    The hub writes the current key and the `seq` of the first entry it signed,
+    and keeps each key it replaced under `previous` with that key's own start
+    (unified_mcphub.signing.note_first_signed). Every range goes into the
+    pack, so each stretch of the chain is checked against the key that was
+    current when it was written. A record that does not parse raises: a pack
+    built as if the chain were unsigned would be the wrong answer, quietly.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    records = [*(data.get("previous") or []), data]
+    ranges = []
+    for r in records:
+        ranges.append(
+            {
+                "public_key": str(r["public_key"]),
+                "key_id": r.get("key_id"),
+                "since_seq": int(r["since_seq"]),
+            }
+        )
+    return sorted(ranges, key=lambda r: r["since_seq"])
+
+
+def _legacy_inline(entry: dict[str, Any]) -> bool:
+    """An entry that predates detachable payloads *and* carries content.
+
+    Only these cannot have their content withheld without breaking the chain.
+    An entry with no `detached` that never held content — an engine approval,
+    a hub `interdicted` line, a received entry with no arguments — is not
+    "legacy" in any sense that matters to a reader, and counting it made a
+    digests-only pack of a perfectly modern chain report undisclosable content
+    that was never there.
+    """
+    if _detach_module.DETACHED in entry:
+        return False
+    phase = entry.get("phase")
+    if phase == "received":
+        return bool(entry.get("args"))
+    if phase == "completed":
+        return entry.get("result") not in (None, "", {}, [])
+    if entry.get("kind") == "decision":
+        action = (entry.get("payload") or {}).get("action") or {}
+        return bool(action.get("params")) or bool((action.get("context") or {}).get("extra"))
+    return False
 
 
 def excerpt(
@@ -136,7 +189,7 @@ def excerpt(
             )
             for entry in parsed[first : last + 1]
         ]
-        legacy_inline = sum(1 for e in parsed[first : last + 1] if _detach_module.DETACHED not in e)
+        legacy_inline = sum(1 for e in parsed[first : last + 1] if _legacy_inline(e))
     meta = {
         "name": source.name,
         "reporter_id": source.reporter_id,
@@ -152,9 +205,12 @@ def excerpt(
         ),
         "signed_from_seq": source.signed_from_seq,
         "payloads": payloads,
-        #: Entries with no detached fields. In a digests-only excerpt these are
-        #: the ones whose content (if any) could not be withheld — see the
-        #: module docstring. Counted, not judged: most are content-free.
+        #: Present when the reporter rotated keys: each key and the seq it
+        #: signed from (pack_verify checks each range with its own key).
+        **({"keys": source.key_ranges} if source.key_ranges else {}),
+        #: Entries that predate detachable payloads and still carry content
+        #: inline (`_legacy_inline`). In a digests-only excerpt their content
+        #: could not be withheld — see the module docstring.
         "legacy_inline_entries": legacy_inline,
     }
     return chosen, meta
@@ -565,6 +621,12 @@ def main(argv: list[str] | None = None) -> int:
         "--chain-signed-from", action="append", help="NAME=SEQ where that chain began signing"
     )
     p.add_argument(
+        "--chain-signing",
+        action="append",
+        help="NAME=PATH of a hub's signing.json: every key the chain was signed with and the "
+        "seq each took over from (needed for a hub that rotated its key)",
+    )
+    p.add_argument(
         "--policy", action="append", type=Path, help="an engine policy YAML in force in the window"
     )
     p.add_argument(
@@ -591,16 +653,31 @@ def main(argv: list[str] | None = None) -> int:
     keys = _pairs(args.chain_key, "--chain-key")
     reporters = _pairs(args.chain_reporter, "--chain-reporter")
     signed_from = _pairs(args.chain_signed_from, "--chain-signed-from")
-    chains = [
-        ChainSource(
-            name=name,
-            directory=Path(directory).expanduser(),
-            public_key=_read_value(keys[name]) if name in keys else None,
-            reporter_id=reporters.get(name),
-            signed_from_seq=int(signed_from[name]) if name in signed_from else None,
+    signing = _pairs(args.chain_signing, "--chain-signing")
+    chains = []
+    for name, directory in _pairs(args.chain, "--chain").items():
+        ranges = (
+            key_ranges_from_signing_record(Path(signing[name]).expanduser())
+            if name in signing
+            else None
         )
-        for name, directory in _pairs(args.chain, "--chain").items()
-    ]
+        public_key = _read_value(keys[name]) if name in keys else None
+        start_seq = int(signed_from[name]) if name in signed_from else None
+        if ranges:
+            # The record names the current key and where signing began;
+            # explicit flags still win for anything they set.
+            public_key = public_key or ranges[-1]["public_key"]
+            start_seq = start_seq if start_seq is not None else ranges[0]["since_seq"]
+        chains.append(
+            ChainSource(
+                name=name,
+                directory=Path(directory).expanduser(),
+                public_key=public_key,
+                reporter_id=reporters.get(name),
+                signed_from_seq=start_seq,
+                key_ranges=ranges,
+            )
+        )
     policies = [policy_from_yaml(p) for p in args.policy or []]
     if args.hub_policy:
         policies.append(policy_from_hub())

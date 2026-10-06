@@ -77,6 +77,13 @@ class PromptOutcome:
     #: signature over the resolution, as plain dicts for the audit entry.
     approver: dict | None = None
     attestation: dict | None = None
+    #: Console approvals only: the rest of what the control plane signed —
+    #: the resolution `kind` (in the engine's vocabulary, `allow_always`, not
+    #: the hub's two allow-always variants) and its `scope`, exactly as it
+    #: arrived. `attest.resolution_payload` covers both, so without them in
+    #: the audit entry the signature beside them could never be rebuilt, and
+    #: an entry that claims to be re-verifiable would not be.
+    resolution: dict | None = None
     #: The engine's final decision (ALLOW/DENY, never DEFER), keeping the
     #: deferring rule's id and policy digest — what a joined hub ships as the
     #: evidence for this call, beside the audit entry that records it.
@@ -417,6 +424,13 @@ class Approval:
             decided_by=outcome.decided_by,
             approver=asdict(outcome.approver) if outcome.approver else None,
             attestation=asdict(outcome.attestation) if outcome.attestation else None,
+            # The signed scope, not `persistent`'s decision about it: a scope
+            # this hub declined to persist was still what the approver signed.
+            resolution=(
+                {"kind": outcome.kind.value, "scope": outcome.scope}
+                if outcome.attestation is not None and outcome.kind is not None
+                else None
+            ),
             decision=outcome.decision,
         )
 

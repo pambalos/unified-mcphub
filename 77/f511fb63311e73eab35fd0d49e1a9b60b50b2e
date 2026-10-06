@@ -1,0 +1,21 @@
+packages/unified-enforce/src/unified_enforce/detach.py
+  s_57443f001e84f6::t_d2ee2db9f177e1 280-293
+packages/unified-mcphub/src/unified_mcphub/config.py
+  s_57443f001e84f6::t_a2b459ee5e5bf6 284-286
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "77f511fb63311e73eab35fd0d49e1a9b60b50b2e",
+  "prompts": {},
+  "sessions": {
+    "s_57443f001e84f6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "870a3f2c-bcad-432a-ac61-8f82694fa6d9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

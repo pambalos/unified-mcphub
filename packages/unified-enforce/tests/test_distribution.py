@@ -1209,3 +1209,72 @@ def test_a_failing_containment_handler_never_fails_the_refresh(source, root, pol
     assert forced is not None and forced.verdict == Verdict.DENY, (
         "the list is applied before it is announced; a broken handler cannot un-contain"
     )
+
+
+# --- no bundle published (HTTP 404) ---------------------------------------------
+
+
+class NoBundleSource(FakeSource):
+    """A control plane whose fleet has a key set and a revocation list but no
+    policy bundle yet -- it answers 404 for the bundle."""
+
+    def fetch_bundle(self):
+        from unified_enforce.distribution import NotPublished
+
+        self._check()
+        raise NotPublished("HTTP 404 for /api/v1/policy/bundle: nothing published")
+
+
+@pytest.fixture
+def no_bundle(root, policy_key):
+    return NoBundleSource(keyset(root, policy_key), None, revocations(policy_key))
+
+
+def test_a_missing_bundle_does_not_stop_keys_and_revocations_applying(no_bundle, root):
+    dist = make(no_bundle, root)
+    report = dist.refresh(now=NOW)
+    assert report.no_bundle and not report.unreachable
+    assert report.applied_revocations
+    assert dist.verification_keys(), "console approvals need the key set"
+    assert dist.snapshot.revocations_health is Health.FRESH
+    # A sidecar's policy *is* the bundle: still deny everything without one.
+    assert dist.gate(action()).verdict is Verdict.DENY
+
+
+def test_a_bundle_optional_point_is_gated_only_on_containment(no_bundle, root, policy_key):
+    dist = make(no_bundle, root, require_bundle=False)
+    dist.refresh(now=NOW)
+    assert dist.gate(action()) is None, "the hub's own policy decides"
+    no_bundle.revocations_doc = revocations(
+        policy_key, version=2, entries=[{"principal_id": AGENT, "mode": "deny"}]
+    )
+    dist.refresh(now=NOW)
+    assert dist.gate(action()).source == "containment"
+
+
+def test_a_bundle_optional_point_still_defers_on_an_unverifiable_revocation_list(root):
+    dist = make(FakeSource(None, None, None), root, require_bundle=False)
+    decision = dist.gate(action())
+    assert decision is not None and decision.verdict is Verdict.DEFER
+
+
+def test_the_key_set_is_cached_so_a_restart_reloads_what_it_verified(no_bundle, root, tmp_path):
+    make(no_bundle, root, cache_dir=tmp_path).refresh(now=NOW)
+    restarted = make(no_bundle, root, cache_dir=tmp_path, require_bundle=False, now=NOW)
+    assert restarted.verification_keys()
+    assert restarted.snapshot.revocations_version == 1
+
+
+def test_a_404_from_the_control_plane_is_not_published(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    from unified_enforce.distribution import ControlPlaneSource, NotPublished
+
+    def refuse(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    with pytest.raises(NotPublished):
+        ControlPlaneSource("https://cp", "t").fetch_bundle()

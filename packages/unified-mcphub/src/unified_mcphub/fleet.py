@@ -244,6 +244,11 @@ class FleetLink:
             cache_dir=cache,
             on_stale=StaleAction(cfg.on_stale),
             on_containment=on_containment,
+            # The hub's policy is its workspace (authz.py), never the fleet's
+            # bundle: it takes the key set and the revocation list from
+            # distribution and nothing else. Requiring a bundle denied every
+            # call on a hub joined to a fleet that had not published one.
+            require_bundle=False,
         )
         # The payload stream (payload-evidence.v1), when this hub may copy
         # arguments and results at all. Not built for `payloads: off`, so

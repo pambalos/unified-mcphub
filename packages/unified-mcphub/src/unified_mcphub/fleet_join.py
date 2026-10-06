@@ -71,6 +71,31 @@ class JoinResult:
     signing_key_id: str
     signing_key_created: bool
     approvals: str
+    #: Whether the fleet has a policy bundle published: True, False (the
+    #: control plane said none), or None (could not tell).
+    bundle_published: bool | None = None
+
+
+def _bundle_published(url: str, credential: str) -> bool | None:
+    """Ask, with the new credential, whether the fleet has a bundle.
+
+    The hub does not need one (its policy is local; `Distribution` runs with
+    `require_bundle=False`), but every *sidecar* in the fleet denies every
+    action until one exists -- the first thing an operator joining the fleet's
+    first enforcement point should hear, with the command that fixes it.
+    Never fails the join: the enrolment has already happened.
+    """
+    try:
+        with httpx.Client(timeout=ENROL_TIMEOUT_SECONDS) as client:
+            response = client.get(
+                url.rstrip("/") + "/api/v1/policy/bundle",
+                headers={"authorization": f"Bearer {credential}"},
+            )
+    except httpx.HTTPError:
+        return None
+    if response.status_code == 404:
+        return False
+    return True if response.status_code == 200 else None
 
 
 def _current_block(doc: CommentedMap) -> Any:
@@ -193,6 +218,7 @@ def join(
     secure_write(path, rendered.encode())
 
     return JoinResult(
+        bundle_published=_bundle_published(url, payload["token"]),
         fleet_id=payload["fleet_id"],
         credential_id=payload.get("credential_id"),
         credential_secret_ref=credential_ref,
@@ -244,6 +270,13 @@ def print_join(result: JoinResult, url: str) -> None:
         "credential's evidence key — unsigned evidence from it is now refused)"
     )
     print(f"  approvals:    {result.approvals}")
+    if result.bundle_published is False:
+        print(
+            f"note: fleet {result.fleet_id!r} has no policy bundle published. This hub does not "
+            "need one (its policy is its workspace), but any sidecar or gateway in the fleet "
+            "denies every action until one is. If the deployment has them, publish one:\n"
+            f"  unified-control publish-policy --fleet {result.fleet_id} --dir <policy-dir>"
+        )
     print("restart the hub to apply (`unified-mcphub start`)")
 
 

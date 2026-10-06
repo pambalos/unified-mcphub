@@ -46,6 +46,9 @@ def plane(monkeypatch):
     state = {"status": 201, "fleet_id": "acme"}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v1/policy/bundle":
+            state.setdefault("bundle_asks", []).append(request.headers.get("authorization"))
+            return httpx.Response(state.get("bundle", 200), json={})
         body = json.loads(request.content)
         seen.append({"url": str(request.url), "body": body})
         if state["status"] != 201:
@@ -189,3 +192,23 @@ def test_status_is_offline_and_reports_signing(hub_home, store, plane, capsys, m
     assert main(["fleet", "status"]) == 0
     out = capsys.readouterr().out
     assert "since seq 42" in out and "console (timeout 300s)" in out
+
+
+def test_join_warns_with_the_publish_command_when_no_bundle_exists(plane, store, capsys):
+    """A hub needs no bundle (its policy is local), but every sidecar in the
+    fleet denies everything until one exists -- said at join, with the fix."""
+    _, state = plane
+    state["bundle"] = 404
+    assert _join() == 0
+    out = capsys.readouterr().out
+    assert "no policy bundle published" in out
+    assert "unified-control publish-policy --fleet acme --dir" in out
+    assert state["bundle_asks"] == [f"Bearer {CREDENTIAL}"], "asked with the new credential"
+    assert CREDENTIAL not in out
+
+
+def test_join_is_quiet_about_bundles_when_one_exists(plane, store, capsys):
+    _, state = plane
+    state["bundle"] = 200
+    assert _join() == 0
+    assert "publish-policy" not in capsys.readouterr().out

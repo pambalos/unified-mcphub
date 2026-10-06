@@ -345,3 +345,34 @@ async def test_a_reload_cannot_leave_the_fleet(hub_home, plane, keys):
     assert await hub._reload() is True
     assert hub.fleet is fleet_before
     assert hub.authz._enforcer._distribution is fleet_before.distribution  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_a_hub_in_a_fleet_with_no_bundle_published_still_serves(
+    hub_home, plane, keys, monkeypatch
+):
+    """The control plane 404s /policy/bundle until one is published. The hub's
+    policy is its workspace, so that must not deny every call -- and the key
+    set and revocation list (containment, console approval keys) must still
+    apply."""
+    from unified_enforce.distribution import NotPublished
+
+    def not_published():
+        raise NotPublished("HTTP 404 for /api/v1/policy/bundle: nothing published")
+
+    monkeypatch.setattr(plane, "fetch_bundle", not_published)
+    root, _ = keys
+    hub = _joined_hub(hub_home, plane, root)
+    hub.audit.start()
+    try:
+        report = hub.fleet.distribution.refresh(now=NOW)
+        assert report.no_bundle and report.applied_revocations
+        assert hub.fleet.distribution.verification_keys()
+        hub._forward = lambda *a: asyncio.sleep(0, {"content": []})  # type: ignore[method-assign]
+        assert "result" in await hub._handle_call(_message("crew-1"), "crew-1")
+
+        plane.contain("agent:crew-1", mode="deny")
+        hub.fleet.distribution.refresh(now=NOW)
+        assert (await hub._handle_call(_message("crew-1", 2), "crew-1"))["error"]["code"] == -32003
+    finally:
+        hub.audit.stop()

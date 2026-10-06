@@ -338,6 +338,18 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
         record = load_record()
         result = audit_reader.verify(directory, record)
+        signed = audit_reader.signed_entries(directory) if record is None else 0
+        if record is None and signed:
+            # load_record's own rule: a missing record must not downgrade the
+            # check to hash-only for a chain that was signed (signed_entries).
+            print(
+                f"chain UNVERIFIED: {signed} entr(y/ies) carry signatures but "
+                f"{signing_record_path()} is missing, so they cannot be checked and a "
+                "rewritten history would pass a hash-only check. Restore signing.json "
+                "(it holds only public keys) and re-run."
+                + ("" if result.ok else f" The hash chain is also broken: {result.error}")
+            )
+            return 1
         if record is None:
             # Said every time, not only when it matters: "chain OK" from a
             # hash-only check is a weaker statement, and the reader should not

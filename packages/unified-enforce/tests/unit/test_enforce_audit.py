@@ -344,3 +344,51 @@ def test_signed_from_seq_without_a_key_is_a_usage_error(tmp_path):
 
     with pytest.raises(ValueError):
         HashChainWriter.verify(tmp_path, signed_from_seq=1)
+
+
+def test_an_empty_newest_day_file_does_not_reset_the_chain(tmp_path):
+    """Start and stop with no writes leaves today's file empty; a restart
+    used to read only that file and resume from GENESIS at seq 1 -- a chain
+    break at the next entry, and a seq going backwards below where signing
+    began."""
+    from datetime import UTC, datetime
+
+    from unified_enforce.audit import HashChainWriter
+    from unified_enforce.signing import Signer
+
+    d = tmp_path / "audit"
+    signer = Signer.generate("k")
+    day = {"now": datetime(2026, 10, 1, 12, tzinfo=UTC)}
+    clock = lambda: day["now"]  # noqa: E731
+
+    w = HashChainWriter(d, clock=clock, signer=signer)
+    w.start()
+    first = w.append({"seq": 1, "n": 1})
+    w.stop()
+
+    day["now"] = datetime(2026, 10, 2, 9, tzinfo=UTC)
+    idle = HashChainWriter(d, clock=clock, signer=signer)
+    idle.start()  # opens (creates) today's file and writes nothing
+    idle.stop()
+    assert (d / "2026-10-02.jsonl").read_bytes() == b""
+
+    again = HashChainWriter(d, clock=clock, signer=signer)
+    again.start()
+    assert again.head == first["hash"] and again.last_entry["seq"] == 1
+    second = again.append({"seq": 2, "n": 2})
+    again.stop()
+    assert second["prev_hash"] == first["hash"]
+    result = HashChainWriter.verify(d, public_key=signer.public_bytes(), signed_from_seq=1)
+    assert result.ok and result.entries == 2, result.error
+
+    # The engine layer's seq continues too (it reads the recovered entry).
+    c = AuditChain(tmp_path / "engine")
+    c.start()
+    c.append("decision", {"n": 1})
+    c.stop()
+    (tmp_path / "engine" / "9999-12-31.jsonl").write_bytes(b"")  # an empty newer file
+    c = AuditChain(tmp_path / "engine")
+    c.start()
+    assert c.append("decision", {"n": 2})["seq"] == 2
+    c.stop()
+    assert AuditChain.verify(tmp_path / "engine").ok

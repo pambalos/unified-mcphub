@@ -340,7 +340,9 @@ class HashChainWriter:
     # --- internals ---
 
     def _recover(self) -> None:
-        """Pick up the chain head from the last entry that parses.
+        """Pick up the chain head from the last entry that parses, in whichever
+        day file holds it (empty or wholly unparseable trailing files are
+        passed over).
 
         Trailing garbage is skipped rather than raised on. `O_APPEND` makes each
         write atomic, but a machine losing power mid-write still leaves a
@@ -367,26 +369,35 @@ class HashChainWriter:
         files = sorted(self._dir.glob("*.jsonl"))
         if not files:
             return
-        lines = [raw for raw in files[-1].read_bytes().splitlines() if raw.strip()]
-        for offset, raw in enumerate(reversed(lines)):
-            try:
-                entry = json.loads(raw)
-            except ValueError:
-                continue
-            if "hash" not in entry:
-                self._quarantine_legacy(files)
+        # Newest file first, and on to older ones until an entry parses. The
+        # newest file alone is not enough: a writer that starts and stops
+        # without appending leaves today's file empty, and a restart that
+        # read only that file resumed from GENESIS -- a chain break at the
+        # next entry, `seq` restarting at 1 below where signing began, and
+        # every checkpoint after it refused.
+        skipped = 0
+        for path in reversed(files):
+            lines = [raw for raw in path.read_bytes().splitlines() if raw.strip()]
+            for raw in reversed(lines):
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    skipped += 1
+                    continue
+                if not isinstance(entry, dict) or "hash" not in entry:
+                    self._quarantine_legacy(files)
+                    return
+                if skipped:
+                    log.error(
+                        "%s: skipped %d unparseable trailing line(s) recovering the chain "
+                        "head. Run `AuditChain.verify` -- this is a crash or an edit, and the "
+                        "difference matters.",
+                        path.name,
+                        skipped,
+                    )
+                self._head = entry["hash"]
+                self._last_entry = entry
                 return
-            if offset:
-                log.error(
-                    "%s: skipped %d unparseable trailing line(s) recovering the chain head. "
-                    "Run `AuditChain.verify` -- this is a crash or an edit, and the "
-                    "difference matters.",
-                    files[-1].name,
-                    offset,
-                )
-            self._head = entry["hash"]
-            self._last_entry = entry
-            return
 
     def _quarantine_legacy(self, files: list[Path]) -> None:
         legacy = self._dir / "legacy"

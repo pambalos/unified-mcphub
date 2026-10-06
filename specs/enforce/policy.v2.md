@@ -77,7 +77,7 @@ payload shipping (payload-evidence.v1) and the default audit view.
 | danger pattern `mcp://s/t:<prefix>*` | floor `match.tool` + `args: {command: {starts_with: ["<prefix>"]}}` |
 | danger non-scheme pattern | floor `match.tool` = whole pattern as glob |
 | Decision `source: danger_floor` | engine `floor`, mapped back at the adapter |
-| Decision `rule` (= tool pattern) | engine `rule_id` → pattern via adapter map. Hub rules have no ids, so the adapter derives them: a rule's id is its `tool` pattern, a floor's is `floor:<pattern>`, and a repeat of either takes `#2`, `#3`… in list order (ids share one namespace with constitutional rules). Readable because the engine id is what leaves the hub — evidence, queued approvals — where a positional `rule-22` named nothing and shifted whenever a learned rule was prepended |
+| Decision `rule` (= tool pattern) | engine `rule_id` → pattern via adapter map. Hub rules have no ids, so the adapter derives them: a rule's id is its `tool` pattern, a floor's is `floor:<pattern>`, a learned rule's (`<name>.local.yaml`, ADR-0024) is `learned:<pattern>`, and a repeat of any of them takes `#2`, `#3`… within its own source, in list order (ids share one namespace with constitutional rules). Assigned by source, not position: curated rules are numbered among themselves first, so persisting an `*_always` answer — which prepends a learned rule — never changes a curated rule's id. Readable because the engine id is what leaves the hub — evidence, queued approvals — where a positional `rule-22` named nothing and shifted whenever a learned rule was prepended |
 
 Caller ids are treated as literal principals; a caller id containing `*` would
 glob (documented; token-registry names make this unrealistic).

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from .util import secure_write
 
@@ -443,6 +443,22 @@ class Rule(BaseModel):
     args_filter: dict[str, dict[str, list[str]]] | None = None
     effect: str  # allow | deny | prompt
     audit_level: str = "standard"
+    #: Set for a rule that came from the machine-managed `.local.yaml`
+    #: (ADR-0024) rather than the curated workspace file. Private, so it is
+    #: never read from a file -- the *source* says where a rule came from, not
+    #: a key somebody can write -- and never part of a dump, config hash or
+    #: policy digest. It decides only the rule's readable id (authz._RuleIds).
+    _learned: bool = PrivateAttr(default=False)
+
+    @classmethod
+    def learned_rule(cls, data: Any) -> "Rule":
+        rule = cls.model_validate(data)
+        rule._learned = True
+        return rule
+
+    @property
+    def learned(self) -> bool:
+        return self._learned
 
 
 class Authz(BaseModel):
@@ -529,7 +545,7 @@ def load_workspace(name: str) -> Workspace:
     # Learned rules (ADR-0024) live in a separate machine-managed file and merge
     # as tier-1 exact rules ordered ahead of the curated rules — first-match-wins
     # means they win. The file is absent until the first `*_always`.
-    learned = [Rule.model_validate(r) for r in load_learned_rules(name)]
+    learned = [Rule.learned_rule(r) for r in load_learned_rules(name)]
     workspace.authz.rules[:0] = learned
     return workspace
 

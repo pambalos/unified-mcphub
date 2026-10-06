@@ -845,11 +845,13 @@ class Hub:
     def _persist_exact_rule(
         self, tool_uri: str, caller: str, *, allowed: bool, args_filter: dict | None = None
     ) -> None:
-        rule = Rule(
-            tool=tool_uri,
-            callers=[caller],
-            effect="allow" if allowed else "deny",
-            args_filter=args_filter,
+        rule = Rule.learned_rule(
+            {
+                "tool": tool_uri,
+                "callers": [caller],
+                "effect": "allow" if allowed else "deny",
+                "args_filter": args_filter,
+            }
         )
         # Immediate effect: prepend in-memory so the next call sees it before reload.
         self.config.workspace.authz.rules.insert(0, rule)

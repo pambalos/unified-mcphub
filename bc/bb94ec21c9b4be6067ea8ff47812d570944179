@@ -1,0 +1,22 @@
+packages/unified-mcphub/tests/unit/test_console.py
+  s_eb00e68bcc7467::t_1c5f88003ae979 1-199
+packages/unified-mcphub/src/unified_mcphub/console.py
+  s_eb00e68bcc7467::t_905b1f6da77bb6 244
+  s_eb00e68bcc7467::t_b82789beb11ec7 1-192,195-221,223-239,241-243
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "bcbb94ec21c9b4be6067ea8ff47812d570944179",
+  "prompts": {},
+  "sessions": {
+    "s_eb00e68bcc7467": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cbc19709-700c-4d5a-b04f-c39b4c8b606d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

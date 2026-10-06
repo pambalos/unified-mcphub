@@ -173,12 +173,13 @@ class Counters:
         """Re-apply the counter deltas recorded in audit entries.
 
         Reads the deltas the entry *recorded*, rather than recomputing them from
-        the stored action. The stored action is shaped by the rule's audit
-        level, so a policy that redacts `params` — which a payments policy
-        plausibly does — would otherwise recover a budget of zero from a chain
-        that faithfully recorded every spend. The number is written down at the
-        time precisely so recovery does not have to depend on what redaction
-        left behind.
+        the stored action. The stored `params` may be absent — never recorded
+        (`record_payloads=False`), or scrubbed by a rule at `minimal` in a
+        chain written before payloads were detachable — and recomputing from
+        an absent amount would recover a budget of zero from a chain that
+        faithfully recorded every spend. The number is written down at the
+        time precisely so recovery does not depend on the content being there.
+        Only `principal` is read from the action, and it is never detached.
 
         Entries older than the longest window are skipped rather than clamped
         into the current one, which would credit yesterday's spend to today.

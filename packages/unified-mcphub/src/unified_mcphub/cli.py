@@ -298,8 +298,15 @@ def cmd_reload(args: argparse.Namespace) -> int:
 def cmd_audit(args: argparse.Namespace) -> int:
     directory = audit_dir()
     cmd = args.audit_command
+    # The record holds payloads raw; what is printed follows each entry's
+    # audit_level unless --raw asks for the record as written.
+    shown = (lambda e: e) if getattr(args, "raw", False) else audit_reader.view
     if cmd in ("show", "pair"):
-        print(json.dumps(audit_reader.pair(directory, args.request_id), indent=2, default=str))
+        paired = {
+            phase: shown(entry)
+            for phase, entry in audit_reader.pair(directory, args.request_id).items()
+        }
+        print(json.dumps(paired, indent=2, default=str))
     elif cmd == "search":
         results = audit_reader.search(
             directory,
@@ -314,10 +321,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
             limit=int(args.limit) if args.limit else None,
         )
         for entry in results:
-            print(json.dumps(entry, default=str))
+            print(json.dumps(shown(entry), default=str))
     elif cmd == "tail":
         for entry in audit_reader.tail(directory):
-            print(json.dumps(entry, default=str))
+            print(json.dumps(shown(entry), default=str))
     elif cmd == "lint":
         problems = audit_reader.lint(directory)
         for problem in problems:
@@ -341,8 +348,29 @@ def cmd_audit(args: argparse.Namespace) -> int:
                 f"signatures by key {record.key_id} checked from seq {record.since_seq}; "
                 "hash chain before it"
             )
+        payloads = (
+            f"payloads: {result.payloads_verified} checked against their digests"
+            + (f", {result.payloads_withheld} WITHHELD" if result.payloads_withheld else "")
+            + (
+                f", {result.payloads_unrecorded} never recorded (record_payloads off)"
+                if result.payloads_unrecorded
+                else ""
+            )
+        )
         if result.ok:
-            print(f"chain OK: {result.entries} entries verified (anchor {result.anchor}) — {scope}")
+            print(
+                f"chain OK: {result.entries} entries verified (anchor {result.anchor}) — {scope}; "
+                + payloads
+            )
+            if result.payloads_withheld:
+                # This hub's own log should hold every payload it wrote: content
+                # is withheld from exports, not from the record. Absent values
+                # here were deleted (an edit would have failed the check).
+                print(
+                    f"warning: {result.payloads_withheld} payload(s) missing from this hub's "
+                    "own log — deleted after writing; the digests still say what they were",
+                    file=sys.stderr,
+                )
         else:
             print(f"chain BROKEN after {result.entries} entries: {result.error} — {scope}")
             return 1
@@ -568,13 +596,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_audit = sub.add_parser("audit", help="audit log")
     aud_sub = p_audit.add_subparsers(dest="audit_command", required=True)
+    raw_help = "print args/result as recorded, ignoring each entry's audit_level"
     p_aud_show = aud_sub.add_parser("show")
     p_aud_show.add_argument("request_id")
+    p_aud_show.add_argument("--raw", action="store_true", help=raw_help)
     p_aud_show.set_defaults(func=cmd_audit)
     p_aud_pair = aud_sub.add_parser("pair")
     p_aud_pair.add_argument("request_id")
+    p_aud_pair.add_argument("--raw", action="store_true", help=raw_help)
     p_aud_pair.set_defaults(func=cmd_audit)
     p_aud_search = aud_sub.add_parser("search")
+    p_aud_search.add_argument("--raw", action="store_true", help=raw_help)
     for flag in (
         "--caller",
         "--tool",
@@ -588,7 +620,9 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         p_aud_search.add_argument(flag)
     p_aud_search.set_defaults(func=cmd_audit)
-    aud_sub.add_parser("tail").set_defaults(func=cmd_audit)
+    p_aud_tail = aud_sub.add_parser("tail")
+    p_aud_tail.add_argument("--raw", action="store_true", help=raw_help)
+    p_aud_tail.set_defaults(func=cmd_audit)
     aud_sub.add_parser("lint").set_defaults(func=cmd_audit)
     aud_sub.add_parser("prune").set_defaults(func=cmd_audit)
     aud_sub.add_parser(

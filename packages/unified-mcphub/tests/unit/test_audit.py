@@ -72,26 +72,118 @@ def test_deny_writes_received_only(tmp_path):
     assert entries[0]["authz_decision"] == "deny"
 
 
-def test_standard_level_scrubs_secrets(tmp_path):
+SECRET = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"
+
+
+@pytest.mark.parametrize("level", ["minimal", "standard", "detailed", "full"])
+def test_args_and_result_are_recorded_raw_at_every_level(tmp_path, level):
+    """The record holds exactly what was sent and what came back; audit_level
+    is recorded beside it as the default view, not applied to it."""
+    from unified_mcphub import audit_reader
+
     log = AuditLog(tmp_path / "audit")
     log.start()
     try:
-        _received(log, "r1", args={"token": "sk-ABCDEFGHIJKLMNOPQRSTUVWX"}, audit_level="standard")
+        _received(log, "r1", args={"token": SECRET}, audit_level=level)
+        log.write_completed(
+            request_id="r1",
+            duration_ms=1.0,
+            result={"content": [{"type": "text", "text": SECRET}]},
+            result_status="ok",
+            audit_level=level,
+        )
     finally:
         log.stop()
-    entry = _read(tmp_path / "audit")[0]
-    assert "sk-ABCDEF" not in json.dumps(entry["args"])
-    assert "redacted" in json.dumps(entry["args"])
+    received, completed = _read(tmp_path / "audit")
+    assert received["args"] == {"token": SECRET}
+    assert completed["result"]["content"][0]["text"] == SECRET
+    assert received["audit_level"] == completed["audit_level"] == level
+    assert set(received["detached"]) == {"args"} and set(completed["detached"]) == {"result"}
+    assert "redactions_applied" not in completed, "described a write-time scrub that is gone"
+    result = audit_reader.verify(tmp_path / "audit")
+    assert result.ok and result.payloads_verified == 2
 
 
-def test_minimal_level_nulls_payload(tmp_path):
+def test_display_applies_the_recorded_level(tmp_path):
+    from unified_mcphub import audit_reader
+
     log = AuditLog(tmp_path / "audit")
     log.start()
     try:
-        _received(log, "r1", args={"secret": "x"}, audit_level="minimal")
+        _received(log, "std", args={"token": SECRET}, audit_level="standard")
+        _received(log, "min", args={"token": SECRET}, audit_level="minimal")
+        _received(log, "raw", args={"token": SECRET}, audit_level="detailed")
     finally:
         log.stop()
-    assert _read(tmp_path / "audit")[0]["args"] is None
+    std, mini, raw = (audit_reader.view(e) for e in _read(tmp_path / "audit"))
+    assert "sk-ABCDEF" not in json.dumps(std["args"]) and "redacted" in json.dumps(std["args"])
+    assert mini["args"] is None
+    assert raw["args"]["token"] == SECRET
+    assert all("salts" not in e for e in (std, mini, raw)), "salts are never printed"
+
+
+def test_cli_prints_the_view_unless_raw(tmp_path, monkeypatch, capsys):
+    from unified_mcphub import cli
+
+    monkeypatch.setattr(cli, "audit_dir", lambda: tmp_path / "audit")
+    log = AuditLog(tmp_path / "audit")
+    log.start()
+    try:
+        _received(log, "r1", args={"token": SECRET}, audit_level="standard")
+    finally:
+        log.stop()
+    cli.main(["audit", "tail"])
+    assert SECRET not in capsys.readouterr().out
+    cli.main(["audit", "show", "r1", "--raw"])
+    assert SECRET in capsys.readouterr().out
+
+
+def test_edited_args_fail_verify_even_though_the_hash_does_not_cover_them(tmp_path):
+    from unified_mcphub import audit_reader
+
+    log = AuditLog(tmp_path / "audit")
+    log.start()
+    try:
+        _received(log, "r1", args={"path": "/etc/passwd"})
+    finally:
+        log.stop()
+    path = next((tmp_path / "audit").glob("*.jsonl"))
+    path.write_text(path.read_text().replace("/etc/passwd", "/tmp/harmless"))
+    result = audit_reader.verify(tmp_path / "audit")
+    assert not result.ok and "does not match its digest" in result.error
+
+
+def test_record_payloads_off_keeps_digests_not_content_and_says_so(tmp_path, caplog):
+    import logging
+
+    from unified_mcphub import audit_reader
+
+    log = AuditLog(tmp_path / "audit", record_payloads=False)
+    with caplog.at_level(logging.WARNING):
+        log.start()
+    try:
+        _received(log, "r1", args={"token": SECRET})
+        log.write_completed(
+            request_id="r1",
+            duration_ms=1.0,
+            result={"content": [{"type": "text", "text": SECRET}]},
+            result_status="ok",
+            audit_level="standard",
+        )
+    finally:
+        log.stop()
+    assert any(
+        r.levelno == logging.WARNING and "record_payloads is OFF" in r.getMessage()
+        for r in caplog.records
+    )
+    raw = next((tmp_path / "audit").glob("*.jsonl")).read_text()
+    assert SECRET not in raw
+    received, completed = _read(tmp_path / "audit")
+    assert "args" not in received and received["unrecorded"] == ["args"]
+    assert "result" not in completed and completed["unrecorded"] == ["result"]
+    assert audit_reader.view(received)["args"] == audit_reader.NOT_RECORDED
+    result = audit_reader.verify(tmp_path / "audit")
+    assert result.ok and result.payloads_unrecorded == 2 and result.payloads_verified == 0
 
 
 def test_lock_blocks_second_writer(tmp_path):
@@ -114,29 +206,6 @@ def test_audit_file_mode_0600(tmp_path):
         log.stop()
     f = next((tmp_path / "audit").glob("*.jsonl"))
     assert stat.S_IMODE(f.stat().st_mode) == 0o600
-
-
-def test_detailed_level_keeps_raw(tmp_path):
-    log = AuditLog(tmp_path / "audit")
-    log.start()
-    try:
-        _received(log, "r1", args={"token": "sk-ABCDEFGHIJKLMNOPQRSTUVWX"}, audit_level="detailed")
-    finally:
-        log.stop()
-    # detailed captures raw, no scrubbing.
-    assert _read(tmp_path / "audit")[0]["args"]["token"] == "sk-ABCDEFGHIJKLMNOPQRSTUVWX"
-
-
-def test_full_level_keeps_raw(tmp_path):
-    # `full` captures raw like `detailed` — the spec's "4KB stdout tail" is N/A for
-    # routed MCP calls (no per-call stdout stream exists at M0).
-    log = AuditLog(tmp_path / "audit")
-    log.start()
-    try:
-        _received(log, "r1", args={"token": "sk-ABCDEFGHIJKLMNOPQRSTUVWX"}, audit_level="full")
-    finally:
-        log.stop()
-    assert _read(tmp_path / "audit")[0]["args"]["token"] == "sk-ABCDEFGHIJKLMNOPQRSTUVWX"
 
 
 def test_write_failure_raises_audit_error(tmp_path):
@@ -260,3 +329,49 @@ def test_received_records_the_policy_digest_when_given(tmp_path):
     with_digest, without = _read(tmp_path / "audit")
     assert with_digest["policy_digest"] == "ab" * 32
     assert "policy_digest" not in without, "absent, not null, when no policy decided"
+
+
+def test_a_hub_chain_exports_digests_only_and_still_verifies(tmp_path):
+    """The hub's args and results withheld from an evidence pack: no content
+    in the pack, every link intact, the pack's own verifier satisfied."""
+    import subprocess
+    import sys
+    from datetime import timedelta
+
+    from unified_enforce.evidence_pack import ChainSource, build
+
+    log = AuditLog(tmp_path / "audit")
+    log.start()
+    try:
+        _received(log, "r1", args={"token": SECRET})
+        log.write_completed(
+            request_id="r1",
+            duration_ms=1.0,
+            result={"content": [{"type": "text", "text": SECRET}]},
+            result_status="ok",
+            audit_level="standard",
+        )
+    finally:
+        log.stop()
+    pack = build(
+        out=tmp_path / "pack",
+        title="hub",
+        fleet_id="f",
+        start=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        end=datetime.now(timezone.utc) + timedelta(days=1),
+        csv_path=None,
+        chains=[ChainSource(name="hub", directory=tmp_path / "audit")],
+        policies=[],
+        root_key=None,
+        keyset_path=None,
+        payloads="digests-only",
+    )
+    assert SECRET not in (pack / "chains" / "hub" / "chain.jsonl").read_text()
+    result = subprocess.run(
+        [sys.executable, "-I", str(pack / "verify" / "verify.py")],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "0 verified against their digests, 2 withheld" in result.stdout

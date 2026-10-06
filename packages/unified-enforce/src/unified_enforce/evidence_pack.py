@@ -31,11 +31,28 @@ sidecar already holds, and the policies are the files on disk.
     verify/verify.py          entry point; `python verify/verify.py`
     verify/pack_verify.py     the verifier (this package's, copied)
     verify/attest.py          the canonical signature verifier (copied)
+    verify/detach.py          the payload-digest rule (copied)
 
 **Excerpts are verbatim and contiguous.** Lines are copied byte for byte, from
 the first entry at or after `--from` to the last before `--to`, with everything
 between — never filtered by content. A filtered excerpt would not chain, and an
 excerpt that chains is the only kind whose completeness can be checked.
+
+**Payloads: include or digests-only.** Chains record every input and output
+raw, each committed to by a salted digest inside the signed entry (detach.py).
+`--payloads include` (the default) ships them; an auditor sees exactly what the
+agent sent and got back, and the verifier checks each one against its digest.
+`--payloads digests-only` withholds them: each line is rewritten through
+`detach.redact`, which removes the values and their salts but not the digests,
+so the line hashes to the same value and every link and signature still
+verifies. That is the one exception to "byte for byte": the line is
+re-serialised, which the verifier is indifferent to because it hashes canonical
+bytes of the parsed entry, never the line as written. What the auditor gets is
+a commitment: the customer can later produce any single value with its salt,
+and it either matches the signed digest or it does not. Entries written before
+payloads were detachable carry their (write-time shaped) content inside the
+hash itself and cannot be withheld; the builder counts them into meta.json and
+the verifier says so.
 """
 
 from __future__ import annotations
@@ -55,10 +72,12 @@ from pathlib import Path
 from typing import Any
 
 from . import attest as _attest_module
+from . import detach as _detach_module
 from . import pack_verify
 from .policy import PolicyDoc, PolicyEngine, policy_digest
 
 GENERATOR = "unified-enforce evidence_pack v1"
+PAYLOAD_MODES = ("include", "digests-only")
 
 
 def _parse_ts(value: str) -> datetime:
@@ -83,14 +102,19 @@ class ChainSource:
 
 
 def excerpt(
-    source: ChainSource, start: datetime, end: datetime
+    source: ChainSource, start: datetime, end: datetime, *, payloads: str = "include"
 ) -> tuple[list[str], dict[str, Any]]:
     """The contiguous run of raw lines covering [start, end).
 
     Day files are read in the order the chain writer wrote them (sorted names),
     exactly as `HashChainWriter.verify` walks them, so the excerpt's links are
     the chain's links.
+
+    `payloads="digests-only"` re-serialises each line through `detach.redact`
+    (see module docstring); the selection of lines is identical either way.
     """
+    if payloads not in PAYLOAD_MODES:
+        raise ValueError(f"payloads must be one of {PAYLOAD_MODES}, got {payloads!r}")
     lines: list[str] = []
     for path in sorted(source.directory.glob("*.jsonl")):
         lines.extend(line for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
@@ -100,6 +124,19 @@ def excerpt(
         return [], {"entries": 0}
     first, last = inside[0], inside[-1]
     chosen = lines[first : last + 1]
+    legacy_inline = 0
+    if payloads == "digests-only":
+        chosen = [
+            json.dumps(
+                _detach_module.redact(entry),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                default=str,
+            )
+            for entry in parsed[first : last + 1]
+        ]
+        legacy_inline = sum(1 for e in parsed[first : last + 1] if _detach_module.DETACHED not in e)
     meta = {
         "name": source.name,
         "reporter_id": source.reporter_id,
@@ -114,6 +151,11 @@ def excerpt(
             (e.get("key_id") for e in parsed[first : last + 1] if e.get("key_id")), None
         ),
         "signed_from_seq": source.signed_from_seq,
+        "payloads": payloads,
+        #: Entries with no detached fields. In a digests-only excerpt these are
+        #: the ones whose content (if any) could not be withheld — see the
+        #: module docstring. Counted, not judged: most are content-free.
+        "legacy_inline_entries": legacy_inline,
     }
     return chosen, meta
 
@@ -169,11 +211,19 @@ CONTROL_MAP: list[dict[str, Any]] = [
         "topic": "AI system recording of event logs",
         "evidence": [
             "chains/*/chain.jsonl — every decision, written automatically at decision time by the "
-            "enforcement layer (not by the agent), including the data acted on at the reporter's capture level",
+            "enforcement layer (not by the agent), including the data acted on: each input and output is "
+            "recorded raw and committed to by a salted digest inside the signed entry",
+            "with payloads included, every input/output in the pack is checked against that digest; with "
+            "payloads withheld (digests-only), each remains committed to and can be produced on request "
+            "and checked against the same signed entry",
             "export/evidence.csv — one row per action for the window",
         ],
         "gaps": [
-            "retention period is the customer's policy; this pack records the window, not the retention"
+            "retention period is the customer's policy; this pack records the window, not the retention",
+            "in a digests-only pack the data acted on is evidenced by commitment, not shown: "
+            "reconstructing it needs the customer to produce the withheld values",
+            "entries written before payloads were detachable hold their content as shaped at write "
+            "time (audit_level), not raw",
         ],
     },
     {
@@ -182,6 +232,8 @@ CONTROL_MAP: list[dict[str, Any]] = [
         "evidence": [
             "chains — hash-linked; altering, inserting or removing an entry breaks every later link",
             "chains — Ed25519-signed per entry where the reporter has a key; signature covers all history",
+            "chains — each payload's salted digest is inside the signed body, so an input or output "
+            "edited after the fact fails verification, and withholding one does not break the chain",
             "manifest.json — sha256 of every file in this pack",
             "policies/ + policy_digest — the exact policy version behind each decision",
         ],
@@ -244,6 +296,25 @@ OUT_OF_SCOPE = (
 )
 
 
+_PAYLOADS_README = {
+    "include": (
+        "**Payloads included.** Every input an agent sent and every output it got back is in the "
+        "chain entries, raw. Each is committed to by a salted digest inside its signed entry, and "
+        "the verifier checks every one against it: an input or output altered in this pack fails."
+    ),
+    "digests-only": (
+        "**Payloads withheld (digests only).** Inputs and outputs have been removed from the chain "
+        "entries in this pack; each is committed to by a salted digest inside the signed entry, so "
+        "every link and signature still verifies. The customer can produce any of them — the value "
+        "and its salt — and the auditor can check it against the signed entry: "
+        "`sha256(base64-decoded salt + canonical JSON of the value)` must equal the entry's "
+        "`detached[<path>]` (`verify/detach.py`, `digest`). The salt is withheld with the value "
+        "because many inputs are guessable, and an unsalted digest would let anyone holding this "
+        "pack confirm a guess."
+    ),
+}
+
+
 def _readme(
     manifest: dict[str, Any], chains: list[dict[str, Any]], policies: dict[str, Any], rows: int
 ) -> str:
@@ -273,6 +344,8 @@ def _readme(
         "signed chain entry here, which the verifier checks.",
         "",
         "## What is in it",
+        "",
+        _PAYLOADS_README[manifest.get("payloads", "include")],
         "",
         f"- `export/evidence.csv` — {rows} rows, the control plane's export, unmodified.",
     ]
@@ -314,8 +387,8 @@ def _readme(
         "`decided_how` is `policy` where a rule decided, `human` where a person answered, `structural` "
         "where no rule could (containment, an unverifiable revocation list, an unreadable request). "
         "`attested=true` means the reporter's signature over that row verified at the control plane. "
-        "Action parameters are deliberately absent from the CSV; they are in the chain entries, at the "
-        "capture level the customer configured.",
+        "Action parameters are deliberately absent from the CSV; they are in the chain entries "
+        "(or, in a digests-only pack, committed to there by digest).",
         "",
     ]
     return "\n".join(lines)
@@ -336,7 +409,10 @@ def build(
     policies: list[PolicySource],
     root_key: str | None,
     keyset_path: Path | None,
+    payloads: str = "include",
 ) -> Path:
+    if payloads not in PAYLOAD_MODES:
+        raise ValueError(f"payloads must be one of {PAYLOAD_MODES}, got {payloads!r}")
     staging = Path(tempfile.mkdtemp(prefix="evidence-pack-"))
     try:
         rows = 0
@@ -348,7 +424,7 @@ def build(
 
         chain_meta = []
         for source in chains:
-            lines, meta = excerpt(source, start, end)
+            lines, meta = excerpt(source, start, end, payloads=payloads)
             if not lines:
                 print(
                     f"warning: chain {source.name!r} has no entries in the window", file=sys.stderr
@@ -390,6 +466,7 @@ def build(
         verify_dir.mkdir()
         shutil.copyfile(Path(pack_verify.__file__), verify_dir / "pack_verify.py")
         shutil.copyfile(Path(_attest_module.__file__), verify_dir / "attest.py")
+        shutil.copyfile(Path(_detach_module.__file__), verify_dir / "detach.py")
         (verify_dir / "verify.py").write_text(
             '"""Run: python verify/verify.py  (needs only `pip install cryptography`)."""\n'
             "import sys\nfrom pathlib import Path\n\n"
@@ -405,6 +482,7 @@ def build(
             "title": title,
             "fleet_id": fleet_id,
             "window": {"from": start.isoformat(), "to": end.isoformat()},
+            "payloads": payloads,
             "created_at": now.isoformat(timespec="seconds"),
             "created_at_ms": int(time.time() * 1000),
         }
@@ -494,6 +572,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--root-key", help="the pinned root public key (base64url, or @file)")
     p.add_argument("--keyset", type=Path, help="the root-signed key set document")
+    p.add_argument(
+        "--payloads",
+        choices=PAYLOAD_MODES,
+        default="include",
+        help="include tool inputs/outputs (default), or withhold them and ship only their "
+        "salted digests — the pack still verifies end to end",
+    )
 
     v = sub.add_parser("verify", help="verify a pack directory")
     v.add_argument("pack", type=Path)
@@ -530,6 +615,7 @@ def main(argv: list[str] | None = None) -> int:
         policies=policies,
         root_key=_read_value(args.root_key) if args.root_key else None,
         keyset_path=args.keyset,
+        payloads=args.payloads,
     )
     print(f"wrote {out}")
     return 0

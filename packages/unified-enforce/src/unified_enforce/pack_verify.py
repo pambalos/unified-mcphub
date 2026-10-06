@@ -3,8 +3,8 @@
 **Who runs this.** Somebody who does not work for the customer and does not
 trust the vendor: an ISO/IEC 42001 auditor sampling A.6.2.8 event logs and
 A.9 human-oversight records. So it is written to run *from inside the pack*
-with nothing installed but `cryptography`: the builder copies this file and
-`attest.py` into `verify/`, the manifest records their hashes, and
+with nothing installed but `cryptography`: the builder copies this file,
+`attest.py` and `detach.py` into `verify/`, the manifest records their hashes, and
 `python verify/verify.py` checks everything else. `unified-enforce` is not on
 PyPI yet, and a verifier that needs the vendor's package to be installed is a
 verifier that asks to be trusted.
@@ -25,7 +25,11 @@ area that looks like an attack from both ends.
    is signed, no later entry is unsigned. Proves the excerpt is an unaltered,
    contiguous run of what the reporter wrote. The first `prev_hash` is the
    anchor: it ties the excerpt to the history before it, which the auditor can
-   ask the customer to produce.
+   ask the customer to produce. *Payloads* — the inputs and outputs recorded
+   in each entry — are committed to by salted digest inside the signed body
+   (detach.py): every one present must match its digest, or the chain FAILS;
+   any withheld (a digests-only pack) is counted, and the customer can produce
+   it later for the auditor to check against the same digest.
 3. *Approvals* — each human resolution recorded in a chain carries the control
    plane's signature over exactly who decided, what, and when; it is checked
    against a decision key that a root-signed key set vouches for. Proves the
@@ -54,9 +58,10 @@ from pathlib import Path
 from typing import Any
 
 try:  # inside the package
-    from . import attest
+    from . import attest, detach
 except ImportError:  # inside a pack's verify/ directory
     import attest  # type: ignore[import-not-found,no-redef]
+    import detach  # type: ignore[import-not-found,no-redef]
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -111,9 +116,12 @@ def _entry_hash(entry: dict[str, Any]) -> str:
     """The chain's own hashing rule (unified_enforce.audit / canonical, lenient):
     sorted keys, no whitespace, UTF-8, unknown types stringified. Re-serialising
     parsed JSON this way is deterministic, which is what lets one verifier cover
-    strict (sidecar) and lenient (hub) chains alike."""
-    body = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+    strict (sidecar) and lenient (hub) chains alike — and what lets a
+    digests-only pack re-serialise its lines without changing a single hash.
+
+    Applied to a chain entry, pass `detach.hashable_body(entry)`: the hash
+    covers each detached value's digest, not the value."""
+    return hashlib.sha256(detach.canonical(entry)).hexdigest()
 
 
 def _verify_chain_signature(public_key_raw: bytes, signature_b64: str, entry_hash: str) -> bool:
@@ -165,7 +173,7 @@ def check_manifest(root: Path, report: Report) -> dict[str, Any] | None:
         + (f"; not in manifest: {extra}" if extra else ""),
     )
     report.facts["pack"] = {
-        k: manifest.get(k) for k in ("title", "fleet_id", "window", "created_at")
+        k: manifest.get(k) for k in ("title", "fleet_id", "window", "created_at", "payloads")
     }
     return manifest
 
@@ -189,9 +197,45 @@ def check_chains(root: Path, report: Report) -> list[Chain]:
         entries = [json.loads(line) for line in raw_lines if line.strip()]
         chains.append(Chain(name, meta, entries))
         report.add(f"chain {name}", *_verify_chain(meta, entries))
+        _note_payload_mode(name, meta, entries, report)
     if not chains:
         report.add("chains", False, "the pack contains no chain excerpts")
     return chains
+
+
+def _note_payload_mode(
+    name: str, meta: dict[str, Any], entries: list[dict[str, Any]], report: Report
+) -> None:
+    """Say what the pack's payload mode means for this chain, as notes.
+
+    Never a failure: whether content is present is a matter of what the
+    customer chose to disclose, not of integrity — integrity is `_verify_chain`.
+    But a digests-only pack that still shows content contradicts its README,
+    and entries written before payloads were detachable *cannot* have their
+    content withheld without breaking the chain, so the reader is told both.
+    """
+    mode = meta.get("payloads", "include")
+    if mode != "digests-only":
+        return
+    present = sum(detach.check(e).present for e in entries)
+    if present:
+        report.add(
+            f"payloads {name}",
+            True,
+            f"the pack says digests-only, yet {present} payload(s) are present (they verified "
+            "against their digests, so they are genuine — but more was disclosed than stated)",
+            warning=True,
+        )
+    legacy = int(meta.get("legacy_inline_entries") or 0)
+    if legacy:
+        report.add(
+            f"payloads {name}",
+            True,
+            f"{legacy} entr(y/ies) predate detachable payloads and carry their (write-time "
+            "shaped) content inline: it is covered by the entry hash directly and cannot be "
+            "withheld without breaking the chain",
+            warning=True,
+        )
 
 
 def _verify_chain(meta: dict[str, Any], entries: list[dict[str, Any]]) -> tuple[bool, str]:
@@ -200,17 +244,24 @@ def _verify_chain(meta: dict[str, Any], entries: list[dict[str, Any]]) -> tuple[
     signed_from = meta.get("signed_from_seq")
     prev = meta.get("anchor")
     signed = unsigned = 0
+    present = withheld = unrecorded = 0
     seen_signed = False
-    for i, original in enumerate(entries):
-        entry = dict(original)
-        sig = entry.pop("sig", None)
-        entry.pop("key_id", None)
-        claimed = entry.pop("hash", None)
+    for i, entry in enumerate(entries):
+        sig = entry.get("sig")
+        claimed = entry.get("hash")
         where = f"entry {i} (seq {entry.get('seq')})"
         if entry.get("prev_hash") != prev:
             return False, f"{where}: chain break — prev_hash does not follow the previous entry"
-        if _entry_hash(entry) != claimed:
+        if _entry_hash(detach.hashable_body(entry)) != claimed:
             return False, f"{where}: hash mismatch — the entry was altered"
+        # The hash covers each payload's digest, not the payload: this is the
+        # check that catches an input or output edited in the pack.
+        payloads = detach.check(entry)
+        if not payloads.ok:
+            return False, f"{where}: payload — {payloads.problem}"
+        present += payloads.present
+        withheld += payloads.withheld
+        unrecorded += payloads.unrecorded
         if sig is None:
             # A signature that stops part-way is what stripping them looks like.
             if seen_signed:
@@ -235,7 +286,11 @@ def _verify_chain(meta: dict[str, Any], entries: list[dict[str, Any]]) -> tuple[
         prev = claimed
     first = entries[0].get("seq") if entries else None
     last = entries[-1].get("seq") if entries else None
-    detail = f"{len(entries)} entries (seq {first}–{last}), {signed} signed, {unsigned} unsigned"
+    detail = (
+        f"{len(entries)} entries (seq {first}–{last}), {signed} signed, {unsigned} unsigned; "
+        f"payloads: {present} verified against their digests, {withheld} withheld"
+        + (f", {unrecorded} never recorded (record_payloads off)" if unrecorded else "")
+    )
     if key is None:
         detail += "; no public key — integrity only, not authorship"
     return True, detail
@@ -524,6 +579,15 @@ def render(report: Report) -> str:
     if pack:
         lines.append(
             f"Evidence pack: {pack.get('title')} — fleet {pack.get('fleet_id')}, window {pack.get('window')}"
+        )
+        lines.append(
+            "Payloads: "
+            + (
+                "withheld (digests only) — each input/output is committed to by a salted digest "
+                "inside its signed entry; any one can be produced and checked against it"
+                if pack.get("payloads") == "digests-only"
+                else "included — each input/output is checked against its digest"
+            )
         )
     for c in report.checks:
         mark = "PASS" if c.ok and not c.warning else ("NOTE" if c.warning else "FAIL")

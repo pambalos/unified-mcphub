@@ -90,6 +90,16 @@ class AuditConfig(BaseModel):
     #: different keys is one more thing to reconcile in an investigation.
     #: Absent: unsigned, exactly as before. `fleet join` generates it.
     signing_key_secret_ref: str = "hub-signing-key"
+    #: Record tool arguments and results in the chain (default). They are
+    #: stored raw and committed to by salted digest, so an export can withhold
+    #: them and still verify — which is how content is kept from an auditor
+    #: who should not see it. `false` keeps only the digest (and its salt) and
+    #: drops the value: the chain then proves *that* a call happened and
+    #: *which* content it carried, but can no longer show what that content
+    #: was. For deployments that are not allowed to keep it at all; logged as a
+    #: warning on every start, because turning it on by accident is silent
+    #: data loss for the one reader — an investigator — who needed it.
+    record_payloads: bool = True
 
 
 class ApprovalConfig(BaseModel):

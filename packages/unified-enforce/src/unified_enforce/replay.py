@@ -4,11 +4,24 @@ Re-decide recorded actions against a (candidate) policy and report where the
 verdicts diverge. This is the technical seed of the Test expansion pillar (X2):
 "what would this policy change have done to last month's traffic?"
 
-Entries recorded at `minimal` capture have no params, so conditions can't be
-re-evaluated faithfully — they are counted as skipped, never silently replayed.
-Entries whose stored copy was scrubbed (`redacted: true`) are replayed but
-flagged: a condition that read a scrubbed value may diverge for that reason
-alone.
+Decisions are recorded raw (detach.py): `params` and `context.extra` sit in
+the entry whatever the rule's `audit_level`, so every new entry replays
+faithfully — including `minimal` ones, which used to be unreplayable.
+
+What cannot be replayed is skipped and counted, never silently replayed with
+the missing part read as empty (which would turn "we don't know" into a
+confident verdict):
+
+- *withheld* — the entry commits to `params`/`extra` by digest but the values
+  are absent: an excerpt from a digests-only evidence pack, or a chain written
+  with `record_payloads=False`. Counted in `withheld` as well as `skipped`.
+- *legacy minimal* — written before payloads were detachable, at `minimal`,
+  which stored `params: null`.
+- unparseable stored actions.
+
+Legacy entries whose stored copy was scrubbed (`redacted: true`) are replayed
+but flagged: a condition that read a scrubbed value may diverge for that
+reason alone.
 """
 
 from __future__ import annotations
@@ -17,7 +30,9 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import detach
 from .action import Action
+from .audit import DECISION_PAYLOADS
 from .policy import PolicyEngine
 
 
@@ -37,7 +52,8 @@ class Divergence:
 class ReplayReport:
     total: int = 0  # decision entries seen
     replayed: int = 0
-    skipped: int = 0  # minimal capture or unparseable stored action
+    skipped: int = 0  # params withheld, legacy minimal capture, or unparseable
+    withheld: int = 0  # of `skipped`: params/extra committed to but not present
     divergences: list[Divergence] = field(default_factory=list)
 
     @property
@@ -57,7 +73,14 @@ def replay(audit_dir: str | Path, engine: PolicyEngine) -> ReplayReport:
                     continue
                 report.total += 1
                 payload = entry["payload"]
-                if payload.get("audit_level") == "minimal":
+                if detach.DETACHED in entry:
+                    committed = [p for p in DECISION_PAYLOADS if p in entry[detach.DETACHED]]
+                    if not all(detach.get(entry, p)[0] for p in committed):
+                        report.skipped += 1
+                        report.withheld += 1
+                        continue
+                elif payload.get("audit_level") == "minimal":
+                    # Pre-detach entry: minimal capture stored `params: null`.
                     report.skipped += 1
                     continue
                 try:

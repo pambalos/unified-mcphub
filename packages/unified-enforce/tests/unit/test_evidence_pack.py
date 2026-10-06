@@ -89,13 +89,17 @@ def _keyset(root: Key, decision: Key) -> dict:
     return sign_bytes(payload, root.private, root.kid)
 
 
+#: A value that must never appear in a digests-only pack.
+SECRETISH = "acct-UAI-203-do-not-export"
+
+
 def _act(tool: str) -> Action:
     return Action.build(
         principal=Principal(id="agent:crew-1"),
         tool=tool,
         verb="call",
         resource="*",
-        params={"n": 1},
+        params={"n": 1, "account": SECRETISH},
     )
 
 
@@ -196,8 +200,7 @@ def world(tmp_path: Path) -> dict:
     keyset_file = tmp_path / "keyset.json"
     keyset_file.write_text(json.dumps(_keyset(root, decision_key)))
 
-    pack = build(
-        out=tmp_path / "pack",
+    build_kwargs = dict(
         title="test",
         fleet_id=FLEET,
         start=datetime(2000, 1, 1, tzinfo=UTC),
@@ -215,7 +218,8 @@ def world(tmp_path: Path) -> dict:
         root_key=root.public,
         keyset_path=keyset_file,
     )
-    return {"pack": pack, "chain_dir": chain_dir}
+    pack = build(out=tmp_path / "pack", **build_kwargs)
+    return {"pack": pack, "chain_dir": chain_dir, "build": build_kwargs, "tmp": tmp_path}
 
 
 def _failures(pack: Path) -> list[str]:
@@ -342,3 +346,95 @@ def test_an_excerpt_is_contiguous_and_anchored(world):
     assert meta["anchor"] == entries[0]["hash"]
     assert meta["first_seq"] == entries[1]["seq"]
     assert len(lines) == len(entries) - 1
+
+
+# --- payloads: include vs digests-only -------------------------------------------------
+
+
+def _run_bundled(pack: Path, cwd: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-I", str(pack / "verify" / "verify.py")],
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+    )
+
+
+def test_an_included_pack_checks_every_payload(world):
+    assert SECRETISH in (world["pack"] / "chains" / "sidecar" / "chain.jsonl").read_text()
+    detail = next(c.detail for c in verify_pack(world["pack"]).checks if c.name == "chain sidecar")
+    assert "6 verified against their digests, 0 withheld" in detail  # params + extra, x3
+    assert json.loads((world["pack"] / "manifest.json").read_text())["payloads"] == "include"
+    assert (world["pack"] / "verify" / "detach.py").is_file()
+
+
+def test_an_edited_payload_fails_the_pack(world):
+    """The entry hash covers the payload's digest, not the payload — so this is
+    the edit that a hash check alone would miss."""
+    _tamper(
+        world["pack"],
+        "chains/sidecar/chain.jsonl",
+        lambda s: s.replace(SECRETISH, "acct-somebody-else", 1),
+    )
+    assert any("does not match its digest" in f for f in _failures(world["pack"]))
+
+
+def test_a_digests_only_pack_withholds_content_and_still_verifies_on_its_own(world):
+    pack = build(out=world["tmp"] / "digests", payloads="digests-only", **world["build"])
+    for path in pack.rglob("*"):
+        if path.is_file() and path.suffix in (".jsonl", ".json", ".md", ".csv"):
+            assert SECRETISH not in path.read_text(), f"{path} leaks a withheld value"
+    for line in (pack / "chains" / "sidecar" / "chain.jsonl").read_text().splitlines():
+        assert "salts" not in json.loads(line), "a salt beside a withheld value aids guessing"
+
+    report = verify_pack(pack)
+    assert report.ok, _failures(pack)
+    detail = next(c.detail for c in report.checks if c.name == "chain sidecar")
+    assert "0 verified against their digests, 6 withheld" in detail
+    assert json.loads((pack / "manifest.json").read_text())["payloads"] == "digests-only"
+    assert "Payloads withheld" in (pack / "README.md").read_text()
+
+    # The auditor's path: the pack's own verifier, nothing of ours importable.
+    moved = world["tmp"] / "elsewhere" / "digests"
+    shutil.copytree(pack, moved)
+    result = _run_bundled(moved, world["tmp"])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "6 withheld" in result.stdout and "RESULT: VERIFIED" in result.stdout
+
+
+def test_a_withheld_payload_can_be_produced_and_checked_later(world):
+    """The point of the commitment: the customer hands over one value and its
+    salt, and the auditor checks it against the signed entry in the pack."""
+    from unified_enforce import detach
+
+    pack = build(out=world["tmp"] / "digests", payloads="digests-only", **world["build"])
+    withheld = [
+        json.loads(line)
+        for line in (pack / "chains" / "sidecar" / "chain.jsonl").read_text().splitlines()
+    ]
+    original = [
+        json.loads(line)
+        for f in sorted(world["chain_dir"].glob("*.jsonl"))
+        for line in f.read_text().splitlines()
+    ]
+    path = "payload.action.params"
+    produced_value = detach.get(original[0], path)[1]
+    produced_salt = base64.b64decode(original[0]["salts"][path])
+    assert detach.digest(produced_salt, produced_value) == withheld[0]["detached"][path]
+    assert (
+        detach.digest(produced_salt, {"n": 1, "account": "a guess"})
+        != (withheld[0]["detached"][path])
+    )
+
+
+def test_a_salt_left_beside_a_withheld_value_fails(world):
+    pack = build(out=world["tmp"] / "digests", payloads="digests-only", **world["build"])
+
+    def leak_a_salt(s: str) -> str:
+        lines = s.splitlines()
+        first = json.loads(lines[0])
+        first["salts"] = {"payload.action.params": base64.b64encode(b"x" * 16).decode()}
+        return "\n".join([json.dumps(first), *lines[1:]]) + "\n"
+
+    _tamper(pack, "chains/sidecar/chain.jsonl", leak_a_salt)
+    assert any("salt present without its content" in f for f in _failures(pack))

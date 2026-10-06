@@ -170,8 +170,10 @@ def test_recovery_survives_a_policy_that_redacts_the_amount(tmp_path):
     """The subtle one, and the reason the delta is written into the entry.
 
     Rebuilt from the *stored* action, this budget would come back as zero: a
-    payments policy plausibly redacts `params`, and the recovered total would
-    look perfectly healthy while being wrong by the entire day's spend.
+    deployment may not record `params` at all (`record_payloads=False`; before
+    payloads were detachable, a `minimal` rule dropped them), and the recovered
+    total would look perfectly healthy while being wrong by the entire day's
+    spend.
     """
     policy = {
         **POLICY,
@@ -181,7 +183,7 @@ def test_recovery_survives_a_policy_that_redacts_the_amount(tmp_path):
             *POLICY["rules"][2:],
         ],
     }
-    chain = AuditChain(tmp_path)
+    chain = AuditChain(tmp_path, record_payloads=False)
     chain.start()
     first = Enforcer(PolicyEngine.from_dict(policy), chain=chain)
     for _ in range(9):
@@ -189,7 +191,7 @@ def test_recovery_survives_a_policy_that_redacts_the_amount(tmp_path):
 
     stored = [e for e in chain.entries() if e["payload"].get("counters")]
     assert stored, "no counter deltas were recorded"
-    assert stored[0]["payload"]["action"]["params"] is None, "this test needs a redacted action"
+    assert "params" not in stored[0]["payload"]["action"], "this test needs an unrecorded action"
     chain.stop()
 
     chain2 = AuditChain(tmp_path)

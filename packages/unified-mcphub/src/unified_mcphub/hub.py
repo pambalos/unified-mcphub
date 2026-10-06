@@ -222,7 +222,9 @@ class Hub:
             channel=None if console is not None else self._select_approval_channel(approval_cfg),
             console=console,
         )
-        self.audit = audit_mod.AuditLog(audit_dir())
+        self.audit = audit_mod.AuditLog(
+            audit_dir(), record_payloads=config.hub.audit.record_payloads
+        )
         self.tokens = TokenStore()
         self.secrets = SecretsStore.from_config(config.hub.secrets)
         #: Set by `_gate_secrets` when it unlocked the store; the signing key

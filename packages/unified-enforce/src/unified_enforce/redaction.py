@@ -1,17 +1,27 @@
-"""Capture levels for chain payloads — spec §2 (specs/enforce/e2.v1.md).
+"""Capture levels as a *view* of chain payloads — spec §2 (specs/enforce/e2.v1.md).
 
 Ports the hub's secret-shape redaction (audit.py, ADR-0009) to the engine.
-The rule split that makes this court-grade-compatible:
 
-- `action_digest` is always computed over the FULL action — proof of exactly
-  what happened without storing it.
-- the STORED action copy is shaped by the rule's audit_level:
-    minimal        → params and context.extra dropped (None)
+Until payloads became detachable (detach.py) this shaped what was *written*:
+the stored action copy was dropped (`minimal`) or scrubbed (`standard`) before
+it entered the hash chain, which made the record itself lossy — an
+investigation could never see what a `minimal` rule's agent had asked for, and
+no export could recover it. Now the chain stores the action raw, with `params`
+and `context.extra` committed to by salted digest, and withholding content is
+an export decision (`detach.redact`, digests-only evidence packs) that leaves
+every link and signature intact.
+
+The levels are still the rule's statement of how sensitive its traffic is, so
+they still decide what a *reader* sees by default:
+
+    minimal        → params and context.extra hidden (None)
     standard       → secret-shaped strings scrubbed (defense-in-depth, leaky
                      by design — real secrecy comes from `minimal`)
     detailed/full  → raw
-- the hash chain covers the stored (post-capture) entry, so redaction is part
-  of the tamper-evident record, not something applied after the fact.
+
+`capture_action` and `scrub` apply them to a stored copy for display; they are
+never applied before the chain hash any more. `action_digest` is, as before,
+computed over the full action.
 """
 
 from __future__ import annotations

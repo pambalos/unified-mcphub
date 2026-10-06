@@ -1,0 +1,76 @@
+packages/unified-enforce/src/unified_enforce/evidence.py
+  38a8451b3eaecd8c 78-81,84,199-203,248,250-257,275-289,333,355-363,476,495,503-512
+packages/unified-enforce/src/unified_enforce/agent_protocol.py
+  a494bf0292585cd0 1-85
+packages/unified-enforce/tests/unit/test_host_sensor.py
+  2d84817e558c417c 1-125
+packages/unified-enforce/src/unified_enforce/distribution.py
+  1b8d05de82486e46 397,405-413,667,680-697
+  38a8451b3eaecd8c 48,414-417,442-470
+packages/unified-mcphub/src/unified_mcphub/authz.py
+  a080dbd31e2faad2 37-38,300-358
+  1b8d05de82486e46 205-206,210-212,215,233-236,253-256
+packages/unified-enforce/tests/unit/test_flow_export.py
+  be50a76e1472043b 1-205
+packages/unified-enforce/src/unified_enforce/extauthz.py
+  be50a76e1472043b 170,177-182,221-227,405,455
+  a494bf0292585cd0 29,183-220,339-346,395-396
+packages/unified-enforce/src/unified_enforce/host_sensor.py
+  2d84817e558c417c 1-218
+packages/unified-enforce/tests/unit/test_agent_protocol.py
+  a494bf0292585cd0 1-125
+packages/unified-mcphub/tests/e2e/test_m0_interdict_endpoint.py
+  1b8d05de82486e46 1-105
+packages/unified-mcphub/tests/unit/test_ingress_findings.py
+  a080dbd31e2faad2 1-147
+docs/threat-model.md
+  27499c23468c1da7 88-110
+packages/unified-mcphub/tests/unit/test_interdiction.py
+  1b8d05de82486e46 1-239
+packages/unified-mcphub/src/unified_mcphub/injection.py
+  a080dbd31e2faad2 1-104
+packages/unified-mcphub/tests/unit/test_audit_reader.py
+  1b8d05de82486e46 124-158
+packages/unified-enforce/deploy/egress/README.md
+  be50a76e1472043b 82-103
+packages/unified-mcphub/tests/unit/test_fleet.py
+  1b8d05de82486e46 1-347
+packages/unified-mcphub/tests/unit/test_injection.py
+  a080dbd31e2faad2 1-90
+packages/unified-mcphub/src/unified_mcphub/audit.py
+  a080dbd31e2faad2 185-186,201-204
+  1b8d05de82486e46 207-239
+packages/unified-enforce/src/unified_enforce/flows.py
+  be50a76e1472043b 1-104
+packages/unified-mcphub/src/unified_mcphub/transports.py
+  a080dbd31e2faad2 66-68
+  1b8d05de82486e46 122-139,166
+docs/deployment-security.md
+  1b8d05de82486e46 95-144
+packages/unified-mcphub/src/unified_mcphub/config.py
+  1b8d05de82486e46 226-321,324
+packages/unified-mcphub/src/unified_mcphub/hub.py
+  1b8d05de82486e46 19,28,38,79-105,196-202,204-209,214-219,222-223,228-230,236-245,268-276,311-333,341-356,385-386,489,500-501,506-507,509,524-526,528-530,537-547,549,554-572,584-585,662-755,812-816,998-1003,1005,1041-1042
+  a080dbd31e2faad2 39,594,596-604,607-642
+packages/unified-enforce/src/unified_enforce/enforcer.py
+  38a8451b3eaecd8c 47-57
+packages/unified-enforce/tests/test_distribution.py
+  38a8451b3eaecd8c 993-1099
+  1b8d05de82486e46 1100-1181
+packages/unified-mcphub/src/unified_mcphub/audit_reader.py
+  1b8d05de82486e46 18-22,50,106,115-118,122,124-126
+packages/unified-enforce/deploy/host-sensor/unified-agent-facts.conf
+  2d84817e558c417c 1-23
+packages/unified-enforce/deploy/host-sensor/README.md
+  2d84817e558c417c 1-55
+packages/unified-enforce/tests/test_evidence_shipper.py
+  38a8451b3eaecd8c 400,407-408,424,547-634
+packages/unified-mcphub/src/unified_mcphub/fleet.py
+  1b8d05de82486e46 1-252
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "4a5439e91af2455dbe8350e63104d0180abcd446",
+  "prompts": {}
+}

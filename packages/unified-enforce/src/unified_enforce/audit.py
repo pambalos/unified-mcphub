@@ -385,6 +385,8 @@ class AuditChain:
                 "redacted": redacted,
                 "reason": decision.reason,
                 "elapsed_us": int(decision.elapsed_ms * 1000),
+                # Omitted for structural verdicts, which no policy made.
+                **({"policy_digest": decision.policy_digest} if decision.policy_digest else {}),
                 # Omitted entirely when nothing was counted, so the common
                 # entry does not grow a `"counters": {}` that every reader has
                 # to learn to ignore.

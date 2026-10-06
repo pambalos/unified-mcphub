@@ -196,6 +196,11 @@ def summarise(
         "verdict": verdict.value if hasattr(verdict, "value") else str(verdict),
         "rule_id": decision.rule_id,
         "source": decision.source,
+        # Which policy decided. Outside EVIDENCE_FIELDS, so not covered by the
+        # signature below: adding it to the signable form changes the bytes an
+        # existing verifier expects, which wants a versioned payload rather than
+        # a quiet edit. The signed copy is the chain entry this row points at.
+        "policy_digest": getattr(decision, "policy_digest", None),
         "chain_seq": (entry or {}).get("seq"),
         "chain_hash": (entry or {}).get("hash"),
         # How the identity every rule keys on was established, and what spawned

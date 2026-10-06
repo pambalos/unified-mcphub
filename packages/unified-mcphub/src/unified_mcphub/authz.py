@@ -109,6 +109,10 @@ class Decision:
     rule: str | None  # the matching rule's `tool` pattern (audit `authz_rule`)
     audit_level: str = "standard"
     source: str = "default"  # exact | danger_floor | wildcard | default
+    #: sha256 of the compiled policy that decided (audit `policy_digest`): the
+    #: workspace rules, the dangerous-commands floors and any constitutional
+    #: rules together, as one document. None when no policy decided.
+    policy_digest: str | None = None
 
 
 _VERDICT_TO_EFFECT = {
@@ -286,4 +290,5 @@ class AuthzResolver:
             rule=self._names.get(d.rule_id) if d.rule_id else None,
             audit_level=d.audit_level,
             source="danger_floor" if d.source == "floor" else d.source,
+            policy_digest=d.policy_digest,
         )

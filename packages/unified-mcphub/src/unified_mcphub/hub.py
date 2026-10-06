@@ -467,6 +467,7 @@ class Hub:
             reason=denied_reason,
             decided_by=decided_by,
             action_digest=action.digest(strict=False),
+            policy_digest=decision.policy_digest,
         )
 
         if not allowed:

@@ -69,6 +69,9 @@ and that a named human resolved it, are two separate events. An evidence log
 that collapses them cannot answer *who approved this?* — which is the question
 the log exists to answer.
 
+The approval entry carries the DEFER's `policy_digest`, so *against which policy
+was a human asked?* is answered by the approval entry alone.
+
 `elapsed_us` is an integer, matching the decision entry: floats are refused by
 strict canonicalization, and how long a person took is not worth a non-portable
 digest.

@@ -176,3 +176,42 @@ def test_decision_is_fast(engine):
         engine.decide(a)
     per_call_ms = (time.perf_counter() - start) * 1000 / 100
     assert per_call_ms < 10, f"decision took {per_call_ms:.2f} ms (budget 10 ms)"
+
+
+# --- policy_digest: which policy decided ---
+
+DIGEST_POLICY = """
+version: 1
+rules:
+  - id: reads
+    match: {tool: "mcp://files/read"}
+    effect: allow
+"""
+
+
+def test_every_policy_verdict_carries_the_digest_of_its_policy():
+    engine = PolicyEngine.from_yaml(DIGEST_POLICY)
+    allowed = engine.decide(_digest_action("mcp://files/read"))
+    defaulted = engine.decide(_digest_action("mcp://files/write"))
+    assert len(engine.policy_digest) == 64
+    assert allowed.policy_digest == engine.policy_digest
+    assert defaulted.policy_digest == engine.policy_digest, (
+        "default-deny is still this policy's verdict"
+    )
+
+
+def test_the_digest_ignores_formatting_but_not_rules():
+    """An auditor hashes the policy under review and compares: reformatting the
+    YAML must not change the answer, and changing what a rule does must."""
+    reformatted = PolicyEngine.from_yaml(
+        "# same policy, different file\nrules:\n- effect: allow\n  id: reads\n"
+        "  match: {tool: 'mcp://files/read'}\nversion: 1\n"
+    )
+    changed = PolicyEngine.from_yaml(DIGEST_POLICY.replace("effect: allow", "effect: deny"))
+    original = PolicyEngine.from_yaml(DIGEST_POLICY)
+    assert reformatted.policy_digest == original.policy_digest
+    assert changed.policy_digest != original.policy_digest
+
+
+def _digest_action(tool: str) -> Action:
+    return Action.build(principal=Principal(id="agent:a"), tool=tool, verb="call", resource="*")

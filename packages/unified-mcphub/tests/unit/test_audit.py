@@ -247,3 +247,16 @@ def test_daily_utc_rotation(tmp_path, monkeypatch):
         log.stop()
     names = sorted(p.name for p in (tmp_path / "audit").glob("*.jsonl"))
     assert names == ["2026-01-01.jsonl", "2026-01-02.jsonl"]
+
+
+def test_received_records_the_policy_digest_when_given(tmp_path):
+    log = AuditLog(tmp_path / "audit")
+    log.start()
+    try:
+        _received(log, "p1", policy_digest="ab" * 32)
+        _received(log, "p2")
+    finally:
+        log.stop()
+    with_digest, without = _read(tmp_path / "audit")
+    assert with_digest["policy_digest"] == "ab" * 32
+    assert "policy_digest" not in without, "absent, not null, when no policy decided"

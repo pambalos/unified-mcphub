@@ -262,3 +262,23 @@ floors:
     enforcer = Enforcer(PolicyEngine.from_yaml(floored_policy), approvals=Approvals(channel))
     await enforcer.enforce_with_approval(action())
     assert channel.seen[0].floored is True
+
+
+async def test_both_halves_name_the_policy_that_asked(tmp_path):
+    """ "Approved against which policy?" must be answerable from the approval
+    entry alone, and the answer must be the digest of the policy that deferred."""
+    engine = PolicyEngine.from_yaml(POLICY)
+    chain = AuditChain(tmp_path / "audit")
+    chain.start()
+    try:
+        enforcer = Enforcer(engine, chain=chain, approvals=Approvals(Channel()))
+        await enforcer.enforce_with_approval(action(), summary="pay $9,000")
+    finally:
+        chain.stop()
+
+    decision, approval = (
+        json.loads(line)["payload"]
+        for line in next((tmp_path / "audit").glob("*.jsonl")).read_text().splitlines()
+    )
+    assert decision["policy_digest"] == engine.policy_digest
+    assert approval["policy_digest"] == engine.policy_digest

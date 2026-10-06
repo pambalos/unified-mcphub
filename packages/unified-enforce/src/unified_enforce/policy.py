@@ -48,6 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from unified_paths import canonical, is_under
 
 from .action import Action
+from .canonical import canonical_bytes, sha256_hex
 
 log = logging.getLogger("unified_enforce.policy")
 
@@ -66,6 +67,11 @@ class Decision:
     audit_level: str = "standard"
     reason: str | None = None
     elapsed_ms: float = 0.0
+    #: sha256 of the policy document this verdict was evaluated against (see
+    #: `PolicyEngine.policy_digest`). None for structural verdicts that no
+    #: policy made -- a containment gate, a request the gateway could not read
+    #: -- rather than a digest of a policy that was never consulted.
+    policy_digest: str | None = None
 
 
 class PolicyError(ValueError):
@@ -298,6 +304,15 @@ class _Compiled:
 class PolicyEngine:
     def __init__(self, doc: PolicyDoc) -> None:
         self._doc = doc
+        #: Which policy decided, as a fact an auditor can recompute. A digest of
+        #: the validated document rather than a version number: nothing on the
+        #: decision path knows a version (a distributed bundle's version
+        #: describes what the fleet was *sent*, and the engine compiles from its
+        #: own document), and a number is an assertion where a digest is
+        #: checkable -- hash the policy file under review and compare. Computed
+        #: over the normalised model, so comments and key order in the YAML do
+        #: not change it but any change to a rule does.
+        self.policy_digest = policy_digest(doc)
         env = celpy.Environment()
         seen_ids: set[str] = set()
 
@@ -407,6 +422,7 @@ class PolicyEngine:
 
         def done(d: Decision) -> Decision:
             d.elapsed_ms = round((time.perf_counter() - start) * 1000, 3)
+            d.policy_digest = self.policy_digest
             return d
 
         activation: dict[str, Any] | None = None  # built lazily, only if a rule has CEL
@@ -516,6 +532,16 @@ class PolicyEngine:
                 continue
             out[compiled.id] = out.get(compiled.id, 0.0) + value
         return out
+
+
+def policy_digest(doc: PolicyDoc) -> str:
+    """sha256 of a policy document's canonical form; what `Decision.policy_digest` records.
+
+    Non-strict canonical bytes: a policy may legitimately carry a float (a
+    counter threshold), and this digest is recomputed by a Python verifier, not
+    compared across languages.
+    """
+    return sha256_hex(canonical_bytes(doc.model_dump(mode="json"), strict=False))
 
 
 def _activation(

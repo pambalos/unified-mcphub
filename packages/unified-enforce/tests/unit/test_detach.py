@@ -231,3 +231,18 @@ def test_record_payloads_off_stores_no_content_warns_and_verifies(tmp_path, capl
     assert detach.digest(salt, claimed) == e["detached"]["payload.action.params"]
     # ...and an export strips it like any other.
     assert "salts" not in detach.redact(e)
+
+
+def test_payload_digest_matches_detach():
+    """attest restates detach's digest rule so it can stand alone in the
+    control plane and in evidence packs; the two must produce the same bytes."""
+    import base64
+
+    from unified_enforce import attest, detach
+
+    entry = detach.detach(
+        {"args": {"id": "UAI-203", "n": 1.5, "nested": {"é": [1, None]}}}, ["args"]
+    )
+    salt, digest = entry["salts"]["args"], entry["detached"]["args"]
+    assert attest.payload_content_digest(salt, entry["args"]) == digest
+    assert base64.b64decode(salt)

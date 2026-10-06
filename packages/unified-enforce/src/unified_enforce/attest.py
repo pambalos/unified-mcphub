@@ -844,6 +844,112 @@ def accept_evidence(
     return Verdict(ok=True, payload=dict(record))
 
 
+# --- payload evidence ------------------------------------------------------------
+#
+# **What this is.** Decision evidence (above) is metadata only. A control plane
+# that runs inside the customer's own perimeter -- the self-hosted deployment --
+# can also hold the exact arguments and results, so its console, history and
+# exports show what an agent actually sent and got back. A hosted control plane
+# receives them only for fleets that opted in. Either way the customer's signed
+# chain stays the record; this is a verifiable copy of part of it.
+#
+# **Why a separate record, not more fields on decision evidence.** A result
+# exists only after the call returns, long after its decision was shipped, and
+# the control plane keeps one decision row per action. Each detached value
+# (`args`, `result`, `payload.action.params`, ...) therefore travels on its own,
+# naming the chain entry it was detached from.
+#
+# **What makes the copy checkable.** The reporter signs the *binding* -- which
+# action, which chain entry, which path, which digest -- and the receiver checks
+# that the content hashes to that digest under its salt (detach.py's rule). A
+# receiver that stored altered content would hold bytes that no longer match a
+# digest the reporter signed, and the reporter's own chain entry commits to the
+# same digest. The content itself is not inside the signature: the digest is,
+# and the digest commits to the content.
+
+#: Inside the signature, so a change of shape is a change of meaning.
+PAYLOAD_EVIDENCE_VERSION = 1
+
+#: Exactly what a reporter signs for a payload, in order.
+PAYLOAD_EVIDENCE_FIELDS = (
+    "action_digest",
+    "chain_seq",
+    "chain_hash",
+    "path",
+    "digest",
+    "size_bytes",
+)
+
+
+def payload_content_digest(salt_b64: str, value: Any) -> str:
+    """detach.py's digest rule: sha256(salt || canonical(value)).
+
+    Restated here rather than imported because this module is vendored by hash
+    into the control plane and copied into evidence packs, and must stand
+    alone. `test_payload_digest_matches_detach` pins the two to the same bytes.
+    """
+    body = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return hashlib.sha256(base64.b64decode(salt_b64) + body.encode("utf-8")).hexdigest()
+
+
+def payload_evidence_payload(record: Mapping[str, Any]) -> dict[str, Any]:
+    """The signable form of one payload record (the binding, not the content)."""
+    return {
+        "v": PAYLOAD_EVIDENCE_VERSION,
+        **{field: record.get(field) for field in PAYLOAD_EVIDENCE_FIELDS},
+    }
+
+
+def sign_payload_evidence(record: Mapping[str, Any], signer: Any) -> dict[str, Any]:
+    """Return `record` with the reporter's signature over its binding attached.
+
+    `record` carries the binding fields plus `salt` and `value`; only the
+    binding is signed. Same key and encoding as `sign_evidence`.
+    """
+    raw = base64.b64decode(signer.sign_bytes(canonical(payload_evidence_payload(record))))
+    return {**record, "sig": b64u(raw), "key_id": signer.key_id}
+
+
+def accept_payload_evidence(record: Mapping[str, Any], public_key_b64: str) -> Verdict:
+    """Check a payload record: the reporter signed this binding, and the content
+    hashes to the digest it names.
+
+    Never raises. Unlike decision evidence, a payload that fails is *refused*
+    rather than stored as unattested: its only value is being the exact bytes
+    the chain committed to, and content that does not match its digest is not
+    those bytes. Refusing it suppresses nothing -- the decision row, and the
+    customer's chain, still record that the action happened.
+    """
+    signature_b64 = record.get("sig")
+    if not isinstance(signature_b64, str):
+        return _refuse(Reason.MALFORMED, "payload carries no signature")
+    for name in ("action_digest", "chain_hash", "path", "digest", "salt"):
+        if not isinstance(record.get(name), str) or not record.get(name):
+            return _refuse(Reason.MALFORMED, f"payload is missing {name}")
+    if "value" not in record:
+        return _refuse(Reason.MALFORMED, "payload carries no value")
+
+    try:
+        signed = canonical(payload_evidence_payload(record))
+    except CanonicalisationError as exc:
+        return _refuse(Reason.MALFORMED, str(exc))
+    try:
+        Ed25519PublicKey.from_public_bytes(unb64u(public_key_b64)).verify(
+            unb64u(signature_b64), signed
+        )
+    except (InvalidSignature, ValueError, TypeError):
+        return _refuse(Reason.BAD_SIGNATURE, "payload signature did not verify")
+
+    try:
+        actual = payload_content_digest(record["salt"], record["value"])
+    except (ValueError, TypeError) as exc:
+        return _refuse(Reason.MALFORMED, f"payload salt is not base64: {exc}")
+    if actual != record["digest"]:
+        return _refuse(Reason.BAD_SIGNATURE, "payload content does not match its signed digest")
+
+    return Verdict(ok=True, payload=dict(record))
+
+
 # --- binding a credential to the key that holds it ------------------------------
 #
 # The bearer credential is possession-is-identity: a stolen one works until it is

@@ -645,3 +645,75 @@ def test_a_shipped_record_names_the_policy_that_decided():
         principal=Principal(id="agent:a"), tool="mcp://a/b", verb="call", resource="*"
     )
     assert summarise(act, engine.decide(act))["policy_digest"] == engine.policy_digest
+
+
+# --- per-record refusals and field bounds ---------------------------------------
+
+
+class RefusesSome:
+    """A control plane that validates record by record and names the refused."""
+
+    def __init__(self, refuse: set[int]) -> None:
+        self.refuse = refuse
+        self.batches: list[list[dict]] = []
+
+    def send(self, batch):
+        self.batches.append(list(batch))
+        return {
+            "accepted": len(batch) - len(self.refuse),
+            "refused": [{"index": i, "reason": "bad field"} for i in sorted(self.refuse)]
+            + [{"index": 99, "reason": "out of range is ignored"}, "garbage"],
+        }
+
+
+def test_records_refused_one_by_one_are_counted_not_retried_and_the_rest_stand():
+    sink = RefusesSome({1, 3})
+    shipper = EvidenceShipper(sink)
+    for _ in range(5):
+        shipper.record(action(), decision())
+
+    assert shipper.flush() == 3
+    shipper.flush()
+    assert len(sink.batches) == 1, "refused records are not resent"
+    assert shipper.spool.stats.rejected == 2
+    assert shipper.spool.stats.shipped == 3
+    assert len(shipper.spool) == 0
+
+
+def test_an_all_or_nothing_receipt_still_means_everything_was_accepted():
+    sink = Collecting()
+    shipper = EvidenceShipper(sink)
+    for _ in range(3):
+        shipper.record(action(), decision())
+    assert shipper.flush() == 3
+    assert shipper.spool.stats.rejected == 0 and shipper.spool.stats.shipped == 3
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"principal": Principal(id="agent:" + "p" * 251)},
+        {"tool": "sdk://" + "t" * 508},
+    ],
+)
+def test_an_oversized_field_is_counted_locally_and_never_sinks_a_batch(overrides, caplog):
+    """Against a control plane that validates a batch whole, one record with a
+    field it will not store took every other record in the batch with it."""
+    sink = Collecting()
+    shipper = EvidenceShipper(sink)
+    assert shipper.record(action(), decision()) is True
+    assert shipper.record(action(**overrides), decision()) is False
+    assert shipper.record(action(**overrides), decision()) is False
+    shipper.flush()
+    assert len(sink.records) == 1
+    assert shipper.spool.stats.invalid == 2
+    assert sum("not shipping decision evidence" in r.message for r in caplog.records) == 1
+
+
+def test_fields_at_the_bound_still_ship():
+    sink = Collecting()
+    shipper = EvidenceShipper(sink)
+    a = action(principal=Principal(id="a" * 256), tool="t" * 512)
+    assert shipper.record(a, decision()) is True
+    shipper.flush()
+    assert len(sink.records) == 1

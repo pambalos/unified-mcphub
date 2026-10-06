@@ -64,6 +64,33 @@ DEFAULT_CAPACITY = 10_000
 #: arrive as a single enormous body.
 DEFAULT_BATCH = 200
 
+#: Field bounds the control plane's decision-evidence schema enforces. A
+#: record over either is refused there; before per-record refusals it was
+#: refused *with its whole batch*, so it is not sent at all (EvidenceShipper).
+MAX_PRINCIPAL_ID = 256
+MAX_TOOL = 512
+
+
+def refused_indices(receipt: Any, size: int) -> set[int]:
+    """The batch positions a receipt says were refused, record by record.
+
+    A control plane that validates per record answers `refused: [{index,
+    reason}, ...]` beside what it accepted (payload ingest has always done so;
+    decision ingest is moving to it). A receipt without the field is the
+    all-or-nothing answer every older control plane gives, and means nothing
+    was refused. Indices out of range, or not integers, are ignored: a receipt
+    may not invent records.
+    """
+    refused = receipt.get("refused") if isinstance(receipt, Mapping) else None
+    if not isinstance(refused, list):
+        return set()
+    out = set()
+    for item in refused:
+        index = item.get("index") if isinstance(item, Mapping) else None
+        if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < size:
+            out.add(index)
+    return out
+
 
 class PermanentRejection(Exception):
     """The receiver will never accept this batch, however many times it is sent.
@@ -118,6 +145,11 @@ class SpoolStats:
     #: dashboard that is quietly wrong.
     dropped: int = 0
     failures: int = 0
+    #: Decision records never queued because a field exceeds what a control
+    #: plane will store (`MAX_PRINCIPAL_ID`, `MAX_TOOL`). Counted rather than
+    #: sent: against a control plane that validates a batch whole, one such
+    #: record would take every other record in its batch down with it.
+    invalid: int = 0
 
 
 @dataclass
@@ -436,6 +468,18 @@ class EvidenceShipper:
         see `summarise`.
         """
         try:
+            if len(action.principal.id) > MAX_PRINCIPAL_ID or len(action.tool) > MAX_TOOL:
+                self.spool.stats.invalid += 1
+                if self.spool.stats.invalid == 1 or self.spool.stats.invalid % 1000 == 0:
+                    log.warning(
+                        "not shipping decision evidence with a principal id over %d or a tool "
+                        "over %d characters (%d so far); the control plane would refuse it, "
+                        "and an older one its whole batch. It is in the audit chain.",
+                        MAX_PRINCIPAL_ID,
+                        MAX_TOOL,
+                        self.spool.stats.invalid,
+                    )
+                return False
             return self.submit(
                 summarise(
                     action, decision, entry=entry, signer=self._signer, action_digest=action_digest
@@ -545,7 +589,24 @@ class EvidenceShipper:
             self.spool.stats.failures += 1
             log.debug("%s send failed, %d record(s) requeued: %s", self._stream, len(batch), exc)
             return 0, batch
-        self.spool.stats.shipped += len(batch)
+        refused = refused_indices(receipt, len(batch)) if self._counts_refusals else set()
+        if refused:
+            # Judged on their merits, one by one: not retried (they would be
+            # judged the same way again), and the rest of the batch stands.
+            self.spool.stats.rejected += len(refused)
+            reasons = [
+                str(r.get("reason"))
+                for r in receipt.get("refused", [])[:3]
+                if isinstance(r, Mapping)
+            ]
+            log.warning(
+                "control plane refused %d of %d %s record(s): %s",
+                len(refused),
+                len(batch),
+                self._stream,
+                "; ".join(reasons),
+            )
+        self.spool.stats.shipped += len(batch) - len(refused)
         if self.payloads is not None:
             # Before `on_receipt`, and guarded on its own: a payload gate
             # that cannot read the receipt must not stop containment from
@@ -565,7 +626,11 @@ class EvidenceShipper:
                 # shipping failure, or the batch would be requeued and sent
                 # twice.
                 log.exception("evidence receipt handler raised")
-        return len(batch), []
+        return len(batch) - len(refused), []
+
+    #: Whether `_deliver` counts a receipt's per-record refusals. The payload
+    #: stream counts its own (`PayloadStats.refused`, from `on_receipt`).
+    _counts_refusals = True
 
     def _too_large(self, record: dict[str, Any], exc: Exception) -> None:
         """A single record the receiver refused for size, even on its own."""
@@ -812,6 +877,7 @@ class PayloadShipper(EvidenceShipper):
 
     _thread_name = "unified-evidence-payloads"
     _stream = "payload evidence"
+    _counts_refusals = False
 
     def __init__(
         self,

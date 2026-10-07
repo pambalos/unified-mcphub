@@ -756,7 +756,10 @@ def test_arguments_are_withheld_for_minimal_rules_and_when_sharing_is_off(level,
     body = _queued_body(channel, request)
     assert body["action"]["params"] == {}
     assert body["params_withheld"] == reason
-    assert "9911" not in json.dumps(body), "nor in the summary, which renders arguments"
+    # Not a bare "9911": the action digest is random hex and contains it now
+    # and then. The account as a JSON value and as the summary renders it.
+    assert '"9911"' not in json.dumps(body)
+    assert "acct 9911" not in json.dumps(body), "nor in the summary, which renders arguments"
     assert body["action_digest"] == request.digest, "the binding is the sidecar's digest"
 
 
@@ -799,7 +802,7 @@ def test_arguments_are_withheld_for_a_gate_forced_deferral(source):
     )
     body = _queued_body(channel, request)
     assert body["action"]["params"] == {} and body["params_withheld"] == "distribution_state"
-    assert "9911" not in json.dumps(body)
+    assert '"9911"' not in json.dumps(body) and "acct 9911" not in json.dumps(body)
 
 
 def test_arguments_are_withheld_when_the_gate_also_deferred_a_policy_prompt():

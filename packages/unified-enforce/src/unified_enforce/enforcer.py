@@ -23,6 +23,7 @@ from .approval import (
     ApprovalRequest,
     Approvals,
     RecordedApproval,
+    gate_forced,
     no_looser_than_defer,
 )
 from .audit import AuditChain
@@ -211,7 +212,11 @@ class Enforcer:
             # - the deciding rule says `audit_level: minimal`: the customer
             #   marked this traffic sensitive. The chain still records the
             #   content raw (detach.py); `minimal` is the default view and
-            #   export, and a copy to another system is an export.
+            #   export, and a copy to another system is an export;
+            # - the decision is a DEFER forced by distribution state
+            #   (`gate_forced`; a containment DENY still ships what was tried):
+            #   the principal may be contained, and the approval request for
+            #   it withholds the arguments too (`distribution_state`).
             #
             # Looked up rather than called: anything that only implements
             # `record` (a test double, an older custom shipper) is still a
@@ -225,6 +230,7 @@ class Enforcer:
                 and entry is not None
                 and ship_payload is not None
                 and decision.audit_level != "minimal"
+                and not (decision.verdict is Verdict.DEFER and gate_forced(decision))
             ):
                 try:
                     ship_payload(entry, "payload.action.params")

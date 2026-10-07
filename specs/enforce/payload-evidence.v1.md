@@ -107,10 +107,18 @@ The receipt of `POST /api/v1/evidence` gains `payloads` (`"accept"` or
   payloads, neither arguments nor result. The chain still records the content
   (detach.py); `minimal` is the default view and export, and this copy is an
   export.
+- **Gate-forced prompts.** A call deferred by distribution state
+  (`approval.gate_forced`: an unknown or stale revocation list, an expired
+  bundle under `on_stale: defer`, a `defer` containment — alone or beside the
+  engine's own DEFER) ships no payloads, neither arguments nor result, however
+  the prompt is answered. Its approval request withholds the arguments
+  (`params_withheld: distribution_state`), and the principal may be
+  contained; a payload copy would contradict both. A containment DENY still
+  ships its arguments (what was tried).
 - **Approvals are a separate copy.** A console approval request shows the
   approver the action's arguments, governed by approval.v1 §5 rather than by
-  this stream's gate: never `context.extra`; no arguments for a `minimal` rule
-  or a hub with `control_plane.payloads: off`; and only over https (loopback
+  this stream's gate: never `context.extra`; no arguments for a `minimal` rule,
+  a gate-forced DEFER or a hub with `control_plane.payloads: off`; and only over https (loopback
   http excepted). The decision binding is unaffected — the control plane keys
   and signs on `action_digest`, which the reporter computed over the full
   action.

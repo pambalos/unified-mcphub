@@ -25,6 +25,7 @@ from ulid import ULID
 from watchfiles import awatch
 
 from unified_enforce import Action, ActionContext, Principal, Telemetry
+from unified_enforce.approval import gate_forced
 from unified_enforce.distribution import FLEET_WIDE as _FLEET_WIDE
 from unified_paths import canonical
 
@@ -543,7 +544,19 @@ class Hub:
         shipped = False
         if final is not None:
             shipped = self.authz.ship(action, final, received, action_digest=recorded_digest)
-        ship_payloads = shipped and decision.audit_level != "minimal"
+        # Nor for a prompt that fleet distribution state forced (an unknown or
+        # stale revocation list, a `defer` containment): the approval queue
+        # was told the arguments are withheld (`distribution_state`), and this
+        # principal may be contained -- the copy would contradict both.
+        ship_payloads = (
+            shipped
+            and decision.audit_level != "minimal"
+            and not (
+                decision.effect is Effect.PROMPT
+                and decision.engine is not None
+                and gate_forced(decision.engine)
+            )
+        )
         if ship_payloads:
             self.authz.ship_payload(received, "args", action_digest=recorded_digest)
 

@@ -1381,3 +1381,37 @@ async def test_a_gate_forced_deferral_is_answered_for_one_call_only(root):
     before = channel.asked
     await approvals.resolve(ApprovalRequest(action=act, decision=deferral))
     assert channel.asked == before + 1
+
+
+def test_a_gate_forced_defer_offers_no_payload(root):
+    """The approval request withholds the arguments for it, so no payload
+    copy is offered either; a policy DEFER still offers one."""
+    from unified_enforce.enforcer import Enforcer
+    from unified_enforce.policy import PolicyEngine
+
+    class Sink:
+        def __init__(self):
+            self.payloads = []
+
+        def record(self, action, decision, *, entry=None):
+            return True
+
+        def record_payload(self, entry, path):
+            self.payloads.append(path)
+
+    class Chain:
+        def append_decision(self, action, decision, counters=None):
+            return {"seq": 1, "hash": "h"}
+
+    sink = Sink()
+    dist = make(FakeSource(None, None, None), root, require_bundle=False)
+    enforcer = Enforcer(
+        PolicyEngine.from_yaml(_DENY_AND_FLOOR), chain=Chain(), distribution=dist, evidence=sink
+    )
+    held = enforcer.enforce(action(tool="sdk://payments/list"))
+    assert held.verdict is Verdict.DEFER and held.source == "distribution"
+    assert sink.payloads == []
+    # Without the gate, a policy DEFER (the floor) does offer one.
+    plain = Enforcer(PolicyEngine.from_yaml(_DENY_AND_FLOOR), chain=Chain(), evidence=sink)
+    plain.enforce(action(tool="sdk://payments/wire"))
+    assert sink.payloads == ["payload.action.params"]

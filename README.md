@@ -58,22 +58,31 @@ proposes default-deny authz rules (see [Adding MCP servers](packages/unified-mcp
 Apache-2.0) lets an agent **navigate and browse the live web through a real
 browser** — `browser_navigate` / `browser_snapshot` / `browser_click` /
 `browser_type` and ~20 more tools. It's a Node package, so **Node ≥18 must be on
-PATH**, and the browser binaries are a separate, heavy (~100 MB headless Chromium)
-opt-in download.
+PATH**, and the browser binaries are a separate, heavy (~170 MB download, ~345 MB
+on disk) opt-in download.
 
 ```sh
-# 1. one-time: download the browser binary (heavy; Chromium only keeps it small)
-npx playwright install chromium
+# 1. one-time: pre-install the pinned server (no fetch-at-spawn)
+npm i -g @playwright/mcp@0.0.75
 
-# 2. register the pinned server with the hub, hardened for agent use:
-#    --headless (no window) · --isolated (ephemeral profile, no persisted creds)
+# 2. one-time: download the Chromium build *this* package's bundled Playwright
+#    expects. Don't use a bare `npx playwright install` — that resolves the latest
+#    Playwright, whose Chromium revision the pinned MCP won't find.
+node "$(npm root -g)/@playwright/mcp/node_modules/playwright/cli.js" install chromium
+
+# 3. register it with the hub, hardened for agent use:
+#    --browser chromium (Playwright's Chromium; the default `chrome` channel needs
+#    Google Chrome installed at /Applications) · --headless (no window)
+#    --isolated (ephemeral profile, no persisted creds)
 #    --blocked-origins (the only per-URL control — the hub gates tools, not URLs)
 #    seeds loopback + IPv6-loopback + cloud-metadata across all ports (:*) so the
 #    browser can't be turned into an SSRF pivot, while the open internet stays reachable.
+#    Values starting with `-` must use the `--arg=VALUE` form, or argparse rejects them.
 uv run unified-mcphub add-server playwright \
-  --npx '@playwright/mcp@0.0.75' \
-  --arg --headless --arg --isolated \
-  --arg --blocked-origins \
+  --command playwright-mcp \
+  --arg=--browser --arg chromium \
+  --arg=--headless --arg=--isolated \
+  --arg=--blocked-origins \
   --arg 'http://localhost:*;http://127.0.0.1:*;http://[::1]:*;http://169.254.169.254:*'
 ```
 
@@ -85,11 +94,17 @@ arbitrary JS in the page). Use `--configure-perms` for the per-tool wizard.
 
 **Hardening notes** (all verified locally):
 - **Strict containment:** swap the blocklist for an allowlist —
-  `--arg --allowed-origins --arg 'https://docs.example.com;https://api.example.com'`
+  `--arg=--allowed-origins --arg 'https://docs.example.com;https://api.example.com'`
   makes *only* those origins reachable (everything else, including all loopback
   ports and other sites, is blocked). This is the high-security option.
-- **No fetch-at-spawn (gold path):** pre-install the bin and point at it instead of
-  npx — `npm i -g @playwright/mcp@0.0.75` then `add-server playwright --command playwright-mcp --arg …`.
+- **npx instead of a global install:** `--npx '@playwright/mcp@0.0.75'` in place of
+  `--command playwright-mcp` works too, but fetches the package at spawn time — the
+  global install above is the gold path.
+- **Install hangs at 100%:** on newer Node (seen on 26) the bundled Playwright's
+  unzip can stall after the download completes. Stop it, then unpack by hand —
+  the URL and revision are in the install output:
+  `curl -fLo cft.zip <url> && ditto -x -k cft.zip ~/Library/Caches/ms-playwright/chromium-<rev>`
+  and `touch` `INSTALLATION_COMPLETE` + `DEPENDENCIES_VALIDATED` in that folder.
 - Origins are matched **scheme + host + port** and support globs, so a port
   wildcard (`http://127.0.0.1:*`) is required to cover all ports of a host.
 

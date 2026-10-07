@@ -83,6 +83,10 @@ class ApprovalTimeout(ApprovalTransportError, TimeoutError):
     """
 
 
+class NoVerificationKeys(ApprovalTransportError):
+    """There is no key to verify a resolution with, so the request is not queued."""
+
+
 class UnverifiedResolution(Exception):
     """A resolution arrived and could not be trusted.
 
@@ -187,6 +191,17 @@ class RemoteApprovals:
         a second place a fail-open could be introduced.
         """
         digest = request.digest
+        if not self._keys():
+            # No decision key this client could verify a resolution with --
+            # no key set has verified yet (an un-polled or unprovisioned
+            # sidecar), or the last one stopped verifying. Queueing anyway
+            # would put a question in front of an approver whose answer is
+            # certain to be refused, for as long as the deadline. Refused here,
+            # before anything leaves: `Approvals` turns this into a DENY.
+            raise NoVerificationKeys(
+                "no verified decision key: cannot verify any resolution, so nothing is queued "
+                "(the fleet's key set has not verified yet)"
+            )
         queued = await asyncio.to_thread(self._queue, request)
 
         if queued.already_resolved:

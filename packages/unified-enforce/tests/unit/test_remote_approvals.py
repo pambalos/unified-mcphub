@@ -808,3 +808,18 @@ def test_arguments_are_withheld_when_the_gate_also_deferred_a_policy_prompt():
     request.decision.context = {"gate": {"source": "distribution", "reason": "stale"}}
     body = _queued_body(channel, request)
     assert body["params_withheld"] == "distribution_state"
+
+
+async def test_nothing_is_queued_when_no_key_could_verify_the_answer():
+    """Before any key set has verified (an un-polled sidecar), no resolution
+    can be honoured: the request is refused before it leaves, and the agent
+    is denied -- not left waiting the full deadline on a certain refusal."""
+    s = signer()
+    a = action()
+    fake = FakeControlPlane([fresh(s, a.digest(strict=False))])
+    channel = channel_over(fake, s)
+    channel._keys = lambda: {}  # noqa: SLF001 - what Distribution.verification_keys returns
+    outcome = await Approvals(channel).resolve(request_for(a))
+    assert not outcome.allowed
+    assert fake.queued == [] and fake.polls == 0
+    assert outcome.decision.source == "approval_error"

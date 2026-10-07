@@ -131,6 +131,12 @@ weakening the binding:
   them. `deadline_seconds` is sent as an integer, rounded up from the
   configured deadline, for control planes that validate an int.
 
+Nothing is queued while the reporter holds no verified decision key (no key
+set has verified yet — an un-polled or unprovisioned reporter — or the last
+one stopped verifying): `RemoteApprovals.ask` raises `NoVerificationKeys`
+before posting, and the prompt is denied (`approval_error`). Queueing would
+put a question in front of an approver whose answer is certain to be refused.
+
 A deadline that passes with no answer raises `ApprovalTimeout` (a
 `TimeoutError`) and is recorded as `approval_timeout` / `approval_timed_out`,
 not as a channel error.

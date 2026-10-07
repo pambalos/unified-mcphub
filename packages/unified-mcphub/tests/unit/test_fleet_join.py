@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 
 import httpx
 import pytest
 import yaml
 
-from unified_enforce.attest import b64u, key_id
+from unified_enforce.attest import accept_proof, b64u, key_id
 from unified_enforce.signing import Signer
 
 from unified_mcphub import fleet_join
@@ -48,9 +49,28 @@ def plane(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/api/v1/policy/bundle":
             state.setdefault("bundle_asks", []).append(request.headers.get("authorization"))
+            # As the real control plane's `_require_proof`: once a channel key
+            # is registered for the credential, a request without a valid
+            # proof is a 401 (and a CHANNEL DOWNGRADE in its log).
+            channel_key = state.get("channel_key")
+            if channel_key is not None:
+                verdict = accept_proof(
+                    request.headers.get("x-unified-proof", ""),
+                    public_key_b64=channel_key,
+                    credential_id="cred-123",
+                    method="GET",
+                    path=request.url.path,
+                    body=None,
+                    now=int(time.time()),
+                )
+                if not verdict:
+                    state.setdefault("downgrades", []).append(verdict.reason)
+                    return httpx.Response(401, json={"detail": "request proof required"})
             return httpx.Response(state.get("bundle", 200), json={})
         body = json.loads(request.content)
         seen.append({"url": str(request.url), "body": body})
+        if body.get("channel_key"):
+            state["channel_key"] = body["channel_key"]
         if state["status"] != 201:
             return httpx.Response(
                 state["status"], json={"detail": "join token is unknown, expired, or already used"}
@@ -204,6 +224,7 @@ def test_join_warns_with_the_publish_command_when_no_bundle_exists(plane, store,
     assert "no policy bundle published" in out
     assert "unified-control publish-policy --fleet acme --dir" in out
     assert state["bundle_asks"] == [f"Bearer {CREDENTIAL}"], "asked with the new credential"
+    assert "downgrades" not in state, "proved with the channel key just registered"
     assert CREDENTIAL not in out
 
 

@@ -80,8 +80,21 @@ class JoinResult:
     bundle_published: bool | None = None
 
 
-def _bundle_published(url: str, credential: str) -> bool | None:
+#: The path the bundle question asks; also what its request proof covers
+#: (the same path `ControlPlaneSource.fetch_bundle` proves, without the base).
+BUNDLE_PATH = "/api/v1/policy/bundle"
+
+
+def _bundle_published(
+    url: str, credential: str, *, channel: Any = None, credential_id: str | None = None
+) -> bool | None:
     """Ask, with the new credential, whether the fleet has a bundle.
+
+    Proved with the channel key just registered, exactly as the hub's own
+    fetches are (`ChannelKey.headers`): from the moment enrolment registered
+    it, the control plane refuses a bearer-only request from this credential
+    -- with a 401, and a `CHANNEL DOWNGRADE` alarm in its log -- so asking
+    without a proof both loses the answer and raises a false alarm.
 
     The hub does not need one (its policy is local; `Distribution` runs with
     `require_bundle=False`), but every *sidecar* in the fleet denies every
@@ -89,12 +102,14 @@ def _bundle_published(url: str, credential: str) -> bool | None:
     first enforcement point should hear, with the command that fixes it.
     Never fails the join: the enrolment has already happened.
     """
+    headers = {"authorization": f"Bearer {credential}"}
+    if channel is not None and credential_id:
+        from unified_enforce.channel import ChannelKey
+
+        headers.update(ChannelKey(channel, credential_id).headers("GET", BUNDLE_PATH, None))
     try:
         with httpx.Client(timeout=ENROL_TIMEOUT_SECONDS) as client:
-            response = client.get(
-                url.rstrip("/") + "/api/v1/policy/bundle",
-                headers={"authorization": f"Bearer {credential}"},
-            )
+            response = client.get(url.rstrip("/") + BUNDLE_PATH, headers=headers)
     except httpx.HTTPError:
         return None
     if response.status_code == 404:
@@ -253,7 +268,9 @@ def join(
     secure_write(path, rendered.encode())
 
     return JoinResult(
-        bundle_published=_bundle_published(url, payload["token"]),
+        bundle_published=_bundle_published(
+            url, payload["token"], channel=channel, credential_id=payload.get("credential_id")
+        ),
         fleet_id=payload["fleet_id"],
         credential_id=payload.get("credential_id"),
         credential_secret_ref=credential_ref,

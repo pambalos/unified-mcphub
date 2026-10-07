@@ -326,6 +326,54 @@ async def test_console_allow_and_scoped_allow_always_verify_in_a_pack(hub, tmp_p
     assert run.returncode == 0, run.stdout + run.stderr
 
 
+async def test_a_legacy_scoped_hub_approval_is_noted_not_failed(hub, tmp_path):
+    """A hub entry from before `resolution` was recorded, for a kind that
+    carries a scope: what was signed cannot be rebuilt from the entry, which
+    is a limit of the old record, not tampering -- a NOTE, never a FAIL."""
+    root, dk = Key(), Key()
+    remote = SignedRemote(dk)
+    hub.approval = Approval(enabled=True, channel=None, console=remote)
+    remote.answers = [(ApprovalKind.ALLOW_ALWAYS, {"path": {"equals": ["x"]}})]
+    await _call(hub)
+    (entry,) = [
+        json.loads(line)
+        for f in sorted(audit_dir().glob("*.jsonl"))
+        for line in f.read_text().splitlines()
+        if "attestation" in line
+    ]
+    hub.audit.stop()
+    legacy_dir = tmp_path / "legacy-audit"
+    log = AuditLog(legacy_dir)
+    log.start()
+    log.write_received(
+        request_id="r",
+        trace_id="t",
+        span_id="s",
+        caller_id="crew-1",
+        caller_token_id=None,
+        mcp_server="filesystem",
+        tool="read_file",
+        args={"path": "x"},
+        authz_decision="prompt_allowed",
+        authz_rule=PROMPTED,
+        audit_level="standard",
+        decided_by=SUBJECT,
+        action_digest=entry["action_digest"],
+        approver=entry["approver"],
+        attestation=entry["attestation"],
+    )
+    log.stop()
+    pack = _pack(tmp_path, legacy_dir, csv_path=None, root=root, dk=dk)
+    report = verify_pack(pack)
+    assert report.ok, _failures(report)
+    (approval,) = [c for c in report.checks if c.name.startswith("approval ")]
+    assert approval.warning and "not re-verifiable" in approval.detail
+    run = subprocess.run(
+        [sys.executable, str(pack / "verify" / "verify.py")], capture_output=True, text=True
+    )
+    assert run.returncode == 0 and "not re-verifiable" in run.stdout, run.stdout + run.stderr
+
+
 async def test_an_incomplete_or_tampered_hub_approval_fails_without_crashing(hub, tmp_path):
     root, dk = Key(), Key()
     remote = SignedRemote(dk)
@@ -364,9 +412,11 @@ async def test_an_incomplete_or_tampered_hub_approval_fails_without_crashing(hub
     )
     log.stop()
     report = verify_pack(_pack(tmp_path, legacy_dir, csv_path=None, root=root, dk=dk))
-    assert not report.ok
+    # An unscoped kind is recovered from the signature itself: VERIFIED.
+    assert report.ok, _failures(report)
     (approval,) = [c for c in report.checks if c.name.startswith("approval ")]
-    assert not approval.ok and "incomplete" in approval.detail and "kind" in approval.detail
+    assert approval.ok and not approval.warning
+    assert approval.detail.startswith("allow by ") and "recovered" in approval.detail
     assert any(c.name.startswith("chain ") and c.ok for c in report.checks)
 
     # A kind rewritten after the fact (allow -> allow_always, with the hash

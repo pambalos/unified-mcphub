@@ -436,8 +436,23 @@ def _approvals_in(chain: Chain) -> list[dict[str, Any]]:
                         payload["kind"] = resolution["kind"]
                     if "scope" in resolution:
                         payload["scope"] = resolution["scope"]
+                elif "resolution" not in e:
+                    # Written before hubs recorded `resolution` at all: what
+                    # was signed is only partly here. Checked against the
+                    # kinds that carry no scope (`_LEGACY_KINDS`) rather than
+                    # failed for a field the writer did not know about.
+                    payload[_LEGACY] = True
             found.append(payload)
     return found
+
+
+#: Marks a hub approval recorded before `resolution` was (see `_approvals_in`).
+_LEGACY = "_recorded_before_resolution"
+
+#: The resolution kinds that never carry a scope, so a legacy entry -- which
+#: records neither kind nor scope -- can still be re-verified if it was one of
+#: these: with scope None, the signed payload is fully determined by them.
+_LEGACY_KINDS = ("allow", "allow_session", "deny")
 
 
 class _Incomplete(Exception):
@@ -455,26 +470,41 @@ def _field(record: Any, name: str, kind: type | tuple[type, ...]) -> Any:
     return value
 
 
-def _check_one_approval(a: dict[str, Any], keys: dict[str, Any]) -> tuple[bool, str]:
-    """Verify one recorded resolution. Raises `_Incomplete` for a record that
-    cannot even be checked; the caller reports that as a failure."""
+def _check_one_approval(a: dict[str, Any], keys: dict[str, Any]) -> tuple[bool, str, bool]:
+    """Verify one recorded resolution: `(ok, detail, warning)`.
+
+    Raises `_Incomplete` for a record that cannot even be checked; the caller
+    reports that as a failure. `warning` is True only for a hub entry written
+    before `resolution` was recorded whose signature cannot be rebuilt from
+    what it holds -- not re-verifiable, which is a limit of the record rather
+    than evidence of tampering, so it does not fail the pack. A record that
+    *does* carry its kind and whose signature does not verify always fails."""
     ap = _field(a, "approver", dict)
     at = _field(a, "attestation", dict)
     kid = at.get("key_id")
     key = keys.get(kid) if isinstance(kid, str) else None
     if key is None:
-        return False, f"signed by {kid!r}, which the key set does not vouch for"
+        return False, f"signed by {kid!r}, which the key set does not vouch for", False
     if key.role != "decision":
-        return False, f"key {key.kid} has role {key.role!r}; only a decision key may sign approvals"
-    kind = _field(a, "kind", str)
-    if "scope" not in a:
-        # Absent and null are different claims: a sidecar always records the
-        # field, and a hub records it under `resolution`. A record with no
-        # scope at all lost part of what was signed.
-        raise _Incomplete("no 'scope' (the resolution's scope is part of what was signed)")
-    scope = a["scope"]
-    if scope is not None and not isinstance(scope, dict):
-        raise _Incomplete(f"'scope' is {type(scope).__name__}, not an object or null")
+        return (
+            False,
+            f"key {key.kid} has role {key.role!r}; only a decision key may sign approvals",
+            False,
+        )
+    legacy = bool(a.get(_LEGACY))
+    if legacy:
+        candidates: list[tuple[str, Any]] = [(k, None) for k in _LEGACY_KINDS]
+    else:
+        kind = _field(a, "kind", str)
+        if "scope" not in a:
+            # Absent and null are different claims: a sidecar always records
+            # the field, and a hub records it under `resolution`. A record
+            # with no scope at all lost part of what was signed.
+            raise _Incomplete("no 'scope' (the resolution's scope is part of what was signed)")
+        scope = a["scope"]
+        if scope is not None and not isinstance(scope, dict):
+            raise _Incomplete(f"'scope' is {type(scope).__name__}, not an object or null")
+        candidates = [(kind, scope)]
     # The chain stores the approver under readable names; the control plane
     # signed the wire form. Rebuilt field for field, then signed bytes are
     # produced by attest's own payload function — never re-derived here.
@@ -485,28 +515,44 @@ def _check_one_approval(a: dict[str, Any], keys: dict[str, Any]) -> tuple[bool, 
         "auth_time_ms": _field(ap, "authenticated_at_ms", int),
     }
     resolved_at = _field(at, "resolved_at_ms", int)
-    payload = attest.canonical(
-        attest.resolution_payload(
-            action_digest=_field(a, "action_digest", str),
-            kind=kind,
-            approver=wire,
-            scope=scope,
-            resolved_at_ms=resolved_at,
-            expires_at_ms=_field(at, "expires_at_ms", int),
-            nonce=_field(at, "nonce", str),
-            fleet_id=_field(at, "fleet_id", str),
-        )
+    signed = dict(
+        action_digest=_field(a, "action_digest", str),
+        approver=wire,
+        resolved_at_ms=resolved_at,
+        expires_at_ms=_field(at, "expires_at_ms", int),
+        nonce=_field(at, "nonce", str),
+        fleet_id=_field(at, "fleet_id", str),
     )
-    try:
-        Ed25519PublicKey.from_public_bytes(attest.unb64u(key.public_key)).verify(
-            attest.unb64u(_field(at, "signature", str)), payload
-        )
-    except (InvalidSignature, ValueError, TypeError):
-        return False, "the control plane's signature does not verify"
+    signature = attest.unb64u(_field(at, "signature", str))
+    public = Ed25519PublicKey.from_public_bytes(attest.unb64u(key.public_key))
+    verified: str | None = None
+    for kind, scope in candidates:
+        payload = attest.canonical(attest.resolution_payload(kind=kind, scope=scope, **signed))
+        try:
+            public.verify(signature, payload)
+        except (InvalidSignature, ValueError, TypeError):
+            continue
+        verified = kind
+        break
+    if verified is None:
+        if legacy:
+            return (
+                True,
+                "not re-verifiable (recorded before resolution was recorded): the signed kind "
+                "and scope are not in the entry, and it is none of the unscoped kinds "
+                f"{', '.join(_LEGACY_KINDS)}",
+                True,
+            )
+        return False, "the control plane's signature does not verify", False
     if key.expires_at_ms <= resolved_at:
-        return False, f"key {key.kid} had expired when this was signed"
-    return True, (
-        f"{kind} by {ap.get('email') or ap['subject']} ({ap['subject']}), signed by {key.kid}"
+        return False, f"key {key.kid} had expired when this was signed", False
+    return (
+        True,
+        f"{verified} by {ap.get('email') or ap['subject']} ({ap['subject']}), signed by {key.kid}"
+        + (
+            " (kind recovered from the signature; recorded before resolution was)" if legacy else ""
+        ),
+        False,
     )
 
 
@@ -519,13 +565,14 @@ def check_approvals(root: Path, chains: list[Chain], report: Report, at_ms: int)
     for name, a in approvals:
         digest = a.get("action_digest")
         label = f"approval {digest[:12] if isinstance(digest, str) else '?'}… in {name}"
+        warning = False
         try:
-            ok, detail = _check_one_approval(a, keys)
+            ok, detail, warning = _check_one_approval(a, keys)
         except _Incomplete as exc:
             ok, detail = False, f"incomplete approval record, cannot be re-verified: {exc}"
         except Exception as exc:  # noqa: BLE001 - a bad record is a FAILED check, never a crash
             ok, detail = False, f"approval record could not be checked: {type(exc).__name__}: {exc}"
-        report.add(label, ok, detail)
+        report.add(label, ok, detail, warning=warning)
 
 
 # --- 4. policies ---------------------------------------------------------------------

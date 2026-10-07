@@ -68,15 +68,19 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 MANIFEST = "manifest.json"
 
-#: The hub records a `prompt` call's outcome rather than the DEFER that caused
-#: it; the control plane's export records the DEFER. Same decision, two
-#: vocabularies — mapped here so the row check compares like with like.
+#: The hub's audit vocabulary, mapped to the verdict it ships. For a `prompt`
+#: the hub records the outcome (`prompt_allowed`, …) and ships the *resolved*
+#: decision — ALLOW or DENY with source `approval*`, never the DEFER
+#: (`AuthzResolver.ship`) — so the control plane's export says `allow` or
+#: `deny` for these rows, and the row check must compare against that.
+#: `approval_disabled` is the master switch off (ADR-0018): the call ran, and
+#: the shipped verdict is ALLOW.
 _HUB_TO_VERDICT = {
     "allow": "allow",
     "deny": "deny",
-    "prompt_allowed": "defer",
-    "prompt_denied": "defer",
-    "approval_disabled": "defer",
+    "prompt_allowed": "allow",
+    "prompt_denied": "deny",
+    "approval_disabled": "allow",
 }
 
 
@@ -86,6 +90,10 @@ class Check:
     ok: bool
     detail: str = ""
     warning: bool = False
+    #: An approval whose signature could not be re-verified, admitted only
+    #: because the auditor passed `--accept-unverifiable-legacy`. Never a PASS:
+    #: rendered as UNVERIFIED and listed again beside the result.
+    unverified: bool = False
 
 
 @dataclass
@@ -93,8 +101,20 @@ class Report:
     checks: list[Check] = field(default_factory=list)
     facts: dict[str, Any] = field(default_factory=dict)
 
-    def add(self, name: str, ok: bool, detail: str = "", *, warning: bool = False) -> None:
-        self.checks.append(Check(name, ok, detail, warning))
+    def add(
+        self,
+        name: str,
+        ok: bool,
+        detail: str = "",
+        *,
+        warning: bool = False,
+        unverified: bool = False,
+    ) -> None:
+        self.checks.append(Check(name, ok, detail, warning, unverified))
+
+    @property
+    def unverified(self) -> list[Check]:
+        return [c for c in self.checks if c.unverified]
 
     @property
     def ok(self) -> bool:
@@ -191,13 +211,25 @@ class Chain:
 def check_chains(root: Path, report: Report) -> list[Chain]:
     chains: list[Chain] = []
     for meta_path in sorted((root / "chains").glob("*/meta.json")):
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
         name = meta_path.parent.name
-        raw_lines = (meta_path.parent / "chain.jsonl").read_text(encoding="utf-8").splitlines()
-        entries = [json.loads(line) for line in raw_lines if line.strip()]
+        # A chain whose files cannot be read is a FAILED chain, never a
+        # traceback: the auditor running this is owed a verdict on every
+        # other part of the pack, and an unreadable line is itself the finding.
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            raw_lines = (meta_path.parent / "chain.jsonl").read_text(encoding="utf-8").splitlines()
+            entries = [json.loads(line) for line in raw_lines if line.strip()]
+            if not isinstance(meta, dict) or not all(isinstance(e, dict) for e in entries):
+                raise ValueError("meta.json and every chain line must be JSON objects")
+        except (OSError, ValueError) as exc:
+            report.add(f"chain {name}", False, f"unreadable: {exc}")
+            continue
         chains.append(Chain(name, meta, entries))
-        report.add(f"chain {name}", *_verify_chain(meta, entries))
-        _note_payload_mode(name, meta, entries, report)
+        try:
+            report.add(f"chain {name}", *_verify_chain(meta, entries))
+            _note_payload_mode(name, meta, entries, report)
+        except Exception as exc:  # noqa: BLE001 - see above
+            report.add(f"chain {name}", False, f"could not be checked: {type(exc).__name__}: {exc}")
     if not chains:
         report.add("chains", False, "the pack contains no chain excerpts")
     return chains
@@ -238,10 +270,109 @@ def _note_payload_mode(
         )
 
 
-def _verify_chain(meta: dict[str, Any], entries: list[dict[str, Any]]) -> tuple[bool, str]:
+@dataclass(frozen=True)
+class _KeyRange:
+    """One signing key and the first `seq` it is responsible for.
+
+    `since` None means "from the start": a chain that was signed from its
+    first entry, or a pack built before key ranges existed."""
+
+    since: int | None
+    key: bytes
+    key_id: str | None = None
+
+
+def _derived_key_id(raw: bytes) -> str:
+    """`attest.key_id`, from the key's bytes: a name cannot be claimed apart
+    from the key it names."""
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _key_ranges(meta: dict[str, Any]) -> list[_KeyRange]:
+    """The keys a chain was signed with, oldest range first.
+
+    `keys` (a list of `{public_key, key_id, since_seq}`) is how a pack records
+    a reporter that rotated its key — the hub's `signing.json` keeps the
+    current key and every previous one with the seq it took over from. A pack
+    with only `public_key`/`signed_from_seq` is one range, read exactly as
+    before. Each range is enforced for its own seqs: an entry is checked
+    against the key that was current when it was written, so rewriting an old
+    range and re-signing it with a newer key fails, just as stripping its
+    signatures does.
+
+    Nothing in `keys` is taken on trust beyond the key bytes: every id shown
+    is derived from its key (a stated `key_id` is a label the builder wrote,
+    and is ignored -- a sidecar may name its key anything), every range has
+    an integer `since_seq`, no two start at the same seq (so the ranges tile
+    the signed part of the chain without overlap), the newest key is the
+    chain's stated `public_key` and the oldest range starts where the chain
+    says signing began (`signed_from_seq`). A `keys` list that disagrees with
+    the rest of its own meta is a pack somebody edited, and a range table is
+    exactly what an editor would forge to make re-signed entries verify."""
+    listed = meta.get("keys")
+    if isinstance(listed, list) and listed:
+        ranges = []
+        for n, item in enumerate(listed):
+            if not isinstance(item, dict) or not item.get("public_key"):
+                raise ValueError("meta.keys entries need a public_key")
+            since = item.get("since_seq")
+            if not isinstance(since, int) or isinstance(since, bool) or since < 0:
+                raise ValueError(f"meta.keys[{n}] needs a non-negative integer since_seq")
+            raw = _decode_key(str(item["public_key"]))
+            ranges.append(_KeyRange(since=since, key=raw, key_id=_derived_key_id(raw)))
+        ranges.sort(key=lambda r: r.since if r.since is not None else -1)
+        starts = [r.since for r in ranges]
+        if len(set(starts)) != len(starts):
+            raise ValueError(f"meta.keys ranges overlap: two keys start at the same seq ({starts})")
+        stated = meta.get("public_key")
+        if not stated or _decode_key(str(stated)) != ranges[-1].key:
+            raise ValueError(
+                "meta.keys' newest key is not the chain's public_key — the range table "
+                "and the key the pack names for this chain disagree"
+            )
+        if meta.get("signed_from_seq") != ranges[0].since:
+            raise ValueError(
+                f"meta.keys' first range starts at seq {ranges[0].since}, but the chain says "
+                f"signing began at seq {meta.get('signed_from_seq')!r}"
+            )
+        return ranges
     key_b64 = meta.get("public_key")
-    key = _decode_key(key_b64) if key_b64 else None
+    if not key_b64:
+        return []
     signed_from = meta.get("signed_from_seq")
+    raw = _decode_key(key_b64)
+    return [
+        _KeyRange(
+            since=int(signed_from) if signed_from is not None else None,
+            key=raw,
+            key_id=_derived_key_id(raw),
+        )
+    ]
+
+
+def _describe_ranges(ranges: list[_KeyRange]) -> str:
+    return ", ".join(
+        f"{r.key_id} from {'the start' if r.since is None else f'seq {r.since}'}" for r in ranges
+    )
+
+
+def _range_for(ranges: list[_KeyRange], seq: Any) -> _KeyRange | None:
+    """The range responsible for `seq`, or None when it predates every range.
+
+    An entry with no usable seq cannot be shown to sit before signing began,
+    so it is held to the newest key — the stricter reading, as in
+    `HashChainWriter.verify`."""
+    if not isinstance(seq, int) or isinstance(seq, bool):
+        return ranges[-1]
+    chosen = None
+    for r in ranges:
+        if r.since is None or r.since <= seq:
+            chosen = r
+    return chosen
+
+
+def _verify_chain(meta: dict[str, Any], entries: list[dict[str, Any]]) -> tuple[bool, str]:
+    ranges = _key_ranges(meta)
     prev = meta.get("anchor")
     signed = unsigned = 0
     present = withheld = unrecorded = 0
@@ -262,6 +393,7 @@ def _verify_chain(meta: dict[str, Any], entries: list[dict[str, Any]]) -> tuple[
         present += payloads.present
         withheld += payloads.withheld
         unrecorded += payloads.unrecorded
+        responsible = _range_for(ranges, entry.get("seq")) if ranges else None
         if sig is None:
             # A signature that stops part-way is what stripping them looks like.
             if seen_signed:
@@ -270,17 +402,26 @@ def _verify_chain(meta: dict[str, Any], entries: list[dict[str, Any]]) -> tuple[
             # from the start, or from where signing began. Without this, an
             # excerpt with every signature removed verifies as "unsigned" — the
             # hash chain still links, because hashes are not secret.
-            if key is not None and (
-                signed_from is None or int(entry.get("seq", -1)) >= int(signed_from)
-            ):
-                since = "the start" if signed_from is None else f"seq {signed_from}"
+            if responsible is not None:
+                since = "the start" if responsible.since is None else f"seq {responsible.since}"
                 return False, f"{where}: unsigned, but this chain is signed from {since}"
             unsigned += 1
         else:
-            if key is None:
+            if not ranges:
                 return False, f"{where}: signed, but the pack has no public key for this chain"
-            if not _verify_chain_signature(key, sig, claimed):
-                return False, f"{where}: bad signature"
+            # Before every range, a signature is checked against the first
+            # key (an early entry signed is no weaker for it).
+            key = (responsible or ranges[0]).key
+            if not isinstance(claimed, str) or not _verify_chain_signature(key, sig, claimed):
+                owner = responsible or ranges[0]
+                return False, (
+                    f"{where}: bad signature"
+                    + (
+                        f" — this seq is in key {owner.key_id}'s range"
+                        if len(ranges) > 1 and owner.key_id
+                        else ""
+                    )
+                )
             seen_signed = True
             signed += 1
         prev = claimed
@@ -291,8 +432,15 @@ def _verify_chain(meta: dict[str, Any], entries: list[dict[str, Any]]) -> tuple[
         f"payloads: {present} verified against their digests, {withheld} withheld"
         + (f", {unrecorded} never recorded (record_payloads off)" if unrecorded else "")
     )
-    if key is None:
+    if not ranges:
         detail += "; no public key — integrity only, not authorship"
+    elif len(ranges) > 1:
+        detail += (
+            f"; {len(ranges)} signing keys, each checked over its own seq range: "
+            + _describe_ranges(ranges)
+        )
+    else:
+        detail += "; signing key " + _describe_ranges(ranges)
     return True, detail
 
 
@@ -322,75 +470,214 @@ def _trusted_keys(root: Path, report: Report, at_ms: int) -> dict[str, Any]:
 def _approvals_in(chain: Chain) -> list[dict[str, Any]]:
     """Resolutions with a control-plane signature, in either chain shape: the
     sidecar's `{kind: approval, payload: {...}}` or a hub entry that carries
-    `approver` and `attestation` beside its own fields."""
+    `approver` and `attestation` beside its own fields.
+
+    The hub entry's `kind` is the entry's own business (it has none; `phase`
+    names it), so the resolution kind and scope the control plane signed are
+    recorded under `resolution` (unified_mcphub.audit). They are lifted into
+    the same shape as the sidecar's here, so one check covers both — and a hub
+    entry *without* them is passed on as it is, to fail that check as
+    incomplete rather than be skipped.
+
+    "Written before `resolution` existed" is only believable *before* the
+    chain shows a hub that records it: once one entry in this chain carries
+    `resolution`, every later approval entry without it is a record that
+    dropped part of what was signed, and is marked to FAIL whatever the
+    auditor accepts (`_AFTER_RESOLUTION`)."""
     found = []
+    first_resolution: Any = None
     for e in chain.entries:
         payload = e.get("payload") if e.get("kind") == "approval" else e
         if isinstance(payload, dict) and payload.get("attestation") and payload.get("approver"):
+            if "phase" in payload:
+                resolution = payload.get("resolution")
+                payload = {
+                    k: v for k, v in payload.items() if k not in ("kind", "scope", "resolution")
+                }
+                if isinstance(resolution, dict):
+                    if "kind" in resolution:
+                        payload["kind"] = resolution["kind"]
+                    if "scope" in resolution:
+                        payload["scope"] = resolution["scope"]
+                elif "resolution" not in e:
+                    if first_resolution is not None:
+                        payload[_AFTER_RESOLUTION] = first_resolution
+                    else:
+                        # Written before hubs recorded `resolution` at all:
+                        # what was signed is only partly here. Checked
+                        # against every kind with scope null
+                        # (`_LEGACY_KINDS`) rather than failed for a field
+                        # the writer did not know about.
+                        payload[_LEGACY] = True
             found.append(payload)
+        if first_resolution is None and "phase" in e and "resolution" in e:
+            first_resolution = e.get("seq")
     return found
 
 
-def check_approvals(root: Path, chains: list[Chain], report: Report, at_ms: int) -> None:
+#: Marks a hub approval recorded before `resolution` was (see `_approvals_in`).
+_LEGACY = "_recorded_before_resolution"
+#: Marks a hub approval with no `resolution` *after* an entry in the same chain
+#: recorded one (value: that entry's seq). Always a FAIL.
+_AFTER_RESOLUTION = "_missing_resolution_after_seq"
+
+#: The kinds a legacy entry -- which records neither kind nor scope -- is
+#: tried against, each with scope null: then the signed payload is fully
+#: determined by what the entry holds. A scoped `*_always` cannot be rebuilt.
+_LEGACY_KINDS = ("allow", "allow_session", "deny", "allow_always", "deny_always")
+
+#: The auditor's explicit opt-in to admit legacy approvals that verify under
+#: no candidate kind. Without it they FAIL the pack.
+ACCEPT_LEGACY_FLAG = "--accept-unverifiable-legacy"
+
+
+class _Incomplete(Exception):
+    """An approval record missing something its signature covers."""
+
+
+class _UnverifiedLegacy(Exception):
+    """A legacy hub approval whose signature verifies under no candidate kind.
+
+    Indistinguishable, from the record alone, from a forgery: anyone who can
+    write the hub's log can write a fake approver and a garbage signature
+    under the fleet's key id and leave `resolution` out. So it FAILS unless
+    the auditor explicitly accepts it (`ACCEPT_LEGACY_FLAG`), and even then it
+    is reported as UNVERIFIED, never as verified."""
+
+
+def _field(record: Any, name: str, kind: type | tuple[type, ...]) -> Any:
+    if not isinstance(record, dict) or name not in record:
+        raise _Incomplete(f"no {name!r}")
+    value = record[name]
+    if not isinstance(value, kind) or isinstance(value, bool) and kind is not bool:
+        raise _Incomplete(
+            f"{name!r} is {type(value).__name__}, not {getattr(kind, '__name__', kind)}"
+        )
+    return value
+
+
+def _check_one_approval(a: dict[str, Any], keys: dict[str, Any]) -> tuple[bool, str]:
+    """Verify one recorded resolution: `(ok, detail)`.
+
+    Raises `_Incomplete` for a record that cannot even be checked (including
+    a hub entry missing `resolution` after its chain began recording it), and
+    `_UnverifiedLegacy` for a pre-`resolution` hub entry whose signature
+    verifies under none of `_LEGACY_KINDS`; the caller decides what those
+    cost. A record that carries its kind and does not verify fails here."""
+    if _AFTER_RESOLUTION in a:
+        raise _Incomplete(
+            "no 'resolution', but this chain records it from seq "
+            f"{a.get(_AFTER_RESOLUTION)!r} on — an approval written after that dropped part of "
+            "what was signed"
+        )
+    ap = _field(a, "approver", dict)
+    at = _field(a, "attestation", dict)
+    kid = at.get("key_id")
+    key = keys.get(kid) if isinstance(kid, str) else None
+    if key is None:
+        return False, f"signed by {kid!r}, which the key set does not vouch for"
+    if key.role != "decision":
+        return False, f"key {key.kid} has role {key.role!r}; only a decision key may sign approvals"
+    legacy = bool(a.get(_LEGACY))
+    if legacy:
+        candidates: list[tuple[str, Any]] = [(k, None) for k in _LEGACY_KINDS]
+    else:
+        kind = _field(a, "kind", str)
+        if "scope" not in a:
+            # Absent and null are different claims: a sidecar always records
+            # the field, and a hub records it under `resolution`. A record
+            # with no scope at all lost part of what was signed.
+            raise _Incomplete("no 'scope' (the resolution's scope is part of what was signed)")
+        scope = a["scope"]
+        if scope is not None and not isinstance(scope, dict):
+            raise _Incomplete(f"'scope' is {type(scope).__name__}, not an object or null")
+        candidates = [(kind, scope)]
+    # The chain stores the approver under readable names; the control plane
+    # signed the wire form. Rebuilt field for field, then signed bytes are
+    # produced by attest's own payload function — never re-derived here.
+    wire = {
+        "sub": _field(ap, "subject", str),
+        "email": ap.get("email", ""),
+        "sid": ap.get("session_id", ""),
+        "auth_time_ms": _field(ap, "authenticated_at_ms", int),
+    }
+    resolved_at = _field(at, "resolved_at_ms", int)
+    signed = dict(
+        action_digest=_field(a, "action_digest", str),
+        approver=wire,
+        resolved_at_ms=resolved_at,
+        expires_at_ms=_field(at, "expires_at_ms", int),
+        nonce=_field(at, "nonce", str),
+        fleet_id=_field(at, "fleet_id", str),
+    )
+    signature = attest.unb64u(_field(at, "signature", str))
+    public = Ed25519PublicKey.from_public_bytes(attest.unb64u(key.public_key))
+    verified: str | None = None
+    for kind, scope in candidates:
+        payload = attest.canonical(attest.resolution_payload(kind=kind, scope=scope, **signed))
+        try:
+            public.verify(signature, payload)
+        except (InvalidSignature, ValueError, TypeError):
+            continue
+        verified = kind
+        break
+    if verified is None:
+        if legacy:
+            raise _UnverifiedLegacy(
+                "recorded before resolution was recorded, and the signature verifies as none of "
+                f"{', '.join(_LEGACY_KINDS)} (scope null) — it cannot be told from a forgery"
+            )
+        return False, "the control plane's signature does not verify"
+    if key.expires_at_ms <= resolved_at:
+        return False, f"key {key.kid} had expired when this was signed"
+    return (
+        True,
+        f"{verified} by {ap.get('email') or ap['subject']} ({ap['subject']}), signed by {key.kid}"
+        + (
+            " (kind recovered from the signature; recorded before resolution was)" if legacy else ""
+        ),
+    )
+
+
+def check_approvals(
+    root: Path,
+    chains: list[Chain],
+    report: Report,
+    at_ms: int,
+    accept_unverifiable_legacy: bool = False,
+) -> None:
     approvals = [(c.name, a) for c in chains for a in _approvals_in(c)]
     if not approvals:
         report.add("approvals", True, "no signed human resolutions in these excerpts", warning=True)
         return
     keys = _trusted_keys(root, report, at_ms)
     for name, a in approvals:
-        ap, at = a["approver"], a["attestation"]
-        label = f"approval {a.get('action_digest', '')[:12]}… in {name}"
-        key = keys.get(at.get("key_id"))
-        if key is None:
-            report.add(
-                label,
-                False,
-                f"signed by {at.get('key_id')!r}, which the key set does not vouch for",
-            )
-            continue
-        if key.role != "decision":
-            report.add(
-                label,
-                False,
-                f"key {key.kid} has role {key.role!r}; only a decision key may sign approvals",
-            )
-            continue
-        # The chain stores the approver under readable names; the control plane
-        # signed the wire form. Rebuilt field for field, then signed bytes are
-        # produced by attest's own payload function — never re-derived here.
-        wire = {
-            "sub": ap["subject"],
-            "email": ap.get("email", ""),
-            "sid": ap.get("session_id", ""),
-            "auth_time_ms": ap["authenticated_at_ms"],
-        }
-        payload = attest.canonical(
-            attest.resolution_payload(
-                action_digest=a["action_digest"],
-                kind=a["kind"],
-                approver=wire,
-                scope=a.get("scope"),
-                resolved_at_ms=at["resolved_at_ms"],
-                expires_at_ms=at["expires_at_ms"],
-                nonce=at["nonce"],
-                fleet_id=at["fleet_id"],
-            )
-        )
+        digest = a.get("action_digest")
+        label = f"approval {digest[:12] if isinstance(digest, str) else '?'}… in {name}"
         try:
-            Ed25519PublicKey.from_public_bytes(attest.unb64u(key.public_key)).verify(
-                attest.unb64u(at["signature"]), payload
-            )
-        except (InvalidSignature, ValueError, TypeError):
-            report.add(label, False, "the control plane's signature does not verify")
+            ok, detail = _check_one_approval(a, keys)
+        except _UnverifiedLegacy as exc:
+            if accept_unverifiable_legacy:
+                report.add(
+                    f"UNVERIFIED APPROVAL {label.removeprefix('approval ')}",
+                    True,
+                    f"{exc}; admitted only because the auditor passed {ACCEPT_LEGACY_FLAG}",
+                    warning=True,
+                    unverified=True,
+                )
+            else:
+                report.add(
+                    f"UNVERIFIED APPROVAL {label.removeprefix('approval ')}",
+                    False,
+                    f"{exc}. Fails the pack; an auditor who accepts the risk may pass "
+                    f"{ACCEPT_LEGACY_FLAG} (it is still reported as unverified)",
+                )
             continue
-        if key.expires_at_ms <= at["resolved_at_ms"]:
-            report.add(label, False, f"key {key.kid} had expired when this was signed")
-            continue
-        report.add(
-            label,
-            True,
-            f"{a['kind']} by {ap.get('email') or ap['subject']} ({ap['subject']}), signed by {key.kid}",
-        )
+        except _Incomplete as exc:
+            ok, detail = False, f"incomplete approval record, cannot be re-verified: {exc}"
+        except Exception as exc:  # noqa: BLE001 - a bad record is a FAILED check, never a crash
+            ok, detail = False, f"approval record could not be checked: {type(exc).__name__}: {exc}"
+        report.add(label, ok, detail)
 
 
 # --- 4. policies ---------------------------------------------------------------------
@@ -445,34 +732,44 @@ def _load_rows(root: Path) -> list[dict[str, str]]:
 
 
 def _index(chains: list[Chain]) -> dict[str, dict[str, dict[str, Any]]]:
-    """reporter_id -> action_digest -> {decision, approval} from the chains."""
+    """reporter_id -> action_digest -> {decision, approval} from the chains.
+
+    Hub entries are indexed by every digest a shipped row can carry while
+    citing them: a `received` entry by its `action_digest` (a call, or the
+    structural Action of an identity refusal), and a `completed` entry by its
+    `injection_action_digest` (the `ingest` finding shipped against it). An
+    entry of a shape this does not know is skipped, never a crash: the chain
+    check has already passed judgement on its integrity."""
     out: dict[str, dict[str, dict[str, Any]]] = {}
     for c in chains:
         by_digest = out.setdefault(c.meta.get("reporter_id") or c.name, {})
         for e in c.entries:
+            common = {"_hash": e.get("hash"), "_seq": e.get("seq"), "_signed": "sig" in e}
+            p = e.get("payload")
             if e.get("kind") in ("decision", "approval"):
-                p = e["payload"]
+                if not isinstance(p, dict) or not isinstance(p.get("action_digest"), str):
+                    continue
                 slot = by_digest.setdefault(p["action_digest"], {})
-                slot[e["kind"]] = {
-                    **p,
-                    "_hash": e["hash"],
-                    "_seq": e.get("seq"),
-                    "_signed": "sig" in e,
-                }
-            elif e.get("phase") == "received" and e.get("action_digest"):
+                slot[e["kind"]] = {**p, **common}
+            elif e.get("phase") == "received" and isinstance(e.get("action_digest"), str):
                 slot = by_digest.setdefault(e["action_digest"], {})
+                decided = e.get("authz_decision", "")
                 slot["decision"] = {
-                    "verdict": _HUB_TO_VERDICT.get(
-                        e.get("authz_decision", ""), e.get("authz_decision")
-                    ),
+                    "verdict": _HUB_TO_VERDICT.get(decided, decided),
                     "policy_digest": e.get("policy_digest"),
-                    "_hash": e["hash"],
-                    "_seq": e.get("seq"),
-                    "_signed": "sig" in e,
+                    **common,
                     "_hub": True,
                 }
-                if e.get("approver"):
-                    slot["approval"] = {"decided_by": e["approver"].get("subject")}
+                approver = e.get("approver")
+                if isinstance(approver, dict):
+                    slot["approval"] = {"decided_by": approver.get("subject")}
+            elif e.get("phase") == "completed" and isinstance(
+                e.get("injection_action_digest"), str
+            ):
+                # A finding, not a verdict on the call: the call already ran,
+                # so the structural decision shipped for it is ALLOW.
+                slot = by_digest.setdefault(e["injection_action_digest"], {})
+                slot["decision"] = {"verdict": "allow", **common, "_hub": True}
     return out
 
 
@@ -487,7 +784,7 @@ def check_rows(chains: list[Chain], rows: list[dict[str, str]], report: Report) 
         if chain is None:
             uncovered += 1
             continue
-        found = chain.get(row["action_digest"], {})
+        found = chain.get(row.get("action_digest") or "", {})
         decision, approval = found.get("decision"), found.get("approval")
         problems = []
         if row.get("decision_reported") == "true":
@@ -498,7 +795,7 @@ def check_rows(chains: list[Chain], rows: list[dict[str, str]], report: Report) 
                     problems.append(
                         f"verdict {row['verdict']!r} vs chain {decision.get('verdict')!r}"
                     )
-                if row.get("chain_hash") and row["chain_hash"] != decision["_hash"]:
+                if row.get("chain_hash") and row["chain_hash"] != decision.get("_hash"):
                     problems.append("chain_hash differs from the chain entry")
                 if (
                     row.get("policy_digest")
@@ -535,7 +832,7 @@ def check_rows(chains: list[Chain], rows: list[dict[str, str]], report: Report) 
     # Not a failure — the export may be filtered, or cover a narrower window —
     # but an auditor reading only the spreadsheet should know it is not the
     # whole record.
-    in_rows = {(r.get("reporter_id"), r["action_digest"]) for r in rows}
+    in_rows = {(r.get("reporter_id"), r.get("action_digest")) for r in rows}
     unreported = sum(
         1
         for reporter, by_digest in index.items()
@@ -561,15 +858,42 @@ def check_rows(chains: list[Chain], rows: list[dict[str, str]], report: Report) 
 # --- entry point -----------------------------------------------------------------------------
 
 
-def verify_pack(root: Path) -> Report:
+def _stage(report: Report, name: str, fn: Any, *args: Any, default: Any = None) -> Any:
+    """Run one check stage; an exception is that stage FAILING, not a crash.
+
+    Each stage handles the records it knows how to judge. This is the
+    backstop for the ones nobody anticipated: an auditor running the verifier
+    on a damaged or doctored pack is owed a FAILED verdict naming the stage,
+    and every other stage's result, rather than a traceback."""
+    try:
+        return fn(*args)
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        report.add(name, False, f"could not be checked: {type(exc).__name__}: {exc}")
+        return default
+
+
+def verify_pack(root: Path, *, accept_unverifiable_legacy: bool = False) -> Report:
     report = Report()
-    manifest = check_manifest(root, report) or {}
-    at_ms = int(manifest.get("created_at_ms") or 0)
-    chains = check_chains(root, report)
-    rows = _load_rows(root)
-    check_approvals(root, chains, report, at_ms)
-    check_policies(root, chains, rows, report)
-    check_rows(chains, rows, report)
+    report.facts["accept_unverifiable_legacy"] = accept_unverifiable_legacy
+    manifest = _stage(report, "manifest", check_manifest, root, report) or {}
+    try:
+        at_ms = int(manifest.get("created_at_ms") or 0)
+    except (TypeError, ValueError):
+        at_ms = 0
+    chains = _stage(report, "chains", check_chains, root, report, default=[])
+    rows = _stage(report, "export rows", _load_rows, root, default=[])
+    _stage(
+        report,
+        "approvals",
+        check_approvals,
+        root,
+        chains,
+        report,
+        at_ms,
+        accept_unverifiable_legacy,
+    )
+    _stage(report, "policies", check_policies, root, chains, rows, report)
+    _stage(report, "export rows", check_rows, chains, rows, report)
     return report
 
 
@@ -590,9 +914,24 @@ def render(report: Report) -> str:
             )
         )
     for c in report.checks:
-        mark = "PASS" if c.ok and not c.warning else ("NOTE" if c.warning else "FAIL")
+        if c.unverified:
+            mark = "UNVERIFIED"
+        else:
+            mark = "PASS" if c.ok and not c.warning else ("NOTE" if c.warning else "FAIL")
         lines.append(f"[{mark}] {c.name}: {c.detail}")
-    lines.append("RESULT: " + ("VERIFIED" if report.ok else "FAILED"))
+    unverified = report.unverified
+    if unverified:
+        lines.append(
+            f"!!! {len(unverified)} APPROVAL(S) NOT VERIFIED, admitted by {ACCEPT_LEGACY_FLAG}:"
+        )
+        lines.extend(f"!!!   {c.name}" for c in unverified)
+    result = "VERIFIED" if report.ok else "FAILED"
+    if report.facts.get("accept_unverifiable_legacy"):
+        result += (
+            f" (with {ACCEPT_LEGACY_FLAG}: {len(unverified)} unverified legacy approval(s) "
+            "accepted, none counted as verified)"
+        )
+    lines.append("RESULT: " + result)
     return "\n".join(lines)
 
 
@@ -605,11 +944,28 @@ def main(argv: list[str] | None = None) -> int:
         help="the pack directory (default: the pack this script sits in)",
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument(
+        ACCEPT_LEGACY_FLAG,
+        dest="accept_unverifiable_legacy",
+        action="store_true",
+        help="admit hub approvals recorded before 'resolution' existed whose signature cannot "
+        "be rebuilt (they are still reported as UNVERIFIED, never as verified)",
+    )
     args = parser.parse_args(argv)
-    report = verify_pack(Path(args.pack))
+    report = verify_pack(
+        Path(args.pack), accept_unverifiable_legacy=args.accept_unverifiable_legacy
+    )
     if args.json:
         print(
-            json.dumps({"ok": report.ok, "checks": [c.__dict__ for c in report.checks]}, indent=2)
+            json.dumps(
+                {
+                    "ok": report.ok,
+                    "accept_unverifiable_legacy": args.accept_unverifiable_legacy,
+                    "unverified_approvals": [c.name for c in report.unverified],
+                    "checks": [c.__dict__ for c in report.checks],
+                },
+                indent=2,
+            )
         )
     else:
         print(render(report))

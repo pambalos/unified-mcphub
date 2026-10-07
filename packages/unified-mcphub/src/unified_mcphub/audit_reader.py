@@ -186,6 +186,19 @@ def verify(audit_dir: Path, signing: Any = None) -> VerifyResult:
     )
 
 
+def signed_entries(audit_dir: Path) -> int:
+    """How many entries carry a signature (`sig`).
+
+    `audit verify` asks this when there is no `signing.json`: a chain that
+    carries signatures was written by a hub that had a key and recorded where
+    signing began, so a missing record is not "this hub never signed" — it is
+    the record having been removed, and checking only the hash would let the
+    signed history be rewritten by anyone who also deletes one file. The same
+    reading `unified-evidence verify` takes of a signed chain with no key.
+    """
+    return sum(1 for _, _, entry in _iter_entries(audit_dir) if entry and "sig" in entry)
+
+
 def prune(audit_dir: Path, retention_days: int) -> list[str]:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).date()
     removed: list[str] = []

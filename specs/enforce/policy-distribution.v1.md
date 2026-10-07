@@ -237,6 +237,15 @@ never grant permission.**
 | **No valid bundle at all** (fresh sidecar, cannot fetch) | **Deny everything.** |
 | Revocation list expired | Escalate per configuration; do not silently assume nothing is revoked. |
 
+A forced DEFER (revocation list unprovisioned or expired, bundle expired under
+`on_stale: defer`, `defer` containment) is combined with the engine's verdict
+as `min(engine, DEFER)` rather than replacing it: an engine DENY stays DENY,
+an engine DEFER keeps its rule and source (with `context.gate` naming the
+gate), an engine ALLOW becomes the gate's DEFER. A human's answer to a
+gate-forced prompt is never persisted (`*_always`) or cached (`allow_session`).
+Forced DENYs (containment, no bundle at all, `on_stale: deny`) still return
+before the engine is consulted.
+
 The last two matter most.
 
 A **fresh sidecar with no policy must deny**, not allow. Default-deny is already

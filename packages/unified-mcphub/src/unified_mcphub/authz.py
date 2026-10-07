@@ -168,6 +168,17 @@ class _RuleIds:
     so the first occurrence, the one first-match-wins usually picks, keeps the
     bare pattern. Floors are prefixed `floor:` so a workspace rule and a floor
     over the same tool stay distinguishable — they are different decisions.
+
+    **Ids are assigned by source, not position.** Learned rules (the hub's
+    `.local.yaml`, ADR-0024) sit *ahead* of the curated workspace rules in
+    evaluation order, and an id handed out in that order shifted every time an
+    `*_always` answer was persisted: the curated `mcp://shell/run` became
+    `mcp://shell/run#2` because a learned rule for the same tool now came
+    first, and every row, approval and console view naming the old id named a
+    different rule. So curated rules are numbered first, among themselves,
+    and keep their ids; learned rules live in their own namespace,
+    `learned:<pattern>` (with `#n` for repeats), where adding one can only
+    ever renumber other learned rules.
     """
 
     def __init__(self, reserved: list[str]) -> None:
@@ -212,10 +223,16 @@ class AuthzResolver:
         names: dict[str, str] = {}  # engine rule id -> hub tool pattern (audit `authz_rule`)
         constitutional = _constitutional_rules(deployment)
         ids = _RuleIds([r.id for r in constitutional])
-        for rule in workspace.authz.rules:
-            if _rule_is_dead(rule):
-                continue
-            rid = ids.take(rule.tool)
+        live = [r for r in workspace.authz.rules if not _rule_is_dead(r)]
+        # Curated rules first, then learned ones (see _RuleIds); evaluation
+        # order below is still list order.
+        assigned: dict[int, str] = {}
+        for learned in (False, True):
+            for n, rule in enumerate(live):
+                if rule.learned is learned:
+                    assigned[n] = ids.take(f"learned:{rule.tool}" if learned else rule.tool)
+        for n, rule in enumerate(live):
+            rid = assigned[n]
             names[rid] = rule.tool
             principal: str | list[str] = "*"
             if rule.callers is not None:
@@ -353,17 +370,16 @@ class AuthzResolver:
     # --- structural records (build-14): refusals and findings the policy
     # --- engine never saw, landed in the chain and the evidence like verdicts
 
-    def record_unidentified(
-        self, *, source: str, method: str, entry: dict[str, Any] | None = None
-    ) -> None:
-        """A caller that presented no valid identity was refused (S-1).
+    @staticmethod
+    def unidentified_action(*, source: str, method: str) -> Action:
+        """The structural Action an identity refusal is recorded as (S-1).
 
-        The hub already returns 401. This makes the refusal a *decision* on
-        the unknown principal, so it reaches the control plane's identity
-        refusal stream like the gateway's do. The same shape the gateway
-        records: source "identity_invalid", verdict deny.
-        """
-        action = Action.build(
+        Built before the hub writes its own entry for the refusal, so that
+        entry can name this Action's digest: the row the control plane stores
+        cites that entry by `chain_hash`, and a row whose `action_digest`
+        appears nowhere in the line it cites cannot be joined back by anyone
+        checking the export against the chain (`pack_verify`)."""
+        return Action.build(
             principal=Principal(id="agent:unknown", attestation="assigned"),
             tool=f"mcp://hub/{method}",
             verb="call",
@@ -371,6 +387,27 @@ class AuthzResolver:
             params={},
             context=ActionContext(origin="mcp", extra={"source": source or "unknown"}),
         )
+
+    def record_unidentified(
+        self,
+        *,
+        source: str,
+        method: str,
+        entry: dict[str, Any] | None = None,
+        action: Action | None = None,
+    ) -> None:
+        """A caller that presented no valid identity was refused (S-1).
+
+        The hub already returns 401. This makes the refusal a *decision* on
+        the unknown principal, so it reaches the control plane's identity
+        refusal stream like the gateway's do. The same shape the gateway
+        records: source "identity_invalid", verdict deny.
+
+        `action` is the `unidentified_action` whose digest `entry` recorded;
+        the row ships under that digest, pointing at that entry.
+        """
+        if action is None:
+            action = self.unidentified_action(source=source, method=method)
         decision = self._enforcer.record(
             action,
             EngineDecision(
@@ -381,17 +418,16 @@ class AuthzResolver:
             ),
             count=False,  # a refusal at the door is not the fleet's spend
         )
-        self.ship(action, decision, entry)
+        self.ship(action, decision, entry, action_digest=(entry or {}).get("action_digest"))
 
-    def record_ingress(
-        self, action: Action, hits: list[str], entry: dict[str, Any] | None = None
-    ) -> None:
-        """A tool result carried instruction shapes (D-12). Recorded as a
-        structural decision on the same principal and tool, verb `ingest`,
-        with the pattern ids as the resource — never the text. Verdict
-        `allow`, because the call already happened; the finding is the
-        `source`."""
-        finding = Action.build(
+    @staticmethod
+    def ingress_action(action: Action, hits: list[str]) -> Action:
+        """The structural `ingest` Action an injection finding is recorded as.
+
+        Built before the `completed` entry is written, for the same reason as
+        `unidentified_action`: that entry records this Action's digest under
+        `injection_action_digest`, and the finding's row cites that entry."""
+        return Action.build(
             principal=action.principal,
             tool=action.tool,
             verb="ingest",
@@ -399,6 +435,23 @@ class AuthzResolver:
             params={},
             context=ActionContext(origin="mcp", extra={"injection": hits}),
         )
+
+    def record_ingress(
+        self,
+        action: Action,
+        hits: list[str],
+        entry: dict[str, Any] | None = None,
+        finding: Action | None = None,
+    ) -> None:
+        """A tool result carried instruction shapes (D-12). Recorded as a
+        structural decision on the same principal and tool, verb `ingest`,
+        with the pattern ids as the resource — never the text. Verdict
+        `allow`, because the call already happened; the finding is the
+        `source`.
+
+        `finding` is the `ingress_action` whose digest `entry` recorded."""
+        if finding is None:
+            finding = self.ingress_action(action, hits)
         decision = self._enforcer.record(
             finding,
             EngineDecision(
@@ -409,7 +462,12 @@ class AuthzResolver:
             ),
             count=False,  # the call was counted when it was decided
         )
-        self.ship(finding, decision, entry)
+        self.ship(
+            finding,
+            decision,
+            entry,
+            action_digest=(entry or {}).get("injection_action_digest"),
+        )
 
     def resolve(
         self, tool_uri: str, args: dict[str, Any], caller: str, action: Action | None = None

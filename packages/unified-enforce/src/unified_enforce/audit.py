@@ -340,7 +340,9 @@ class HashChainWriter:
     # --- internals ---
 
     def _recover(self) -> None:
-        """Pick up the chain head from the last entry that parses.
+        """Pick up the chain head from the last entry that parses, in whichever
+        day file holds it (empty or wholly unparseable trailing files are
+        passed over).
 
         Trailing garbage is skipped rather than raised on. `O_APPEND` makes each
         write atomic, but a machine losing power mid-write still leaves a
@@ -367,26 +369,43 @@ class HashChainWriter:
         files = sorted(self._dir.glob("*.jsonl"))
         if not files:
             return
-        lines = [raw for raw in files[-1].read_bytes().splitlines() if raw.strip()]
-        for offset, raw in enumerate(reversed(lines)):
-            try:
-                entry = json.loads(raw)
-            except ValueError:
-                continue
-            if "hash" not in entry:
-                self._quarantine_legacy(files)
-                return
-            if offset:
+        # Newest file first, and on to older ones until an entry parses. The
+        # newest file alone is not enough: a writer that starts and stops
+        # without appending leaves today's file empty, and a restart that
+        # read only that file resumed from GENESIS -- a chain break at the
+        # next entry, `seq` restarting at 1 below where signing began, and
+        # every checkpoint after it refused.
+        # Per file, because the skipped lines may sit in newer files than the
+        # one the head is finally recovered from -- and the log must point at
+        # the damage, not at the file that was fine.
+        skipped: dict[str, int] = {}
+
+        def report_skipped() -> None:
+            if skipped:
                 log.error(
-                    "%s: skipped %d unparseable trailing line(s) recovering the chain head. "
+                    "skipped %d unparseable trailing line(s) recovering the chain head (%s). "
                     "Run `AuditChain.verify` -- this is a crash or an edit, and the "
                     "difference matters.",
-                    files[-1].name,
-                    offset,
+                    sum(skipped.values()),
+                    ", ".join(f"{name}: {n}" for name, n in skipped.items()),
                 )
-            self._head = entry["hash"]
-            self._last_entry = entry
-            return
+
+        for path in reversed(files):
+            lines = [raw for raw in path.read_bytes().splitlines() if raw.strip()]
+            for raw in reversed(lines):
+                try:
+                    entry = json.loads(raw)
+                except ValueError:
+                    skipped[path.name] = skipped.get(path.name, 0) + 1
+                    continue
+                if not isinstance(entry, dict) or "hash" not in entry:
+                    self._quarantine_legacy(files)
+                    return
+                report_skipped()
+                self._head = entry["hash"]
+                self._last_entry = entry
+                return
+        report_skipped()
 
     def _quarantine_legacy(self, files: list[Path]) -> None:
         legacy = self._dir / "legacy"

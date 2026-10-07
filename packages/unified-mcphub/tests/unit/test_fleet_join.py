@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 
 import httpx
 import pytest
 import yaml
 
-from unified_enforce.attest import b64u, key_id
+from unified_enforce.attest import accept_proof, b64u, key_id
 from unified_enforce.signing import Signer
 
 from unified_mcphub import fleet_join
@@ -46,8 +47,30 @@ def plane(monkeypatch):
     state = {"status": 201, "fleet_id": "acme"}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v1/policy/bundle":
+            state.setdefault("bundle_asks", []).append(request.headers.get("authorization"))
+            # As the real control plane's `_require_proof`: once a channel key
+            # is registered for the credential, a request without a valid
+            # proof is a 401 (and a CHANNEL DOWNGRADE in its log).
+            channel_key = state.get("channel_key")
+            if channel_key is not None:
+                verdict = accept_proof(
+                    request.headers.get("x-unified-proof", ""),
+                    public_key_b64=channel_key,
+                    credential_id="cred-123",
+                    method="GET",
+                    path=request.url.path,
+                    body=None,
+                    now=int(time.time()),
+                )
+                if not verdict:
+                    state.setdefault("downgrades", []).append(verdict.reason)
+                    return httpx.Response(401, json={"detail": "request proof required"})
+            return httpx.Response(state.get("bundle", 200), json={})
         body = json.loads(request.content)
         seen.append({"url": str(request.url), "body": body})
+        if body.get("channel_key"):
+            state["channel_key"] = body["channel_key"]
         if state["status"] != 201:
             return httpx.Response(
                 state["status"], json={"detail": "join token is unknown, expired, or already used"}
@@ -189,3 +212,49 @@ def test_status_is_offline_and_reports_signing(hub_home, store, plane, capsys, m
     assert main(["fleet", "status"]) == 0
     out = capsys.readouterr().out
     assert "since seq 42" in out and "console (timeout 300s)" in out
+
+
+def test_join_warns_with_the_publish_command_when_no_bundle_exists(plane, store, capsys):
+    """A hub needs no bundle (its policy is local), but every sidecar in the
+    fleet denies everything until one exists -- said at join, with the fix."""
+    _, state = plane
+    state["bundle"] = 404
+    assert _join() == 0
+    out = capsys.readouterr().out
+    assert "no policy bundle published" in out
+    assert "unified-control publish-policy --fleet acme --dir" in out
+    assert state["bundle_asks"] == [f"Bearer {CREDENTIAL}"], "asked with the new credential"
+    assert "downgrades" not in state, "proved with the channel key just registered"
+    assert CREDENTIAL not in out
+
+
+def test_join_is_quiet_about_bundles_when_one_exists(plane, store, capsys):
+    _, state = plane
+    state["bundle"] = 200
+    assert _join() == 0
+    assert "publish-policy" not in capsys.readouterr().out
+
+
+def test_join_registers_a_channel_key_and_records_the_credential_id(plane, store, capsys):
+    """Channel binding: the enrolment registers the public half of a key kept
+    in the secrets store, and the block names the credential id every request
+    proof is issued under."""
+    seen, _ = plane
+    assert _join() == 0
+    (call,) = seen
+    seed = store.get("control-plane-channel-key")
+    assert seed is not None and seed != store.get("hub-signing-key")
+    channel = Signer.from_private_bytes(base64.b64decode(seed), "k")
+    assert call["body"]["channel_key"] == b64u(channel.public_bytes())
+    cp = load_hub_config().control_plane
+    assert cp.credential_id == "cred-123"
+    assert seed not in capsys.readouterr().out
+
+
+def test_force_re_join_keeps_the_channel_key(plane, store):
+    """A re-join that fails after the key step must not have replaced the key
+    the current credential proves with, so an existing key is reused."""
+    assert _join() == 0
+    before = store.get("control-plane-channel-key")
+    assert _join("--force") == 0
+    assert store.get("control-plane-channel-key") == before

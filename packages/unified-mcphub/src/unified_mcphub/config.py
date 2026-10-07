@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from .util import secure_write
 
@@ -262,6 +262,17 @@ class ControlPlaneConfig(BaseModel):
     #: hostile or wrong control plane is a refused refresh, not a new policy.
     root_public_key: str | None = None
     credential_secret_ref: str = "control-plane-credential"
+    #: The enrolled credential's id (not a secret: it names the credential,
+    #: it does not prove anything). The `iss` of every request proof.
+    credential_id: str | None = None
+    #: The channel key: an Ed25519 seed in the secrets store, registered at
+    #: enrolment as `channel_key`. With it every request to the control plane
+    #: carries a proof (`x-unified-proof`) bound to its method, path and body,
+    #: so the bearer credential alone -- stolen from a log or a backup -- is
+    #: not enough to report, fetch or approve in this hub's name. A hub joined
+    #: before this has no key and keeps working bearer-only; re-join
+    #: (`fleet join --force` with a new token) to upgrade.
+    channel_key_secret_ref: str = "control-plane-channel-key"
     poll_seconds: float = 30.0
     #: What an expired policy bundle does: keep enforcing the old rules
     #: (default), defer everything to a human, or deny everything.
@@ -443,6 +454,22 @@ class Rule(BaseModel):
     args_filter: dict[str, dict[str, list[str]]] | None = None
     effect: str  # allow | deny | prompt
     audit_level: str = "standard"
+    #: Set for a rule that came from the machine-managed `.local.yaml`
+    #: (ADR-0024) rather than the curated workspace file. Private, so it is
+    #: never read from a file -- the *source* says where a rule came from, not
+    #: a key somebody can write -- and never part of a dump, config hash or
+    #: policy digest. It decides only the rule's readable id (authz._RuleIds).
+    _learned: bool = PrivateAttr(default=False)
+
+    @classmethod
+    def learned_rule(cls, data: Any) -> "Rule":
+        rule = cls.model_validate(data)
+        rule._learned = True
+        return rule
+
+    @property
+    def learned(self) -> bool:
+        return self._learned
 
 
 class Authz(BaseModel):
@@ -529,7 +556,7 @@ def load_workspace(name: str) -> Workspace:
     # Learned rules (ADR-0024) live in a separate machine-managed file and merge
     # as tier-1 exact rules ordered ahead of the curated rules — first-match-wins
     # means they win. The file is absent until the first `*_always`.
-    learned = [Rule.model_validate(r) for r in load_learned_rules(name)]
+    learned = [Rule.learned_rule(r) for r in load_learned_rules(name)]
     workspace.authz.rules[:0] = learned
     return workspace
 

@@ -150,3 +150,39 @@ def test_learned_deny_overrides_curated_allow(hub_home):
     assert resolver.resolve("mcp://filesystem/delete_file", {}, "claude-code").effect is Effect.DENY
     # An unrelated tool still rides the curated wildcard allow.
     assert resolver.resolve("mcp://filesystem/read_file", {}, "claude-code").effect is Effect.ALLOW
+
+
+def test_a_workspace_rules_id_is_unchanged_by_a_persisted_allow_always(hub_home):
+    """Readable rule ids are assigned by source, not list position. A learned
+    rule is evaluated *ahead* of the curated rules, and numbering in that
+    order made the curated `mcp://shell/run` become `mcp://shell/run#2` the
+    moment an allow-always for the same tool was persisted -- so every row,
+    approval and console view naming the old id now named a different rule."""
+    workspace_path("default").write_text(
+        'servers: {}\nauthz:\n  rules:\n    - tool: "mcp://shell/run"\n      effect: prompt\n'
+    )
+    hub = Hub(load_config())
+    before = hub.authz.resolve("mcp://shell/run", {"command": "rm -rf x"}, "crew").engine
+    assert before.rule_id == "mcp://shell/run"
+
+    scope = {"command": {"starts_with": ["ls"]}}
+    hub._persist_exact_rule("mcp://shell/run", "crew", allowed=True, args_filter=scope)
+    for resolver in (hub.authz, Hub(load_config()).authz):  # in memory, and reloaded
+        prompted = resolver.resolve("mcp://shell/run", {"command": "rm -rf x"}, "crew").engine
+        assert prompted.rule_id == "mcp://shell/run", "the curated rule keeps its id"
+        learned = resolver.resolve("mcp://shell/run", {"command": "ls -la"}, "crew").engine
+        assert learned.rule_id == "learned:mcp://shell/run"
+        # And the readable `authz_rule` in the hub's own audit is unchanged.
+        assert resolver.resolve("mcp://shell/run", {"command": "ls"}, "crew").rule == (
+            "mcp://shell/run"
+        )
+
+
+def test_learned_cannot_be_claimed_from_a_file(hub_home):
+    """Which namespace a rule's id lives in is decided by where it was
+    loaded from, never by a key a workspace file can set."""
+    from unified_mcphub.config import Rule
+
+    rule = Rule.model_validate({"tool": "mcp://a/b", "effect": "allow", "_learned": True})
+    assert not rule.learned
+    assert "_learned" not in rule.model_dump()

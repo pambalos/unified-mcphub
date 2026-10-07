@@ -543,7 +543,8 @@ async def test_a_control_plane_that_never_answers_denies():
     )
 
     assert not outcome.allowed
-    assert "approval_channel_error" in (outcome.reason or "")
+    # A timeout, recorded as one (not as a broken channel).
+    assert outcome.reason == "approval_timed_out"
 
 
 async def test_the_callers_timeout_bounds_a_channel_that_never_returns():
@@ -680,3 +681,148 @@ async def test_a_denied_approval_records_no_approver(tmp_path):
     assert entry["payload"]["approver"] is None
     assert entry["payload"]["attestation"] is None
     assert entry["payload"]["reason"] == "no_approval_channel"
+
+
+# --- what the queued request carries ----------------------------------------------
+
+
+def _queued_body(channel: RemoteApprovals, request: ApprovalRequest) -> dict[str, Any]:
+    posted: list[dict[str, Any]] = []
+
+    def post(path, body):
+        posted.append(body)
+        return {"id": "01APPROVAL", "status": "pending"}
+
+    channel._post = post  # noqa: SLF001 - capturing the wire body, not the logic
+    channel._queue(request)  # noqa: SLF001
+    (body,) = posted
+    return body
+
+
+def _deferred(a: Action, audit_level: str = "standard") -> ApprovalRequest:
+    return ApprovalRequest(
+        action=a,
+        decision=Decision(
+            verdict=Verdict.DEFER,
+            rule_id="payouts",
+            source="floor",
+            audit_level=audit_level,
+            policy_digest="d" * 64,
+        ),
+        summary="refund $12,400 to acct 9911",
+        floored=True,
+    )
+
+
+def _with_extra() -> Action:
+    from unified_enforce.action import ActionContext
+
+    return Action.build(
+        principal=Principal(id="agent:payments-1"),
+        tool="sdk://payments/refund",
+        verb="create",
+        resource="customer:42",
+        params={"amount": "12400.00", "account": "9911"},
+        context=ActionContext(origin="sdk", extra={"session_cookie": "s3cr3t"}),
+    )
+
+
+def test_the_queue_body_carries_the_deadline_and_policy_digest_never_extra():
+    channel = RemoteApprovals(
+        "https://cp", "t", fleet_id=FLEET, decision_key="k" * 43, deadline_seconds=42.0
+    )
+    request = _deferred(_with_extra())
+    body = _queued_body(channel, request)
+    assert body["deadline_seconds"] == 42 and isinstance(body["deadline_seconds"], int)
+    assert body["decision"]["policy_digest"] == "d" * 64
+    assert body["action"]["context"]["extra"] == {}
+    assert "s3cr3t" not in json.dumps(body)
+    # Arguments are shown for a standard rule; the digest is the one the
+    # sidecar computed over the *whole* action, extra included.
+    assert body["action"]["params"]["account"] == "9911"
+    assert body["action_digest"] == request.digest
+    assert "params_withheld" not in body
+
+
+@pytest.mark.parametrize(
+    ("level", "share", "reason"),
+    [("minimal", True, "audit_level_minimal"), ("standard", False, "payloads_off")],
+)
+def test_arguments_are_withheld_for_minimal_rules_and_when_sharing_is_off(level, share, reason):
+    channel = RemoteApprovals(
+        "https://cp", "t", fleet_id=FLEET, decision_key="k" * 43, share_params=share
+    )
+    request = _deferred(_with_extra(), audit_level=level)
+    body = _queued_body(channel, request)
+    assert body["action"]["params"] == {}
+    assert body["params_withheld"] == reason
+    # Not a bare "9911": the action digest is random hex and contains it now
+    # and then. The account as a JSON value and as the summary renders it.
+    assert '"9911"' not in json.dumps(body)
+    assert "acct 9911" not in json.dumps(body), "nor in the summary, which renders arguments"
+    assert body["action_digest"] == request.digest, "the binding is the sidecar's digest"
+
+
+async def test_a_deadline_with_no_answer_is_a_timeout_not_a_channel_error():
+    """The control plane is reachable and nobody answers: `approval_timeout`,
+    which an operator reads as "nobody decided", not `approval_error`, which
+    reads as "something is broken"."""
+    s = signer()
+    fake = FakeControlPlane([{"status": "pending"}])
+    outcome = await Approvals(channel_over(fake, s, deadline_seconds=0.05)).resolve(
+        request_for(action())
+    )
+    assert not outcome.allowed
+    assert outcome.decision.source == "approval_timeout"
+    assert outcome.reason == "approval_timed_out"
+
+
+def test_a_fractional_deadline_is_sent_as_an_int_rounded_up():
+    """The control plane treats it as advisory; an older one validates an int,
+    and rounding down could expire the item before this client stops."""
+    channel = RemoteApprovals(
+        "https://cp", "t", fleet_id=FLEET, decision_key="k" * 43, deadline_seconds=0.2
+    )
+    body = _queued_body(channel, _deferred(_with_extra()))
+    assert body["deadline_seconds"] == 1 and isinstance(body["deadline_seconds"], int)
+
+
+@pytest.mark.parametrize("source", ["distribution", "containment"])
+def test_arguments_are_withheld_for_a_gate_forced_deferral(source):
+    channel = RemoteApprovals("https://cp", "t", fleet_id=FLEET, decision_key="k" * 43)
+    request = ApprovalRequest(
+        action=_with_extra(),
+        decision=Decision(
+            verdict=Verdict.DEFER,
+            rule_id=None,
+            source=source,
+            reason="revocation list is stale; cannot confirm whether this principal is contained",
+        ),
+        summary="refund $12,400 to acct 9911",
+    )
+    body = _queued_body(channel, request)
+    assert body["action"]["params"] == {} and body["params_withheld"] == "distribution_state"
+    assert '"9911"' not in json.dumps(body) and "acct 9911" not in json.dumps(body)
+
+
+def test_arguments_are_withheld_when_the_gate_also_deferred_a_policy_prompt():
+    channel = RemoteApprovals("https://cp", "t", fleet_id=FLEET, decision_key="k" * 43)
+    request = _deferred(_with_extra())
+    request.decision.context = {"gate": {"source": "distribution", "reason": "stale"}}
+    body = _queued_body(channel, request)
+    assert body["params_withheld"] == "distribution_state"
+
+
+async def test_nothing_is_queued_when_no_key_could_verify_the_answer():
+    """Before any key set has verified (an un-polled sidecar), no resolution
+    can be honoured: the request is refused before it leaves, and the agent
+    is denied -- not left waiting the full deadline on a certain refusal."""
+    s = signer()
+    a = action()
+    fake = FakeControlPlane([fresh(s, a.digest(strict=False))])
+    channel = channel_over(fake, s)
+    channel._keys = lambda: {}  # noqa: SLF001 - what Distribution.verification_keys returns
+    outcome = await Approvals(channel).resolve(request_for(a))
+    assert not outcome.allowed
+    assert fake.queued == [] and fake.polls == 0
+    assert outcome.decision.source == "approval_error"

@@ -1209,3 +1209,235 @@ def test_a_failing_containment_handler_never_fails_the_refresh(source, root, pol
     assert forced is not None and forced.verdict == Verdict.DENY, (
         "the list is applied before it is announced; a broken handler cannot un-contain"
     )
+
+
+# --- no bundle published (HTTP 404) ---------------------------------------------
+
+
+class NoBundleSource(FakeSource):
+    """A control plane whose fleet has a key set and a revocation list but no
+    policy bundle yet -- it answers 404 for the bundle."""
+
+    def fetch_bundle(self):
+        from unified_enforce.distribution import NotPublished
+
+        self._check()
+        raise NotPublished("HTTP 404 for /api/v1/policy/bundle: nothing published")
+
+
+@pytest.fixture
+def no_bundle(root, policy_key):
+    return NoBundleSource(keyset(root, policy_key), None, revocations(policy_key))
+
+
+def test_a_missing_bundle_does_not_stop_keys_and_revocations_applying(no_bundle, root):
+    dist = make(no_bundle, root)
+    report = dist.refresh(now=NOW)
+    assert report.no_bundle and not report.unreachable
+    assert report.applied_revocations
+    assert dist.verification_keys(), "console approvals need the key set"
+    assert dist.snapshot.revocations_health is Health.FRESH
+    # A sidecar's policy *is* the bundle: still deny everything without one.
+    assert dist.gate(action()).verdict is Verdict.DENY
+
+
+def test_a_bundle_optional_point_is_gated_only_on_containment(no_bundle, root, policy_key):
+    dist = make(no_bundle, root, require_bundle=False)
+    dist.refresh(now=NOW)
+    assert dist.gate(action()) is None, "the hub's own policy decides"
+    no_bundle.revocations_doc = revocations(
+        policy_key, version=2, entries=[{"principal_id": AGENT, "mode": "deny"}]
+    )
+    dist.refresh(now=NOW)
+    assert dist.gate(action()).source == "containment"
+
+
+def test_a_bundle_optional_point_still_defers_on_an_unverifiable_revocation_list(root):
+    dist = make(FakeSource(None, None, None), root, require_bundle=False)
+    decision = dist.gate(action())
+    assert decision is not None and decision.verdict is Verdict.DEFER
+
+
+def test_the_key_set_is_cached_so_a_restart_reloads_what_it_verified(no_bundle, root, tmp_path):
+    make(no_bundle, root, cache_dir=tmp_path).refresh(now=NOW)
+    restarted = make(no_bundle, root, cache_dir=tmp_path, require_bundle=False, now=NOW)
+    assert restarted.verification_keys()
+    assert restarted.snapshot.revocations_version == 1
+
+
+def test_a_404_from_the_control_plane_is_not_published(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    from unified_enforce.distribution import ControlPlaneSource, NotPublished
+
+    def refuse(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, io.BytesIO(b""))
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    with pytest.raises(NotPublished):
+        ControlPlaneSource("https://cp", "t").fetch_bundle()
+
+
+# --- a forced DEFER is never looser than the engine (C1) -----------------------
+
+_DENY_AND_FLOOR = """
+version: 1
+rules:
+  - id: no-refunds
+    match:
+      tool: 'sdk://payments/refund'
+    effect: deny
+  - id: allow-rest
+    match:
+      tool: '**'
+    effect: allow
+floors:
+  - id: floor:wire
+    match:
+      tool: 'sdk://payments/wire'
+"""
+
+
+def test_an_unverifiable_revocation_list_never_turns_a_policy_deny_into_a_prompt(root):
+    """min(engine verdict, DEFER): a bundle-optional point that has not polled
+    yet (or whose list went stale) cannot confirm containment, which may cost
+    an ALLOW its automatic pass -- never a DENY its refusal."""
+    from unified_enforce.enforcer import Enforcer
+    from unified_enforce.policy import PolicyEngine
+
+    dist = make(FakeSource(None, None, None), root, require_bundle=False)
+    enforcer = Enforcer(PolicyEngine.from_yaml(_DENY_AND_FLOOR), distribution=dist)
+
+    denied = enforcer.enforce(action(tool="sdk://payments/refund"))
+    assert denied.verdict is Verdict.DENY
+    assert denied.rule_id == "no-refunds" and denied.source != "distribution"
+
+    floored = enforcer.enforce(action(tool="sdk://payments/wire"))
+    assert floored.verdict is Verdict.DEFER
+    assert floored.source == "floor", "a floor stays a floor (its warning still shows)"
+    assert floored.context and floored.context["gate"]["source"] == "distribution"
+
+    held = enforcer.enforce(action(tool="sdk://payments/list"))
+    assert held.verdict is Verdict.DEFER and held.source == "distribution"
+
+
+def test_a_stale_revocation_list_keeps_a_policy_deny_a_deny(source, root):
+    from unified_enforce.enforcer import Enforcer
+    from unified_enforce.policy import PolicyEngine
+
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+    source.down = True
+    dist.refresh(now=NOW + timedelta(hours=1))
+    assert dist.snapshot.revocations_health is Health.STALE
+    enforcer = Enforcer(PolicyEngine.from_yaml(_DENY_AND_FLOOR), distribution=dist)
+    assert enforcer.enforce(action(tool="sdk://payments/refund")).verdict is Verdict.DENY
+
+
+async def test_a_gate_forced_deferral_is_answered_for_one_call_only(root):
+    """No learned rule, no session allow, and no session allow served to it."""
+    from unified_enforce.approval import (
+        ApprovalKind,
+        ApprovalRequest,
+        ApprovalResponse,
+        Approvals,
+    )
+    from unified_enforce.enforcer import Enforcer
+    from unified_enforce.policy import PolicyEngine
+
+    class Answer:
+        def __init__(self, kind):
+            self.kind, self.asked = kind, 0
+
+        async def ask(self, request):
+            self.asked += 1
+            return ApprovalResponse(kind=self.kind, decided_by="op")
+
+    dist = make(FakeSource(None, None, None), root, require_bundle=False)
+    enforcer = Enforcer(PolicyEngine.from_yaml(_DENY_AND_FLOOR), distribution=dist)
+    act = action(tool="sdk://payments/list")
+    deferral = enforcer.enforce(act)
+    assert deferral.source == "distribution"
+
+    for kind in (ApprovalKind.ALLOW_ALWAYS, ApprovalKind.DENY_ALWAYS):
+        out = await Approvals(Answer(kind)).resolve(ApprovalRequest(action=act, decision=deferral))
+        assert out.persistent is False, kind
+
+    channel = Answer(ApprovalKind.ALLOW_SESSION)
+    approvals = Approvals(channel)
+    first = await approvals.resolve(ApprovalRequest(action=act, decision=deferral))
+    assert first.allowed and first.session is False
+    await approvals.resolve(ApprovalRequest(action=act, decision=deferral))
+    assert channel.asked == 2, "a gate-forced prompt is never answered from the session cache"
+
+    # Nor is a session allow given to an ordinary policy prompt reused for it.
+    policy_defer = PolicyEngine.from_yaml(_DENY_AND_FLOOR).decide(
+        action(tool="sdk://payments/wire")
+    )
+    approvals = Approvals(channel)
+    await approvals.resolve(ApprovalRequest(action=act, decision=policy_defer))
+    before = channel.asked
+    await approvals.resolve(ApprovalRequest(action=act, decision=deferral))
+    assert channel.asked == before + 1
+
+
+def test_a_gate_forced_defer_offers_no_payload(root):
+    """The approval request withholds the arguments for it, so no payload
+    copy is offered either; a policy DEFER still offers one."""
+    from unified_enforce.enforcer import Enforcer
+    from unified_enforce.policy import PolicyEngine
+
+    class Sink:
+        def __init__(self):
+            self.payloads = []
+
+        def record(self, action, decision, *, entry=None):
+            return True
+
+        def record_payload(self, entry, path):
+            self.payloads.append(path)
+
+    class Chain:
+        def append_decision(self, action, decision, counters=None):
+            return {"seq": 1, "hash": "h"}
+
+    sink = Sink()
+    dist = make(FakeSource(None, None, None), root, require_bundle=False)
+    enforcer = Enforcer(
+        PolicyEngine.from_yaml(_DENY_AND_FLOOR), chain=Chain(), distribution=dist, evidence=sink
+    )
+    held = enforcer.enforce(action(tool="sdk://payments/list"))
+    assert held.verdict is Verdict.DEFER and held.source == "distribution"
+    assert sink.payloads == []
+    # Without the gate, a policy DEFER (the floor) does offer one.
+    plain = Enforcer(PolicyEngine.from_yaml(_DENY_AND_FLOOR), chain=Chain(), evidence=sink)
+    plain.enforce(action(tool="sdk://payments/wire"))
+    assert sink.payloads == ["payload.action.params"]
+
+
+async def test_approvals_disabled_never_allows_a_gate_forced_defer(root, caplog):
+    """`when_disabled: allow` (the hub's `approval.enabled: false`) runs policy
+    prompts unasked; it must not run one that distribution state forced."""
+    import logging
+
+    from unified_enforce.approval import ApprovalRequest, Approvals
+    from unified_enforce.enforcer import Enforcer
+    from unified_enforce.policy import PolicyEngine
+
+    dist = make(FakeSource(None, None, None), root, require_bundle=False)
+    enforcer = Enforcer(PolicyEngine.from_yaml(_DENY_AND_FLOOR), distribution=dist)
+    approvals = Approvals(None, enabled=False, when_disabled="allow")
+    for tool in ("sdk://payments/list", "sdk://payments/wire"):  # gate alone; gate + floor
+        act = action(tool=tool)
+        with caplog.at_level(logging.WARNING, logger="unified_enforce.approval"):
+            out = await approvals.resolve(
+                ApprovalRequest(action=act, decision=enforcer.enforce(act))
+            )
+        assert not out.allowed and out.reason == "gate_forced_with_approvals_disabled", tool
+    assert "deferred by fleet distribution state" in caplog.text
+    # A plain policy prompt still runs unasked, as ADR-0018 says.
+    floor = PolicyEngine.from_yaml(_DENY_AND_FLOOR).decide(action(tool="sdk://payments/wire"))
+    out = await approvals.resolve(ApprovalRequest(action=action(), decision=floor))
+    assert out.allowed

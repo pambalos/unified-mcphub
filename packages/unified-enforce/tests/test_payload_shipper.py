@@ -990,3 +990,48 @@ def test_a_slow_decision_stream_does_not_make_the_payload_stream_warn(caplog):
     warnings = [r.getMessage() for r in caplog.records]
     assert any("final evidence flush" in w for w in warnings), "guards the negative below"
     assert not [w for w in warnings if "worker still shipping" in w], warnings
+
+
+# --- values that are not portable JSON ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"ratio": float("nan")},
+        {"limit": float("inf")},
+        [1.0, float("-inf")],
+        # Integer keys sort as numbers when digested and as strings once
+        # parsed back: the receiver would check different bytes.
+        {10: "ten", 9: "nine"},
+    ],
+)
+def test_a_value_that_is_not_portable_json_is_skipped_and_counted(value):
+    """NaN/Infinity serialise as tokens strict JSON parsers (and a WAF in front
+    of the control plane) reject, taking a whole batch with them; colliding
+    keys parse back to a different value than the one digested. Neither can be
+    fixed by substitution -- the digest is over these bytes -- so neither is
+    sent. The chain still commits to them."""
+    sink = Collecting(ACCEPT)
+    payloads = gated(sink)
+    payloads.observe(ACCEPT)
+    signer, _ = reporter()
+
+    payloads.record_payload(entry(value), "args", signer=signer)
+    payloads.record_payload(entry({"fine": 1.5}, seq=8), "args", signer=signer)
+    payloads.flush()
+
+    assert payloads.payload_stats.unportable == 1
+    (record,) = sink.records
+    assert record["value"] == {"fine": 1.5}
+    json.loads(json.dumps(sink.records), parse_constant=lambda c: pytest.fail(c))
+
+
+def test_keys_of_mixed_type_are_counted_not_raised():
+    payloads = gated()
+    payloads.observe(ACCEPT)
+    signer, _ = reporter()
+    written = entry()
+    written["args"] = {1: "a", "b": 2}  # unsortable: int and str keys
+    payloads.record_payload(written, "args", signer=signer)
+    assert payloads.payload_stats.unportable == 1

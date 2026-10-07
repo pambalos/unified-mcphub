@@ -491,3 +491,130 @@ def test_plain_decision_has_no_context_key(tmp_path) -> None:
     chain.start()
     entry = chain.append_decision(action, engine.decide(action))
     assert "context" not in entry["payload"]
+
+
+@pytest.mark.parametrize("effect", ["deny", "defer"])
+def test_an_attestation_floor_never_widens_a_rules_minimal(effect: str) -> None:
+    """The floor's own `audit_level` is about the identity check, not the
+    data. A `minimal` rule over the same action stays `minimal` -- otherwise
+    the action a floor stopped, the suspicious one, is the one whose arguments
+    are shipped (payload evidence) and shown in full (audit views)."""
+    from unified_enforce import AuditChain, Enforcer
+
+    engine = PolicyEngine.from_dict(
+        {
+            "version": 1,
+            "attestation_floors": [
+                {
+                    "id": "hr-needs-derived",
+                    "match": {"tool": "mcp://hr/*"},
+                    "minimum": "derived",
+                    "effect": effect,
+                }
+            ],
+            "rules": [
+                {
+                    "id": "hr-records-sensitive",
+                    "match": {"tool": "mcp://hr/*"},
+                    "effect": "allow",
+                    "audit_level": "minimal",
+                },
+                {"id": "detailed-elsewhere", "match": {"tool": "mcp://ops/*"}, "effect": "allow",
+                 "audit_level": "full"},
+            ],
+        }
+    )  # fmt: skip
+
+    def act(tool: str, grade: str) -> Action:
+        return Action.build(
+            principal=Principal(id="agent:x", attestation=grade),
+            tool=tool,
+            verb="call",
+            resource="*",
+            params={"ssn": "123-45-6789"},
+        )
+
+    weak = engine.decide(act("mcp://hr/get", "assigned"))
+    assert weak.source == "attestation_floor" and weak.verdict.value == effect
+    assert weak.audit_level == "minimal"
+    assert engine.decide(act("mcp://hr/get", "derived")).audit_level == "minimal"
+
+    # Through an Enforcer with an evidence sink: nothing offered for shipping.
+    offered: list[str] = []
+
+    class Sink:
+        def record(self, action, decision, entry=None):
+            return True
+
+        def record_payload(self, entry, path):
+            offered.append(path)
+
+    import tempfile
+
+    chain = AuditChain(tempfile.mkdtemp())
+    chain.start()
+    try:
+        Enforcer(engine, chain=chain, evidence=Sink()).enforce(act("mcp://hr/get", "assigned"))
+    finally:
+        chain.stop()
+    assert offered == []
+
+
+def test_a_floor_keeps_its_own_level_when_it_is_the_stricter() -> None:
+    engine = PolicyEngine.from_dict(
+        {
+            "version": 1,
+            "attestation_floors": [
+                {"id": "f", "match": {}, "minimum": "derived", "audit_level": "minimal"}
+            ],
+            "rules": [{"id": "r", "match": {}, "effect": "allow", "audit_level": "full"}],
+        }
+    )
+    d = engine.decide(
+        Action.build(
+            principal=Principal(id="agent:x", attestation="assigned"),
+            tool="mcp://a/b",
+            verb="call",
+            resource="*",
+        )
+    )
+    assert d.source == "attestation_floor" and d.audit_level == "minimal"
+
+
+def test_a_dropped_delegation_chain_survives_a_digests_only_export(tmp_path) -> None:
+    """The dropped-on_behalf_of signal is a security event, so it is recorded
+    in the decision's (non-detached) context as well as `context.extra`:
+    withholding payloads from an export -- which removes `extra` -- must not
+    remove the record that somebody tried to assert a chain."""
+    import json as _json
+
+    from unified_enforce import AuditChain, Enforcer
+    from unified_enforce import detach
+
+    engine = PolicyEngine.from_dict(
+        {"version": 1, "rules": [{"id": "allow-all", "match": {}, "effect": "allow"}]}
+    )
+    chain = AuditChain(tmp_path / "audit")
+    chain.start()
+    try:
+        core = ExtAuthzCore(enforcer=Enforcer(engine, chain=chain))
+        result = core.check(
+            CheckInput(
+                principal_id="agent:child",
+                method="POST",
+                path="/x",
+                host="h",
+                scheme="https",
+                headers={ON_BEHALF_OF_HEADER: '[{"id":"user:victim","attestation":"attested"}]'},
+            )
+        )
+    finally:
+        chain.stop()
+    assert result.decision.context["identity_assertion"] == "on_behalf_of header dropped"
+    (line,) = [
+        ln for f in (tmp_path / "audit").glob("*.jsonl") for ln in f.read_text().splitlines()
+    ]
+    exported = detach.redact(_json.loads(line))
+    assert "extra" not in exported["payload"]["action"]["context"], "extra is withheld"
+    assert exported["payload"]["context"]["identity_assertion"] == "on_behalf_of header dropped"
+    assert AuditChain.verify(tmp_path / "audit").ok

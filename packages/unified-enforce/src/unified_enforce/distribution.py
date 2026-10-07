@@ -122,6 +122,11 @@ class Snapshot:
     #: fresh, and the two failures call for opposite responses.
     revocations_health: Health = Health.UNPROVISIONED
     revocations_version: int | None = None
+    #: Whether the last poll that reached the source found a bundle: False
+    #: when it answered "none published" (404), None until a poll got that
+    #: far. Lets a status page tell "no policy has been published" (expected
+    #: for a fleet of hubs) from "a policy exists and we cannot verify it".
+    bundle_published: bool | None = None
 
     #: A candidate bundle to evaluate, never to enforce (spec §8). Held in
     #: entirely separate fields from the enforcing bundle rather than as a flag
@@ -235,6 +240,12 @@ class ControlPlaneSource:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 return json.loads(response.read())
         except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                # The control plane answered: there is no such document (no
+                # bundle has been published for this fleet yet). Distinct
+                # from unreachable, because the other artifacts can still be
+                # applied -- see `Distribution._refresh`.
+                raise NotPublished(f"HTTP 404 for {path}: nothing published") from exc
             raise SourceUnavailable(f"HTTP {exc.code} for {path}: {exc.reason}") from exc
         except urllib.error.URLError as exc:
             raise SourceUnavailable(f"cannot reach {self._base}: {exc.reason}") from exc
@@ -251,6 +262,16 @@ class ControlPlaneSource:
 
 class SourceUnavailable(Exception):
     """A fetch failed. Ordinary, and handled by keeping the last snapshot."""
+
+
+class NotPublished(SourceUnavailable):
+    """The source answered that the document does not exist (HTTP 404).
+
+    A subclass so every caller that treats it as "unavailable" keeps doing so.
+    `Distribution` tells it apart for the bundle only: a fleet with no policy
+    bundle published still has a key set and a revocation list, and a hub --
+    whose policy is local -- must not be left without either because of it.
+    """
 
 
 #: How long an operator waits between pressing the kill switch and the last
@@ -346,6 +367,9 @@ class RefreshReport:
     applied_shadow: bool = False
     applied_revocations: bool = False
     unreachable: bool = False
+    #: The source said no policy bundle is published (not unreachable). Key
+    #: set and revocations were still applied.
+    no_bundle: bool = False
     #: Refusals worth alarming on. Unreachability is deliberately absent.
     problems: list[tuple[str, Reason, str]] = field(default_factory=list)
 
@@ -395,7 +419,17 @@ class Distribution:
         required_kids: set[str] | None = None,
         now: datetime | None = None,
         on_containment: Any = None,
+        require_bundle: bool = True,
     ) -> None:
+        """`require_bundle=False` is for an enforcement point whose policy is
+        its own (the MCP hub decides from its workspace rules) and which uses
+        distribution only for the key set and the revocation list. It drops
+        the two bundle conditions from `gate()` -- "no verified bundle: deny
+        everything" and `on_stale` -- and nothing else: containment, and an
+        unverifiable revocation list, gate exactly as for a sidecar. The
+        default keeps a sidecar, whose policy *is* the bundle, failing closed
+        without one."""
+        self._require_bundle = require_bundle
         self._source = source
         self._fleet = fleet_id
         self._root_key = root_public_key
@@ -481,7 +515,20 @@ class Distribution:
 
         try:
             keyset_doc = self._source.fetch_keyset()
-            bundle_doc = self._source.fetch_bundle()
+            try:
+                bundle_doc = self._source.fetch_bundle()
+            except NotPublished as exc:
+                # Answered, not unreachable: no bundle exists yet. Treating
+                # this as unreachable used to skip the key set and the
+                # revocation list too, so a fleet that had not published a
+                # bundle never learned its keys (console approvals refused
+                # every resolution) or its containment list (every call
+                # deferred) -- for the hub, whose policy is local, a total
+                # outage caused by a document it does not use.
+                log.debug("no policy bundle published: %s", exc)
+                bundle_doc = None
+                report.no_bundle = True
+            self.snapshot.bundle_published = bundle_doc is not None
             revocations_doc = self._source.fetch_revocations()
         except Exception as exc:
             # Not a problem, on purpose. Brief unreachability is ordinary, and
@@ -505,8 +552,14 @@ class Distribution:
             return report
 
         self._verification_keys = dict(keys)
-        self._apply_bundle(bundle_doc, keys, now_ms, report)
-        self._apply_shadow(bundle_doc, keys, now_ms, report)
+        # Kept so a restart can re-verify what it cached: `_load_cache` starts
+        # from the key set, and without it nothing cached was ever reloaded.
+        if self._held_envelopes.get("keyset") != keyset_doc:
+            self._write_cache("keyset.json", keyset_doc)
+            self._held_envelopes["keyset"] = keyset_doc
+        if bundle_doc is not None:
+            self._apply_bundle(bundle_doc, keys, now_ms, report)
+            self._apply_shadow(bundle_doc, keys, now_ms, report)
         self._apply_revocations(revocations_doc, keys, now_ms, report)
         self._reassess(now_ms)
         return report
@@ -780,7 +833,7 @@ class Distribution:
             if forced is not None:
                 return forced
 
-        if self.snapshot.health is Health.UNPROVISIONED:
+        if self._require_bundle and self.snapshot.health is Health.UNPROVISIONED:
             # Checked before revocation staleness, because with nothing
             # provisioned both conditions hold and `deny` is the stricter of
             # the two. Ordered the other way round, a sidecar that had never
@@ -811,7 +864,7 @@ class Distribution:
                 ),
             )
 
-        if self.snapshot.health is Health.STALE:
+        if self._require_bundle and self.snapshot.health is Health.STALE:
             if self._on_stale is StaleAction.DENY:
                 return Decision(
                     verdict=Verdict.DENY,
@@ -870,6 +923,7 @@ class Distribution:
         if not verdict:
             log.warning("cached key set no longer verifies: %s", verdict.reason)
             return
+        self._verification_keys = dict(keys)
 
         report = RefreshReport()
         for name, apply in (

@@ -14,8 +14,12 @@ order that wastes nothing if a step fails:
 2. Load or generate the hub signing key and store it in the secrets store.
    Also before enrolling: a secrets backend that cannot persist anything (the
    `env` backend with no key) must fail here, not after the token is spent.
-3. Enrol: `POST {url}/api/v1/enrol` with the join token, `kind: sidecar` and
-   the signing key's public half as `evidence_key`.
+   The channel key likewise (`control_plane.channel_key_secret_ref`, reused
+   when present).
+3. Enrol: `POST {url}/api/v1/enrol` with the join token, `kind: sidecar`, the
+   signing key's public half as `evidence_key` and the channel key's as
+   `channel_key` -- after which every request this hub makes carries a proof
+   bound to that key, and the bearer credential alone is not enough.
 4. Render the `control_plane:` block with ruamel round-trip, so the
    operator's comments and layout in `config.yaml` survive (as servers.py does
    for workspaces), pinning the `root_key` from the enrolment response — and
@@ -71,6 +75,46 @@ class JoinResult:
     signing_key_id: str
     signing_key_created: bool
     approvals: str
+    #: Whether the fleet has a policy bundle published: True, False (the
+    #: control plane said none), or None (could not tell).
+    bundle_published: bool | None = None
+
+
+#: The path the bundle question asks; also what its request proof covers
+#: (the same path `ControlPlaneSource.fetch_bundle` proves, without the base).
+BUNDLE_PATH = "/api/v1/policy/bundle"
+
+
+def _bundle_published(
+    url: str, credential: str, *, channel: Any = None, credential_id: str | None = None
+) -> bool | None:
+    """Ask, with the new credential, whether the fleet has a bundle.
+
+    Proved with the channel key just registered, exactly as the hub's own
+    fetches are (`ChannelKey.headers`): from the moment enrolment registered
+    it, the control plane refuses a bearer-only request from this credential
+    -- with a 401, and a `CHANNEL DOWNGRADE` alarm in its log -- so asking
+    without a proof both loses the answer and raises a false alarm.
+
+    The hub does not need one (its policy is local; `Distribution` runs with
+    `require_bundle=False`), but every *sidecar* in the fleet denies every
+    action until one exists -- the first thing an operator joining the fleet's
+    first enforcement point should hear, with the command that fixes it.
+    Never fails the join: the enrolment has already happened.
+    """
+    headers = {"authorization": f"Bearer {credential}"}
+    if channel is not None and credential_id:
+        from unified_enforce.channel import ChannelKey
+
+        headers.update(ChannelKey(channel, credential_id).headers("GET", BUNDLE_PATH, None))
+    try:
+        with httpx.Client(timeout=ENROL_TIMEOUT_SECONDS) as client:
+            response = client.get(url.rstrip("/") + BUNDLE_PATH, headers=headers)
+    except httpx.HTTPError:
+        return None
+    if response.status_code == 404:
+        return False
+    return True if response.status_code == 200 else None
 
 
 def _current_block(doc: CommentedMap) -> Any:
@@ -78,13 +122,22 @@ def _current_block(doc: CommentedMap) -> Any:
     return block if isinstance(block, dict) else None
 
 
-def _enrol(url: str, join_token: str, evidence_key: str) -> dict[str, Any]:
+def _enrol(url: str, join_token: str, evidence_key: str, channel_key: str) -> dict[str, Any]:
     endpoint = url.rstrip("/") + "/api/v1/enrol"
     try:
         with httpx.Client(timeout=ENROL_TIMEOUT_SECONDS) as client:
             response = client.post(
                 endpoint,
-                json={"join_token": join_token, "kind": "sidecar", "evidence_key": evidence_key},
+                json={
+                    "join_token": join_token,
+                    "kind": "sidecar",
+                    "evidence_key": evidence_key,
+                    # The key every later request is proved with. One-way at
+                    # the control plane: once registered, a request from this
+                    # credential without a valid proof is refused, so a stolen
+                    # bearer token alone cannot report, fetch or approve.
+                    "channel_key": channel_key,
+                },
             )
     except httpx.HTTPError as exc:
         raise JoinError(f"cannot reach the control plane at {endpoint}: {exc}") from None
@@ -138,6 +191,7 @@ def join(
             "(the old credential stays valid at the control plane until revoked there)"
         )
     credential_ref = hub_cfg.control_plane.credential_secret_ref
+    channel_ref = hub_cfg.control_plane.channel_key_secret_ref
     signing_ref = hub_cfg.audit.signing_key_secret_ref
 
     # 2. The signing key, before the token is spent.
@@ -148,15 +202,27 @@ def join(
         if seed is None:
             seed = generate_seed()
             store.set(signing_ref, seed)
+        # The channel key, the same way and for the same reason (before the
+        # token is spent). Reused when present: a `--force` re-join that
+        # fails after this point must not have replaced the key the current
+        # credential proves its requests with.
+        channel_seed = store.get(channel_ref)
+        if channel_seed is None:
+            channel_seed = generate_seed()
+            store.set(channel_ref, channel_seed)
     except SecretsKeyError as exc:
         raise JoinError(f"secrets: {exc}") from None
     try:
         signer = signer_from_secret(seed)
     except ValueError as exc:
         raise JoinError(f"the existing signing key under {signing_ref!r} is unusable: {exc}")
+    try:
+        channel = signer_from_secret(channel_seed)
+    except ValueError as exc:
+        raise JoinError(f"the existing channel key under {channel_ref!r} is unusable: {exc}")
 
     # 3. Enrol.
-    payload = _enrol(url, join_token, public_key_b64u(signer))
+    payload = _enrol(url, join_token, public_key_b64u(signer), public_key_b64u(channel))
     if payload["fleet_id"] != fleet:
         # The token decides the fleet, not the flag; a mismatch means the
         # operator holds a token for a fleet they did not mean. Nothing is
@@ -176,6 +242,15 @@ def join(
     block["root_public_key"] = payload["root_key"]
     block["on_stale"] = "keep"
     block["approvals"] = approvals
+    if payload.get("credential_id"):
+        # The `iss` of every request proof; not a secret.
+        block["credential_id"] = payload["credential_id"]
+    elif "credential_id" in block:
+        del block["credential_id"]
+    if "channel_key_secret_ref" in block or (
+        channel_ref != ControlPlaneConfig().channel_key_secret_ref
+    ):
+        block["channel_key_secret_ref"] = channel_ref
     if (
         "credential_secret_ref" in block
         or credential_ref != ControlPlaneConfig().credential_secret_ref
@@ -193,6 +268,9 @@ def join(
     secure_write(path, rendered.encode())
 
     return JoinResult(
+        bundle_published=_bundle_published(
+            url, payload["token"], channel=channel, credential_id=payload.get("credential_id")
+        ),
         fleet_id=payload["fleet_id"],
         credential_id=payload.get("credential_id"),
         credential_secret_ref=credential_ref,
@@ -244,6 +322,13 @@ def print_join(result: JoinResult, url: str) -> None:
         "credential's evidence key — unsigned evidence from it is now refused)"
     )
     print(f"  approvals:    {result.approvals}")
+    if result.bundle_published is False:
+        print(
+            f"note: fleet {result.fleet_id!r} has no policy bundle published. This hub does not "
+            "need one (its policy is its workspace), but any sidecar or gateway in the fleet "
+            "denies every action until one is. If the deployment has them, publish one:\n"
+            f"  unified-control publish-policy --fleet {result.fleet_id} --dir <policy-dir>"
+        )
     print("restart the hub to apply (`unified-mcphub start`)")
 
 

@@ -209,3 +209,90 @@ def test_the_seed_round_trips_through_the_signer():
     signer = signing.signer_from_secret(seed)
     assert base64.b64encode(signer.private_bytes()).decode() == seed
     assert isinstance(signer, Signer)
+
+
+@pytest.mark.asyncio
+async def test_start_stop_with_no_calls_then_restart_keeps_the_chain(
+    hub_home, fake_keyring, capsys, monkeypatch
+):
+    """Day 1: one call. Day 2: start and stop with no calls (an empty day
+    file). Day 2 again: restart and call. The chain must continue from day 1
+    -- not restart at GENESIS/seq 1 below signing.json's start point."""
+    from datetime import UTC, datetime
+
+    import unified_mcphub.audit as audit_mod
+    from unified_enforce.audit import HashChainWriter
+
+    store = SecretsStore(backend="keyring")
+    store.set("hub-signing-key", _seed())
+    day = {"now": datetime(2026, 10, 1, 12, tzinfo=UTC)}
+    monkeypatch.setattr(audit_mod, "utcnow", lambda: day["now"])
+
+    await _run_one_call(_hub(store))
+    day["now"] = datetime(2026, 10, 2, 9, tzinfo=UTC)
+    idle = _hub(store)
+    await idle.start()
+    await idle.stop()
+    assert (audit_dir() / "2026-10-02.jsonl").read_bytes() == b""
+    await _run_one_call(_hub(store))
+
+    entries = [
+        json.loads(line)
+        for f in sorted(audit_dir().glob("*.jsonl"))
+        for line in f.read_text().splitlines()
+        if line.strip()
+    ]
+    assert [e["seq"] for e in entries] == list(range(1, len(entries) + 1))
+    record = signing.load_record()
+    assert HashChainWriter.verify(
+        audit_dir(), public_key=record.public_bytes(), signed_from_seq=record.since_seq
+    ).ok
+    assert audit_reader.verify(audit_dir(), record).ok
+    assert main(["audit", "verify"]) == 0
+    assert "chain OK" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_a_signed_chain_with_its_signing_record_deleted_fails_verify(
+    hub_home, fake_keyring, capsys
+):
+    """Deleting signing.json must not quietly downgrade `audit verify` to a
+    hash-only check of a chain that carries signatures."""
+    store = SecretsStore(backend="keyring")
+    store.set("hub-signing-key", _seed())
+    await _run_one_call(_hub(store))
+    assert main(["audit", "verify"]) == 0
+    capsys.readouterr()
+
+    signing.signing_record_path().unlink()
+    assert main(["audit", "verify"]) == 1
+    out = capsys.readouterr().out
+    assert "UNVERIFIED" in out and "signing.json" in out
+
+    # A hub that never signed still verifies by hash, as before.
+    for f in audit_dir().glob("*.jsonl"):
+        f.unlink()
+    store.remove("hub-signing-key")
+    await _run_one_call(_hub(store))
+    assert main(["audit", "verify"]) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [("record_payloads", False), ("signing_key_secret_ref", "another-key")],
+)
+async def test_audit_settings_read_at_start_warn_on_reload(hub_home, caplog, setting, value):
+    """Both are applied once, at start (the chain writer, the signer). A
+    reload that silently "accepted" a change to either would let an operator
+    believe payload recording was off, or the key rotated, when neither was."""
+    import logging
+
+    hub = Hub(load_config())
+    before = getattr(hub.config.hub.audit, setting)
+    cfg = hub_home / "config.yaml"
+    cfg.write_text(cfg.read_text() + f"audit:\n  {setting}: {json.dumps(value)}\n")
+    with caplog.at_level(logging.WARNING):
+        assert await hub._reload() is True
+    assert f"audit.{setting} change ignored on reload; a restart is required" in caplog.text
+    assert getattr(hub.config.hub.audit, setting) == before, "the running value is reported"

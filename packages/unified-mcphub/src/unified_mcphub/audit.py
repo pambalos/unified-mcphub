@@ -161,8 +161,9 @@ class AuditLog:
         policy_digest: str | None = None,
         approver: dict[str, Any] | None = None,
         attestation: dict[str, Any] | None = None,
+        resolution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """`approver` and `attestation` are set when a console approver
+        """`approver`, `attestation` and `resolution` are set when a console approver
         resolved a `prompt` (control_plane.approvals: console): who, as the
         control plane's signature attests it, and the signature itself. Kept
         here rather than only at the control plane because its approvals table
@@ -170,8 +171,21 @@ class AuditLog:
         is hash-chained (and signed, when the hub signs), and the attestation
         in it can be re-verified against the fleet's key set by somebody who
         does not trust whoever operates the control plane. A terminal answer
-        leaves both absent: nobody authenticated, and the entry should not
-        imply otherwise with an empty object."""
+        leaves all three absent: nobody authenticated, and the entry should
+        not imply otherwise with an empty object.
+
+        `resolution` is `{kind, scope}`: the rest of what the control plane
+        signed (`attest.resolution_payload`). The entry's own fields cannot
+        stand in for it — `authz_decision` says `prompt_allowed` for all three
+        allowing kinds, and the scope the approver signed is not what the hub
+        persisted when it declined to — and without the exact values the
+        signature cannot be rebuilt, so the claim "re-verifiable" would be
+        false. `pack_verify` reads it from here.
+
+        `action_digest` is also how a refusal at the door (no identity, so no
+        call Action) is joined to the structural decision the fleet receives
+        for it: the hub passes the digest of that decision's Action, so the
+        row the control plane stores cites an entry that names it."""
         entry = {
             "phase": "received",
             "request_id": request_id,
@@ -201,6 +215,8 @@ class AuditLog:
             entry["approver"] = approver
         if attestation:
             entry["attestation"] = attestation
+            if resolution:
+                entry["resolution"] = resolution
         return self._write(entry, detach=RECEIVED_PAYLOADS)
 
     def write_completed(
@@ -214,9 +230,16 @@ class AuditLog:
         prompt_response_ms: float | None = None,
         upstream_request_id: str | None = None,
         injection: list[str] | None = None,
+        injection_action_digest: str | None = None,
     ) -> dict[str, Any]:
         """`audit_level` is recorded (the received entry's, carried over) so
-        the completed half can be shown at the same level without a join."""
+        the completed half can be shown at the same level without a join.
+
+        `injection_action_digest` is the digest of the structural `ingest`
+        decision a joined hub ships for an injection finding. That row cites
+        this entry (`chain_hash`), so this entry names the action the row is
+        about — otherwise an auditor joining the export to the chain finds a
+        row whose digest appears nowhere in the line it points at."""
         result_json = json.dumps(result, default=str) if result is not None else ""
         entry = {
             "phase": "completed",
@@ -235,6 +258,8 @@ class AuditLog:
             # D-12: the shapes found in the result, by id. The reader sees
             # that this result carried instructions without re-reading them.
             entry["injection"] = list(injection)
+            if injection_action_digest:
+                entry["injection_action_digest"] = injection_action_digest
         return self._write(entry, detach=COMPLETED_PAYLOADS)
 
     def write_interdicted(

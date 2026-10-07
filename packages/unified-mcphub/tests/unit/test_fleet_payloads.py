@@ -501,3 +501,34 @@ def test_the_real_transport_has_no_payload_sink_over_http():
     transport.bind("uai_test")
     with pytest.raises(ConnectionError):
         transport.payloads.send([{"value": "secret"}])
+
+
+@pytest.mark.asyncio
+async def test_a_gate_forced_prompt_ships_no_payloads(hub_home, keys):
+    """A `defer` containment: the approver was told the arguments are
+    withheld (`distribution_state`), so no copy of them -- or of the result --
+    follows even when the call is approved. The decision row still ships."""
+    from unified_mcphub.approval import Approval, ChannelDecision, DecisionKind
+
+    class Yes:
+        async def ask(self, *a):
+            return ChannelDecision(DecisionKind.ALLOW, None, "op")
+
+    root, policy_key = keys
+    plane = PayloadPlane(root, policy_key)
+    plane.contain("agent:crew-1", mode="defer")
+    hub = _hub(hub_home, plane, root)
+    hub.approval = Approval(enabled=True, channel=Yes())
+    hub.audit.start()
+    try:
+        assert hub.fleet is not None and hub.fleet.evidence is not None
+        hub.fleet.evidence.signer = Signer.generate("hub")
+        hub.fleet.distribution.refresh(now=NOW)
+
+        assert "result" in await _call(hub)
+        _ship(hub)
+
+        assert plane.evidence, "the decision row still ships"
+        assert plane.payload_records == []
+    finally:
+        hub.audit.stop()

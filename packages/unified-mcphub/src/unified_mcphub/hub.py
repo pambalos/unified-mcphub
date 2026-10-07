@@ -25,6 +25,7 @@ from ulid import ULID
 from watchfiles import awatch
 
 from unified_enforce import Action, ActionContext, Principal, Telemetry
+from unified_enforce.approval import gate_forced
 from unified_enforce.distribution import FLEET_WIDE as _FLEET_WIDE
 from unified_paths import canonical
 
@@ -269,6 +270,7 @@ class Hub:
                 refs.add(spec.auth_secret_ref)
         if self.fleet is not None:
             refs.add(self.fleet.credential_secret_ref)
+            refs.add(self.fleet.channel_key_secret_ref)
         # The signing key, always: whether this hub signs is decided by the
         # store holding one, and the store can only be asked once unlocked.
         # Listing it unconditionally means a hub that has a key signs whether
@@ -350,12 +352,10 @@ class Hub:
             )
         self._loop = asyncio.get_running_loop()
         if self.fleet is not None:
-            credential = (
-                self.secrets.get(self.fleet.credential_secret_ref)
-                if self.secrets.exists()
-                else None
-            )
-            await self.fleet.start(credential, signer=signer)
+            stored = self.secrets.exists()
+            credential = self.secrets.get(self.fleet.credential_secret_ref) if stored else None
+            channel_seed = self.secrets.get(self.fleet.channel_key_secret_ref) if stored else None
+            await self.fleet.start(credential, signer=signer, channel_seed=channel_seed)
 
         for name, spec in self.config.workspace.servers.items():
             if not spec.enabled:
@@ -500,12 +500,13 @@ class Hub:
             allowed = outcome.allowed
             decided_by = outcome.decided_by
             approver, attestation = outcome.approver, outcome.attestation
+            resolution = outcome.resolution
             final = outcome.decision
         else:
             allowed = decision.effect is Effect.ALLOW
             denied_reason = None
             decided_by = None
-            approver = attestation = None
+            approver = attestation = resolution = None
             final = decision.engine
 
         received = self.audit.write_received(
@@ -526,6 +527,7 @@ class Hub:
             policy_digest=decision.policy_digest,
             approver=approver,
             attestation=attestation,
+            resolution=resolution,
         )
         # After the entry exists, and pointing at it (AuthzResolver.ship),
         # under the digest that entry recorded -- the lenient one, which a
@@ -542,7 +544,19 @@ class Hub:
         shipped = False
         if final is not None:
             shipped = self.authz.ship(action, final, received, action_digest=recorded_digest)
-        ship_payloads = shipped and decision.audit_level != "minimal"
+        # Nor for a prompt that fleet distribution state forced (an unknown or
+        # stale revocation list, a `defer` containment): the approval queue
+        # was told the arguments are withheld (`distribution_state`), and this
+        # principal may be contained -- the copy would contradict both.
+        ship_payloads = (
+            shipped
+            and decision.audit_level != "minimal"
+            and not (
+                decision.effect is Effect.PROMPT
+                and decision.engine is not None
+                and gate_forced(decision.engine)
+            )
+        )
         if ship_payloads:
             self.authz.ship_payload(received, "args", action_digest=recorded_digest)
 
@@ -603,6 +617,16 @@ class Hub:
         finally:
             self._inflight.pop(request_id, None)
 
+        # The finding's Action exists before the entry that records the
+        # finding, so that entry can name it (`injection_action_digest`): the
+        # row the fleet receives for it cites this entry. Guarded like the
+        # scan itself -- a finding must never change an outcome.
+        finding = None
+        if hits:
+            try:
+                finding = self.authz.ingress_action(action, hits)
+            except Exception:  # noqa: BLE001
+                logger.exception("could not build injection finding request=%s", request_id)
         completed = self.audit.write_completed(
             request_id=request_id,
             duration_ms=(time.monotonic() - t0) * 1000,
@@ -611,6 +635,7 @@ class Hub:
             audit_level=decision.audit_level,
             prompt_response_ms=prompt_ms,
             injection=hits,
+            injection_action_digest=finding.digest(strict=False) if finding else None,
         )
         # The result, pointing at the `completed` entry that committed to it,
         # under the received entry's action digest (a completed line carries
@@ -618,13 +643,13 @@ class Hub:
         # was accepted, and `write_interdicted` records none.
         if ship_payloads:
             self.authz.ship_payload(completed, "result", action_digest=recorded_digest)
-        if hits:
+        if hits and finding is not None:
             # The finding is shipped after the entry that records it (the
             # `completed` line's `injection`), for the same reason as the
             # verdict above. Still a finding, never a filter: a failure here is
             # logged and the result goes back.
             try:
-                self.authz.record_ingress(action, hits, completed)
+                self.authz.record_ingress(action, hits, completed, finding=finding)
             except Exception:  # noqa: BLE001
                 logger.exception("could not record injection finding request=%s", request_id)
         return _ok(req_id, result)
@@ -647,6 +672,9 @@ class Hub:
         if suppressed is None:
             return
         try:
+            # The structural Action first, so the entry can carry its digest:
+            # the row the fleet receives for this refusal cites the entry.
+            refused = self.authz.unidentified_action(source=source, method=method)
             entry = self.audit.write_received(
                 request_id=str(ULID()),
                 trace_id=audit_mod.new_trace_id(),
@@ -660,8 +688,11 @@ class Hub:
                 authz_rule=None,
                 audit_level="standard",
                 reason="no valid credential presented",
+                action_digest=refused.digest(strict=False),
             )
-            self.authz.record_unidentified(source=source, method=method, entry=entry)
+            self.authz.record_unidentified(
+                source=source, method=method, entry=entry, action=refused
+            )
         except Exception:  # noqa: BLE001 - a refusal must stay a refusal
             logger.exception("could not record an unidentified caller")
 
@@ -826,11 +857,13 @@ class Hub:
     def _persist_exact_rule(
         self, tool_uri: str, caller: str, *, allowed: bool, args_filter: dict | None = None
     ) -> None:
-        rule = Rule(
-            tool=tool_uri,
-            callers=[caller],
-            effect="allow" if allowed else "deny",
-            args_filter=args_filter,
+        rule = Rule.learned_rule(
+            {
+                "tool": tool_uri,
+                "callers": [caller],
+                "effect": "allow" if allowed else "deny",
+                "args_filter": args_filter,
+            }
         )
         # Immediate effect: prepend in-memory so the next call sees it before reload.
         self.config.workspace.authz.rules.insert(0, rule)
@@ -1026,6 +1059,16 @@ class Hub:
         if new.hub.control_plane != self.config.hub.control_plane:
             logger.warning("control_plane change ignored on reload; a restart is required")
         new.hub.control_plane = self.config.hub.control_plane
+        # And the audit settings read once at start: the chain writer was
+        # built with `record_payloads`, and the signer was loaded from
+        # `signing_key_secret_ref` when the secrets store was unlocked. A
+        # change to either does nothing until a restart, and an operator who
+        # turned payload recording off (or rotated the key ref) must not
+        # believe it took effect.
+        for name in ("record_payloads", "signing_key_secret_ref"):
+            if getattr(new.hub.audit, name) != getattr(self.config.hub.audit, name):
+                logger.warning("audit.%s change ignored on reload; a restart is required", name)
+                setattr(new.hub.audit, name, getattr(self.config.hub.audit, name))
         self.config = new
         self.authz = self._build_authz(new)
         self.redactor = Redactor(new.workspace.redact)

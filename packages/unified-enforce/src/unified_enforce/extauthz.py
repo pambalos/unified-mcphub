@@ -327,8 +327,15 @@ class ExtAuthzCore:
         # so the resolved principal is a leaf with no chain — which is the
         # honest answer, and strictly weaker than the claim.
         asserted_chain = req.headers.get(ON_BEHALF_OF_HEADER)
+        #: Security signals for the decision itself (Enforcer `signals`):
+        #: recorded in the chain's non-detached decision context, so they are
+        #: never withheld with `context.extra`, hidden by a `minimal` view, or
+        #: lost to `record_payloads: false`. `extra` keeps its copy for
+        #: readers that already look there.
+        signals: dict[str, Any] = {}
         if asserted_chain:
             extra["identity_assertion"] = "on_behalf_of header dropped"
+            signals["identity_assertion"] = "on_behalf_of header dropped"
             log.warning(
                 "dropped caller-asserted delegation chain for %s: %r",
                 req.principal_id,
@@ -375,6 +382,7 @@ class ExtAuthzCore:
                     source="identity_invalid",
                     reason=req.identity_problem,
                 ),
+                signals=signals,
             )
         elif problem is not None and self._body is not None and self._body.on_unreadable == "deny":
             # Short-circuit: params-dependent rules cannot be evaluated, so no
@@ -388,9 +396,10 @@ class ExtAuthzCore:
                     source="body_unreadable",
                     reason=f"request body {problem}",
                 ),
+                signals=signals,
             )
         else:
-            decision = self._enforcer.enforce(action)
+            decision = self._enforcer.enforce(action, signals=signals)
         allowed = decision.verdict is Verdict.ALLOW
         if protocol is not None and self._unenrolled(req):
             self._record_unenrolled_protocol(action, protocol, decision)

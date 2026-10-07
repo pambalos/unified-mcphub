@@ -15,9 +15,17 @@ which is a different kind of operation entirely — hence the separate
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from .action import Action
-from .approval import ApprovalOutcome, ApprovalRequest, Approvals, RecordedApproval
+from .approval import (
+    ApprovalOutcome,
+    ApprovalRequest,
+    Approvals,
+    RecordedApproval,
+    gate_forced,
+    no_looser_than_defer,
+)
 from .audit import AuditChain
 from .counters import Counters
 from .distribution import Distribution
@@ -84,7 +92,7 @@ class Enforcer:
             return 0
         return self.counters.replay(self._chain.entries())
 
-    def enforce(self, action: Action) -> Decision:
+    def enforce(self, action: Action, *, signals: dict[str, Any] | None = None) -> Decision:
         """Distribution state first, then policy.
 
         Wired here rather than left as a component someone remembers to call.
@@ -96,20 +104,43 @@ class Enforcer:
         contained whatever the rules say, and a sidecar that cannot verify its
         policy must not consult it — otherwise the two failures that most need
         to override policy are the two that policy would overrule.
+
+        A forced DEFER is the exception to "before the engine is consulted".
+        It means "cannot confirm this is safe" (a revocation list never
+        fetched or gone stale, an expired bundle under `on_stale: defer`, a
+        `defer` containment), not "this is acceptable with a human's nod" --
+        and returning it unconditionally turned every curated DENY into an
+        approvable prompt on exactly the hub that knows least (a joined hub
+        that has not polled yet). So the engine is still asked, and the result
+        is the stricter of the two: the engine's DENY stays a DENY, the
+        engine's own DEFER keeps its rule and source (a danger floor stays a
+        floor, so its warning still shows) with the gate recorded beside it,
+        and only an engine ALLOW is held back as the gate's DEFER.
         """
+        forced: Decision | None = None
         if self._distribution is not None:
             forced = self._distribution.gate(action)
-            if forced is not None:
-                return self.record(action, forced)
+            if forced is not None and forced.verdict is not Verdict.DEFER:
+                return self.record(action, forced, signals=signals)
 
         totals = (
             self.counters.snapshot(action.principal.id, self._engine.counter_ids)
             if self._engine.counter_ids
             else None
         )
-        return self.record(action, self._engine.decide(action, totals))
+        decision = self._engine.decide(action, totals)
+        if forced is not None:
+            decision = no_looser_than_defer(forced, decision)
+        return self.record(action, decision, signals=signals)
 
-    def record(self, action: Action, decision: Decision, *, count: bool = True) -> Decision:
+    def record(
+        self,
+        action: Action,
+        decision: Decision,
+        *,
+        count: bool = True,
+        signals: dict[str, Any] | None = None,
+    ) -> Decision:
         """Chain and trace a decision that did NOT come from the policy engine.
 
         Some verdicts are structural rather than rule-driven — the gateway
@@ -124,7 +155,17 @@ class Enforcer:
         counted. Charging it to the policy's counters would spend a budget
         twice for one request, and a floor that reads the counter would trip
         at half its stated rate for exactly that traffic.
+
+        `signals` are security observations the integration made about this
+        request (a caller-asserted delegation chain that was dropped, say).
+        Merged into `decision.context`, which the chain records as a hashed,
+        *non-detached* field: unlike `action.context.extra` it is never
+        withheld from an export, never hidden by a `minimal` view, and never
+        absent because `record_payloads` was off. A signal an auditor can lose
+        is not a signal.
         """
+        if signals:
+            decision.context = {**(decision.context or {}), **signals}
         # Before the chain write, and unconditionally. If the write then fails
         # the caller aborts the action and this counted something that never
         # happened -- over-counting, which restricts, and which ages out of the
@@ -171,7 +212,11 @@ class Enforcer:
             # - the deciding rule says `audit_level: minimal`: the customer
             #   marked this traffic sensitive. The chain still records the
             #   content raw (detach.py); `minimal` is the default view and
-            #   export, and a copy to another system is an export.
+            #   export, and a copy to another system is an export;
+            # - the decision is a DEFER forced by distribution state
+            #   (`gate_forced`; a containment DENY still ships what was tried):
+            #   the principal may be contained, and the approval request for
+            #   it withholds the arguments too (`distribution_state`).
             #
             # Looked up rather than called: anything that only implements
             # `record` (a test double, an older custom shipper) is still a
@@ -185,6 +230,7 @@ class Enforcer:
                 and entry is not None
                 and ship_payload is not None
                 and decision.audit_level != "minimal"
+                and not (decision.verdict is Verdict.DEFER and gate_forced(decision))
             ):
                 try:
                     ship_payload(entry, "payload.action.params")

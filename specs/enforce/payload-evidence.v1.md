@@ -107,6 +107,30 @@ The receipt of `POST /api/v1/evidence` gains `payloads` (`"accept"` or
   payloads, neither arguments nor result. The chain still records the content
   (detach.py); `minimal` is the default view and export, and this copy is an
   export.
+- **Gate-forced prompts.** A call deferred by distribution state
+  (`approval.gate_forced`: an unknown or stale revocation list, an expired
+  bundle under `on_stale: defer`, a `defer` containment — alone or beside the
+  engine's own DEFER) ships no payloads, neither arguments nor result, however
+  the prompt is answered. Its approval request withholds the arguments
+  (`params_withheld: distribution_state`), and the principal may be
+  contained; a payload copy would contradict both. A containment DENY still
+  ships its arguments (what was tried).
+- **Approvals are a separate copy.** A console approval request shows the
+  approver the action's arguments, governed by approval.v1 §5 rather than by
+  this stream's gate: never `context.extra`; no arguments for a `minimal` rule,
+  a gate-forced DEFER or a hub with `control_plane.payloads: off`; and only over https (loopback
+  http excepted). The decision binding is unaffected — the control plane keys
+  and signs on `action_digest`, which the reporter computed over the full
+  action.
+- **Only portable JSON.** A value whose canonical bytes are not strict JSON
+  — a `NaN`/`Infinity` (Python writes them as bare tokens, which a strict
+  parser, proxy or WAF rejects along with the rest of the batch) — or that
+  does not survive a parse and re-serialise byte for byte (non-string keys:
+  `{10: …, 9: …}` sorts numerically when digested and as strings when parsed
+  back; keys of mixed type cannot be sorted at all) is not sent, and is
+  counted as `unportable` in the hub's `fleet.payloads` status. It cannot be
+  repaired: the digest is over those exact bytes, so any substitute would
+  fail verification. The chain still commits to it.
 - **Only beside a row.** Payloads are offered only for a decision row that was
   actually queued, under the same `action_digest` (a hub: the lenient digest
   its `received` entry records). Findings (`count=False` records) ship none.

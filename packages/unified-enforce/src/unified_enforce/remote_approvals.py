@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -47,6 +48,7 @@ from .approval import (
     ApprovalResponse,
     Approver,
     SignedResolution,
+    gate_forced,
 )
 from .attest import DEFAULT_SKEW_MS, Reason, VerificationKey, accept_resolution
 
@@ -68,6 +70,21 @@ DEFAULT_HTTP_TIMEOUT = 10.0
 
 class ApprovalTransportError(Exception):
     """The control plane could not be reached, or answered incomprehensibly."""
+
+
+class ApprovalTimeout(ApprovalTransportError, TimeoutError):
+    """Nobody answered within the deadline.
+
+    A `TimeoutError`, so `Approvals` records it as what it is
+    (`approval_timeout`, "silence is not consent") rather than as a broken
+    channel (`approval_error`). The deadline lives here, not in an outer
+    `wait_for`, because this client polls and must stop between polls; before
+    this subclass the two failures were indistinguishable in the audit.
+    """
+
+
+class NoVerificationKeys(ApprovalTransportError):
+    """There is no key to verify a resolution with, so the request is not queued."""
 
 
 class UnverifiedResolution(Exception):
@@ -120,7 +137,10 @@ class RemoteApprovals:
         http_timeout: float = DEFAULT_HTTP_TIMEOUT,
         skew_ms: int = DEFAULT_SKEW_MS,
         channel: Any = None,
+        share_params: bool = True,
     ) -> None:
+        """`share_params=False` never sends an action's arguments to the
+        approver (see `_queue`); `minimal` rules withhold them regardless."""
         if keys is None and decision_key is None:
             raise ValueError(
                 "RemoteApprovals needs a key source: pass `keys` (preferred, "
@@ -140,6 +160,7 @@ class RemoteApprovals:
         self._deadline = deadline_seconds
         self._http_timeout = http_timeout
         self._skew_ms = skew_ms
+        self._share_params = share_params
 
         if keys is not None:
             self._keys = keys
@@ -170,6 +191,17 @@ class RemoteApprovals:
         a second place a fail-open could be introduced.
         """
         digest = request.digest
+        if not self._keys():
+            # No decision key this client could verify a resolution with --
+            # no key set has verified yet (an un-polled or unprovisioned
+            # sidecar), or the last one stopped verifying. Queueing anyway
+            # would put a question in front of an approver whose answer is
+            # certain to be refused, for as long as the deadline. Refused here,
+            # before anything leaves: `Approvals` turns this into a DENY.
+            raise NoVerificationKeys(
+                "no verified decision key: cannot verify any resolution, so nothing is queued "
+                "(the fleet's key set has not verified yet)"
+            )
         queued = await asyncio.to_thread(self._queue, request)
 
         if queued.already_resolved:
@@ -211,9 +243,7 @@ class RemoteApprovals:
                 raise UnverifiedResolution(verdict.reason, verdict.detail)
 
             if loop.time() >= expires:
-                raise ApprovalTransportError(
-                    f"no answer within {self._deadline:.0f}s for {digest[:12]}…"
-                )
+                raise ApprovalTimeout(f"no answer within {self._deadline:.0f}s for {digest[:12]}…")
 
             # `sleep`, not a blocking wait: this coroutine shares an event loop
             # with whatever the agent is doing, and holding it for five minutes
@@ -223,19 +253,72 @@ class RemoteApprovals:
     # --- HTTP -------------------------------------------------------------------
 
     def _queue(self, request: ApprovalRequest) -> _Queued:
-        body = {
-            "action": request.action.model_dump(mode="json"),
+        """Post the DEFER, carrying only what an approver needs to see.
+
+        **What leaves, and why it can.** The control plane binds an approval
+        to `action_digest` (it is the queue key, and it is what the decision
+        key signs); it does not recompute the digest from the posted action,
+        and this client verifies the signed resolution against the digest *it*
+        computed. So the posted action is display, not evidence, and content
+        can be withheld from it without weakening the binding:
+
+        - `context.extra` is never sent: it is the integration's own
+          bookkeeping (gateway headers, session metadata), not what the agent
+          asked to do, and payload evidence excludes it for the same reason.
+        - `params` are withheld for a rule marked `audit_level: minimal` (the
+          customer marked that traffic sensitive; a copy to another system is
+          an export) and when the deployment said no content leaves
+          (`share_params=False`, the hub's `control_plane.payloads: off`),
+          and for a DEFER that distribution state forced (`gate_forced`: a
+          revocation list not yet fetched or stale, a `defer` containment).
+          That prompt exists because this principal may be contained; its
+          arguments are the last thing to copy to another system on the
+          strength of a rule that never asked for review of them.
+          The `summary` is replaced too, because a caller's summary usually
+          renders the arguments. The approver then decides on the tool, the
+          principal, the rule and the reason -- and is told the arguments
+          were withheld, and why.
+
+        `deadline_seconds` tells the control plane how long this client will
+        wait, so it can expire the pending item rather than leave a question
+        nobody is waiting on; `policy_digest` names the policy that deferred.
+        Both are optional fields an older control plane ignores.
+        """
+        action = request.action.model_dump(mode="json")
+        context = action.get("context")
+        if isinstance(context, dict):
+            context["extra"] = {}
+        withheld = None
+        if request.decision.audit_level == "minimal":
+            withheld = "audit_level_minimal"
+        elif not self._share_params:
+            withheld = "payloads_off"
+        elif gate_forced(request.decision):
+            withheld = "distribution_state"
+        summary = request.summary
+        if withheld is not None:
+            action["params"] = {}
+            summary = f"{request.action.tool} (arguments withheld: {withheld})"
+        body: dict[str, Any] = {
+            "action": action,
             "decision": {
                 "verdict": request.decision.verdict.value,
                 "rule_id": request.decision.rule_id,
                 "source": request.decision.source,
                 "audit_level": request.decision.audit_level,
                 "reason": request.decision.reason,
+                "policy_digest": request.decision.policy_digest,
             },
             "action_digest": request.digest,
-            "summary": request.summary,
+            "summary": summary,
             "floored": request.floored,
+            # An integer, rounded up: the control plane treats it as advisory
+            # and accepts floats now, but an older one validates an int, and
+            # rounding down could expire the item before this client stops.
+            "deadline_seconds": math.ceil(self._deadline),
         }
+        if withheld is not None:
+            body["params_withheld"] = withheld
         # Note what is absent: `fleet_id`. It is derived from the credential and
         # rejected in the body, so a sidecar cannot queue into another tenant.
         payload = self._post("/api/v1/approvals", body)

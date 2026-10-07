@@ -38,6 +38,7 @@ every record so the receiver can see a hole rather than infer a quiet agent.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -63,6 +64,59 @@ DEFAULT_CAPACITY = 10_000
 #: Records per request. Bounded so one flush after a long outage does not
 #: arrive as a single enormous body.
 DEFAULT_BATCH = 200
+
+#: Field bounds the control plane's decision-evidence schema enforces
+#: (`DecisionIn`). A record over any of them is refused there -- and by an
+#: older control plane *with its whole batch* -- so `summarise` truncates an
+#: oversized value, visibly (`truncate_field`), rather than sending it or
+#: dropping the row. The audit chain keeps the full value.
+MAX_PRINCIPAL_ID = 256
+MAX_TOOL = 512
+MAX_VERB = 64
+MAX_RESOURCE = 512
+
+#: field -> its bound, for every bounded string field of a decision row.
+FIELD_BOUNDS = {
+    "principal_id": MAX_PRINCIPAL_ID,
+    "tool": MAX_TOOL,
+    "verb": MAX_VERB,
+    "resource": MAX_RESOURCE,
+}
+
+
+def truncate_field(value: str, limit: int) -> str:
+    """`value` if it fits in `limit` characters, else a visibly truncated
+    prefix ending in `…[truncated sha256:<16 hex>]`, within `limit`.
+
+    The digest is of the *full* value (UTF-8), so a reader holding the chain
+    entry -- which records it whole -- can tie the truncated row to it, and two
+    different long values never read as the same truncated one by accident.
+    """
+    if len(value) <= limit:
+        return value
+    marker = f"…[truncated sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()[:16]}]"
+    return value[: max(0, limit - len(marker))] + marker
+
+
+def refused_indices(receipt: Any, size: int) -> set[int]:
+    """The batch positions a receipt says were refused, record by record.
+
+    A control plane that validates per record answers `refused: [{index,
+    reason}, ...]` beside what it accepted (payload ingest has always done so;
+    decision ingest is moving to it). A receipt without the field is the
+    all-or-nothing answer every older control plane gives, and means nothing
+    was refused. Indices out of range, or not integers, are ignored: a receipt
+    may not invent records.
+    """
+    refused = receipt.get("refused") if isinstance(receipt, Mapping) else None
+    if not isinstance(refused, list):
+        return set()
+    out = set()
+    for item in refused:
+        index = item.get("index") if isinstance(item, Mapping) else None
+        if isinstance(index, int) and not isinstance(index, bool) and 0 <= index < size:
+            out.add(index)
+    return out
 
 
 class PermanentRejection(Exception):
@@ -118,6 +172,14 @@ class SpoolStats:
     #: dashboard that is quietly wrong.
     dropped: int = 0
     failures: int = 0
+    #: Decision records never queued because the control plane could not
+    #: store them however they were shaped: an empty principal id or tool.
+    #: Counted rather than sent: against a control plane that validates a
+    #: batch whole, one such record would take its whole batch down with it.
+    invalid: int = 0
+    #: Decision records shipped with at least one field truncated to the
+    #: control plane's bound (`FIELD_BOUNDS`, `truncate_field`).
+    truncated: int = 0
 
 
 @dataclass
@@ -325,6 +387,15 @@ def summarise(
         "parent_id": action.principal.parent_id,
         "decided_at": action.ts,
     }
+    # Within the control plane's bounds, visibly: a row it would refuse (and
+    # an older one would refuse with its whole batch) is worth less than a row
+    # that says it was shortened and names the full value's digest. Before
+    # signing, so the signature covers what is actually sent; the chain entry
+    # the row cites keeps the full value.
+    for name, limit in FIELD_BOUNDS.items():
+        value = record[name]
+        if isinstance(value, str):
+            record[name] = truncate_field(value, limit)
     return sign_evidence(record, signer) if signer is not None else record
 
 
@@ -436,6 +507,30 @@ class EvidenceShipper:
         see `summarise`.
         """
         try:
+            stats = self.spool.stats
+            if not action.principal.id or not action.tool:
+                stats.invalid += 1
+                if stats.invalid == 1 or stats.invalid % 1000 == 0:
+                    log.warning(
+                        "not shipping decision evidence with an empty principal id or tool "
+                        "(%d so far); the control plane would refuse it, and an older one its "
+                        "whole batch. It is in the audit chain.",
+                        stats.invalid,
+                    )
+                return False
+            if (
+                len(action.principal.id) > MAX_PRINCIPAL_ID
+                or len(action.tool) > MAX_TOOL
+                or len(action.verb or "") > MAX_VERB
+                or len(action.resource or "") > MAX_RESOURCE
+            ):
+                stats.truncated += 1
+                if stats.truncated == 1 or stats.truncated % 1000 == 0:
+                    log.warning(
+                        "shipping decision evidence with an oversized field truncated to the "
+                        "control plane's bound (%d so far); the audit chain has the full value",
+                        stats.truncated,
+                    )
             return self.submit(
                 summarise(
                     action, decision, entry=entry, signer=self._signer, action_digest=action_digest
@@ -545,7 +640,24 @@ class EvidenceShipper:
             self.spool.stats.failures += 1
             log.debug("%s send failed, %d record(s) requeued: %s", self._stream, len(batch), exc)
             return 0, batch
-        self.spool.stats.shipped += len(batch)
+        refused = refused_indices(receipt, len(batch)) if self._counts_refusals else set()
+        if refused:
+            # Judged on their merits, one by one: not retried (they would be
+            # judged the same way again), and the rest of the batch stands.
+            self.spool.stats.rejected += len(refused)
+            reasons = [
+                str(r.get("reason"))
+                for r in receipt.get("refused", [])[:3]
+                if isinstance(r, Mapping)
+            ]
+            log.warning(
+                "control plane refused %d of %d %s record(s): %s",
+                len(refused),
+                len(batch),
+                self._stream,
+                "; ".join(reasons),
+            )
+        self.spool.stats.shipped += len(batch) - len(refused)
         if self.payloads is not None:
             # Before `on_receipt`, and guarded on its own: a payload gate
             # that cannot read the receipt must not stop containment from
@@ -565,7 +677,11 @@ class EvidenceShipper:
                 # shipping failure, or the batch would be requeued and sent
                 # twice.
                 log.exception("evidence receipt handler raised")
-        return len(batch), []
+        return len(batch) - len(refused), []
+
+    #: Whether `_deliver` counts a receipt's per-record refusals. The payload
+    #: stream counts its own (`PayloadStats.refused`, from `on_receipt`).
+    _counts_refusals = True
 
     def _too_large(self, record: dict[str, Any], exc: Exception) -> None:
         """A single record the receiver refused for size, even on its own."""
@@ -772,6 +888,37 @@ class PayloadStats:
     unrecorded: int = 0
     #: Records the receiver refused individually (`refused` in its response).
     refused: int = 0
+    #: Values whose canonical bytes are not portable JSON, so no receiver
+    #: could check them (`_portable`): a NaN/Infinity, or keys that collapse
+    #: or reorder when the bytes are parsed back. Skipped, never sent -- the
+    #: chain still commits to them.
+    unportable: int = 0
+
+
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"non-finite number {name}")
+
+
+def _portable(body: bytes) -> bool:
+    """Whether these canonical bytes survive a strict JSON round trip.
+
+    Two ways they do not, and both are skipped rather than repaired, because
+    the chain's digest is over *these* bytes and any substitute would not
+    match it:
+
+    - **Non-finite floats.** Python writes `NaN`/`Infinity`, which is not JSON;
+      a strict proxy or WAF in front of the control plane rejects the request
+      -- with up to a batch of other values in it.
+    - **Non-string keys.** `{1: "a", "1": "b"}` serialises to two `"1"` keys,
+      and a parse keeps one: the value the receiver would verify is not the
+      one that was digested. Detected as bytes that differ once parsed and
+      re-serialised.
+    """
+    try:
+        parsed = json.loads(body, parse_constant=_reject_constant)
+    except ValueError:
+        return False
+    return _detach.canonical(parsed) == body
 
 
 class PayloadShipper(EvidenceShipper):
@@ -812,6 +959,7 @@ class PayloadShipper(EvidenceShipper):
 
     _thread_name = "unified-evidence-payloads"
     _stream = "payload evidence"
+    _counts_refusals = False
 
     def __init__(
         self,
@@ -1008,7 +1156,17 @@ class PayloadShipper(EvidenceShipper):
             self.payload_stats.unrecorded += 1
             return
 
-        body = _detach.canonical(value)
+        try:
+            body = _detach.canonical(value)
+        except (TypeError, ValueError):
+            # Keys of mixed type cannot even be sorted; the chain wrote this
+            # value with the same rule, so it could not have been digested
+            # either -- but a value is never worth an exception here.
+            self.payload_stats.unportable += 1
+            return
+        if not _portable(body):
+            self.payload_stats.unportable += 1
+            return
         size = len(body)
         # Before any receipt there is no receiver limit to apply, so a
         # conservative one of our own: see DEFAULT_PENDING_MAX_BYTES.

@@ -44,6 +44,12 @@ the default.** It exists because the hub's `approval.enabled: false` master
 switch (ADR-0018) means "don't prompt, run it" — a deliberate local-development
 affordance its e2e matrix depends on. Any deployment wanting that has to ask for
 it in writing.
+It never applies to a DEFER that distribution state forced
+(`approval.gate_forced`: unknown or stale revocation list, expired bundle
+under `on_stale: defer`, `defer` containment, alone or beside an engine
+DEFER): with approvals disabled that is DENIED (source `approval_disabled`,
+reason `gate_forced_with_approvals_disabled`, logged), whatever
+`when_disabled` says — otherwise the master switch would turn off containment.
 
 ## §3 What the engine will not do
 
@@ -92,11 +98,54 @@ credential at start; unbound it raises, so every prompt denies). The request
 carries the real deferring decision — the readable rule id and the policy
 digest — and the same canonical Action the verdict was made on. The outcome's
 attested approver and signed resolution are written into the hub's `received`
-entry (`approver`, `attestation`; `decided_by` is the approver's subject). An
+entry (`approver`, `attestation`, and `resolution: {kind, scope}` — the rest of what
+the signature covers, so the entry can be re-verified offline; `decided_by` is
+the approver's subject). An
 `allow_always` from the console with no scope is honoured for the call and not
 persisted: whole-tool trust is curated policy (ADR-0025), and a remote click
 must not accrete it into the hub's `.local.yaml`. `approvals: terminal` keeps
 the local channels exactly as before.
+
+**What a queued approval shows the approver** (`RemoteApprovals._queue`). The
+control plane keys the queue on `action_digest` and the decision key signs that
+digest; it does not recompute the digest from the posted action, and the
+reporter verifies the signed resolution against the digest *it* computed. So
+the posted action is for display, and content can be withheld from it without
+weakening the binding:
+
+- `context.extra` is never sent (integration bookkeeping, not what the agent
+  asked to do — payload evidence excludes it for the same reason).
+- `params` are withheld, and the `summary` replaced with
+  `<tool> (arguments withheld: <reason>)`, when the deferring rule is
+  `audit_level: minimal` (`audit_level_minimal`) or the deployment said no
+  content leaves (`share_params=False`; the hub's `control_plane.payloads:
+  off` → `payloads_off`), or the DEFER was forced by distribution state
+  (`approval.gate_forced`: an unknown or stale revocation list, an expired
+  bundle under `on_stale: defer`, a `defer` containment, including when the
+  engine also deferred → `distribution_state`). The body then carries
+  `params_withheld: <reason>`.
+  The approver decides on the tool, principal, rule and reason, and is told
+  the arguments were withheld. Otherwise approvers *do* see the arguments —
+  deciding whether `rm -rf build/` may run needs the command — so a console
+  approval is a copy of that content to the control plane, and follows the
+  payload stream's transport rule: a hub refuses console approvals to a
+  control plane that is not `https://` (loopback `http://` excepted), denying
+  every prompt and reporting `fleet.approvals_disabled: insecure_transport`.
+- The body also carries `deadline_seconds` (how long the reporter will wait, so
+  the control plane can expire the item; advisory there) and
+  `decision.policy_digest`. Both are optional; an older control plane ignores
+  them. `deadline_seconds` is sent as an integer, rounded up from the
+  configured deadline, for control planes that validate an int.
+
+Nothing is queued while the reporter holds no verified decision key (no key
+set has verified yet — an un-polled or unprovisioned reporter — or the last
+one stopped verifying): `RemoteApprovals.ask` raises `NoVerificationKeys`
+before posting, and the prompt is denied (`approval_error`). Queueing would
+put a question in front of an approver whose answer is certain to be refused.
+
+A deadline that passes with no answer raises `ApprovalTimeout` (a
+`TimeoutError`) and is recorded as `approval_timeout` / `approval_timed_out`,
+not as a channel error.
 
 **SDK** — `check_async()` and the async `@action` decorator route DEFER through
 approvals. `check()` stays synchronous and never blocks: asking a person is a

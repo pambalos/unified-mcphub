@@ -92,7 +92,9 @@ credential at start; unbound it raises, so every prompt denies). The request
 carries the real deferring decision — the readable rule id and the policy
 digest — and the same canonical Action the verdict was made on. The outcome's
 attested approver and signed resolution are written into the hub's `received`
-entry (`approver`, `attestation`; `decided_by` is the approver's subject). An
+entry (`approver`, `attestation`, and `resolution: {kind, scope}` — the rest of what
+the signature covers, so the entry can be re-verified offline; `decided_by` is
+the approver's subject). An
 `allow_always` from the console with no scope is honoured for the call and not
 persisted: whole-tool trust is curated policy (ADR-0025), and a remote click
 must not accrete it into the hub's `.local.yaml`. `approvals: terminal` keeps

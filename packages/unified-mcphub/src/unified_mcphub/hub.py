@@ -1046,6 +1046,16 @@ class Hub:
         if new.hub.control_plane != self.config.hub.control_plane:
             logger.warning("control_plane change ignored on reload; a restart is required")
         new.hub.control_plane = self.config.hub.control_plane
+        # And the audit settings read once at start: the chain writer was
+        # built with `record_payloads`, and the signer was loaded from
+        # `signing_key_secret_ref` when the secrets store was unlocked. A
+        # change to either does nothing until a restart, and an operator who
+        # turned payload recording off (or rotated the key ref) must not
+        # believe it took effect.
+        for name in ("record_payloads", "signing_key_secret_ref"):
+            if getattr(new.hub.audit, name) != getattr(self.config.hub.audit, name):
+                logger.warning("audit.%s change ignored on reload; a restart is required", name)
+                setattr(new.hub.audit, name, getattr(self.config.hub.audit, name))
         self.config = new
         self.authz = self._build_authz(new)
         self.redactor = Redactor(new.workspace.redact)

@@ -275,3 +275,24 @@ async def test_a_signed_chain_with_its_signing_record_deleted_fails_verify(
     store.remove("hub-signing-key")
     await _run_one_call(_hub(store))
     assert main(["audit", "verify"]) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [("record_payloads", False), ("signing_key_secret_ref", "another-key")],
+)
+async def test_audit_settings_read_at_start_warn_on_reload(hub_home, caplog, setting, value):
+    """Both are applied once, at start (the chain writer, the signer). A
+    reload that silently "accepted" a change to either would let an operator
+    believe payload recording was off, or the key rotated, when neither was."""
+    import logging
+
+    hub = Hub(load_config())
+    before = getattr(hub.config.hub.audit, setting)
+    cfg = hub_home / "config.yaml"
+    cfg.write_text(cfg.read_text() + f"audit:\n  {setting}: {json.dumps(value)}\n")
+    with caplog.at_level(logging.WARNING):
+        assert await hub._reload() is True
+    assert f"audit.{setting} change ignored on reload; a restart is required" in caplog.text
+    assert getattr(hub.config.hub.audit, setting) == before, "the running value is reported"

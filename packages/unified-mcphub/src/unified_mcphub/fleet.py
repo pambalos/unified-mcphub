@@ -313,9 +313,13 @@ class FleetLink:
         """The request-proof signer, or None for a bearer-only hub.
 
         None when no channel key was enrolled (a hub joined before channel
-        binding: it keeps working, and `fleet join --force` upgrades it). A
-        key without the credential id it belongs to cannot make a proof the
-        control plane would accept; said, and run bearer-only."""
+        binding: it keeps working, and `fleet join --force` upgrades it).
+
+        A stored key without `control_plane.credential_id` stops start-up,
+        like an unusable key: the key's existence means an enrolment
+        registered it, so the control plane refuses this credential's
+        unproven requests -- running bearer-only would be a hub that
+        silently cannot fetch, report or approve, while looking joined."""
         if seed is None:
             logger.info(
                 "control plane: no channel key under secret ref %r; requests are bearer-only "
@@ -324,11 +328,13 @@ class FleetLink:
             )
             return None
         if not self.config.credential_id:
-            logger.warning(
-                "control plane: a channel key is stored but control_plane.credential_id is "
-                "not set, so no request proof can be made; running bearer-only"
+            raise SystemExit(
+                f"control plane: a channel key is stored under "
+                f"{self.config.channel_key_secret_ref!r} but control_plane.credential_id is not "
+                "set, so no request proof can be made and the control plane will refuse this "
+                "hub's requests. Re-join with a new token: "
+                "`unified-mcphub fleet join --url ... --fleet ... --join-token ... --force`"
             )
-            return None
         from unified_enforce.channel import ChannelKey
 
         from .signing import signer_from_secret

@@ -477,3 +477,81 @@ def test_status_counts_every_decision_row_that_did_not_reach_the_plane(hub_home,
     stats = hub.fleet.status()["evidence_stats"]
     assert stats["invalid"] == 1 and stats["truncated"] == 1 and stats["rejected"] == 3
     assert stats["queued"] == 1
+
+
+# --- Hub.start wires the channel key -------------------------------------------
+
+
+def _started_joined_hub(hub_home, fake_keyring, monkeypatch, *, credential_id):
+    """A joined hub whose store holds a credential and a channel key, with
+    every control-plane request captured instead of sent."""
+    import urllib.error
+    import urllib.request
+
+    from unified_mcphub import signing
+    from unified_mcphub.secrets import SecretsStore
+
+    seen: list = []
+
+    def urlopen(request, timeout):
+        seen.append(request)
+        raise urllib.error.URLError("captured, not sent")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    _permissive(hub_home, control_plane=True)
+    config = load_config()
+    config.hub.secrets.access_mode = "auto"
+    config.hub.control_plane.root_public_key = Key().public
+    config.hub.control_plane.credential_id = credential_id
+    store = SecretsStore(backend="keyring")
+    seed = signing.generate_seed()
+    store.set(config.hub.control_plane.credential_secret_ref, "uai_cred")
+    store.set(config.hub.control_plane.channel_key_secret_ref, seed)
+    hub = Hub(config)
+    hub.secrets = store
+    return hub, seen, signing.signer_from_secret(seed)
+
+
+@pytest.mark.asyncio
+async def test_hub_start_binds_the_stored_channel_key(hub_home, fake_keyring, monkeypatch):
+    """The whole wiring, from the secrets store through `Hub.start` to the
+    request on the wire: a start that dropped the channel seed would run
+    bearer-only, and every request it made would be refused."""
+    import time
+
+    from unified_enforce.attest import accept_proof, b64u
+    from unified_enforce.distribution import SourceUnavailable
+
+    hub, seen, channel = _started_joined_hub(
+        hub_home, fake_keyring, monkeypatch, credential_id="cred-123"
+    )
+    await hub.start()
+    try:
+        assert hub.fleet.channel_bound is True
+        assert hub.status()["fleet"]["channel_bound"] is True
+        seen.clear()
+        with pytest.raises(SourceUnavailable):
+            hub.fleet._transport.fetch_revocations()  # noqa: SLF001
+        (request,) = seen
+        verdict = accept_proof(
+            request.get_header("X-unified-proof") or "",
+            public_key_b64=b64u(channel.public_bytes()),
+            credential_id="cred-123",
+            method="GET",
+            path="/api/v1/policy/revocations",
+            body=None,
+            now=int(time.time()),
+        )
+        assert verdict.ok, verdict
+    finally:
+        await hub.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_channel_key_without_a_credential_id_stops_start_up(
+    hub_home, fake_keyring, monkeypatch
+):
+    hub, _, _ = _started_joined_hub(hub_home, fake_keyring, monkeypatch, credential_id=None)
+    with pytest.raises(SystemExit, match="fleet join .*--force"):
+        await hub.start()
+    hub.audit.stop()

@@ -1,0 +1,19 @@
+packages/unified-mcphub/tests/unit/test_unpolled_fleet_gate.py
+  s_57443f001e84f6::t_a96e4eed242ce6 1-66,68-135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "4fee66722f5f6d1d93f01d38d224c07d75094992",
+  "prompts": {},
+  "sessions": {
+    "s_57443f001e84f6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "870a3f2c-bcad-432a-ac61-8f82694fa6d9",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

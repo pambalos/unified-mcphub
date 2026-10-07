@@ -661,3 +661,76 @@ def test_an_old_range_rewritten_and_resigned_with_the_new_key_fails(rotated, tmp
     )
     (chain,) = [c for c in report.checks if c.name == "chain hub"]
     assert not chain.ok and "bad signature" in chain.detail and "range" in chain.detail
+
+
+def _chain_check(tmp_path, chain_dir, source):
+    root, dk = Key(), Key()
+    report = verify_pack(_pack(tmp_path, chain_dir, csv_path=None, root=root, dk=dk, source=source))
+    (chain,) = [c for c in report.checks if c.name == "chain hub"]
+    return chain
+
+
+def test_the_verifier_prints_each_key_range_under_its_derived_id(rotated, tmp_path):
+    chain_dir, record, (old, new) = rotated
+    source = _source(chain_dir, record)
+    # A stated id is a label; the verifier names each key by its own bytes.
+    source.key_ranges = [{**r, "key_id": "trust-me"} for r in source.key_ranges]
+    chain = _chain_check(tmp_path, chain_dir, source)
+    assert chain.ok, chain.detail
+    assert f"{old.key_id} from seq 1" in chain.detail
+    assert f"{new.key_id} from seq 4" in chain.detail
+    assert "trust-me" not in chain.detail
+
+
+@pytest.mark.parametrize(
+    "edit, why",
+    [
+        # The newest key is not the key the pack names for the chain.
+        (lambda s, old: setattr(s, "public_key", old), "newest key"),
+        # The first range does not start where the chain says signing began.
+        (lambda s, old: setattr(s, "signed_from_seq", 2), "signing began"),
+        # Two ranges claim the same seqs.
+        (
+            lambda s, old: s.key_ranges.__setitem__(1, {**s.key_ranges[1], "since_seq": 1}),
+            "overlap",
+        ),
+        # A range with no start.
+        (
+            lambda s, old: s.key_ranges.__setitem__(1, {**s.key_ranges[1], "since_seq": None}),
+            "since_seq",
+        ),
+    ],
+)
+def test_a_key_range_table_that_disagrees_with_its_meta_fails(rotated, tmp_path, edit, why):
+    chain_dir, record, _ = rotated
+    source = _source(chain_dir, record)
+    edit(source, source.key_ranges[0]["public_key"])
+    chain = _chain_check(tmp_path, chain_dir, source)
+    assert not chain.ok and why in chain.detail, chain.detail
+
+
+def test_the_builder_refuses_flags_that_contradict_signing_json(rotated, tmp_path):
+    chain_dir, record, (old, _) = rotated
+    common = [
+        "pack",
+        "--from",
+        "2000-01-01T00:00:00Z",
+        "--to",
+        (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+        "--chain",
+        f"hub={chain_dir}",
+        "--chain-signing",
+        f"hub={record}",
+    ]
+    with pytest.raises(SystemExit, match="current key"):
+        evidence_main(
+            [
+                *common,
+                "--out",
+                str(tmp_path / "a"),
+                "--chain-key",
+                f"hub={signing.public_key_b64u(old)}",
+            ]
+        )
+    with pytest.raises(SystemExit, match="signing began"):
+        evidence_main([*common, "--out", str(tmp_path / "b"), "--chain-signed-from", "hub=2"])

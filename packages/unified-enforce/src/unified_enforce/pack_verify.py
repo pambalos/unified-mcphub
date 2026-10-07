@@ -266,6 +266,12 @@ class _KeyRange:
     key_id: str | None = None
 
 
+def _derived_key_id(raw: bytes) -> str:
+    """`attest.key_id`, from the key's bytes: a name cannot be claimed apart
+    from the key it names."""
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 def _key_ranges(meta: dict[str, Any]) -> list[_KeyRange]:
     """The keys a chain was signed with, oldest range first.
 
@@ -276,33 +282,62 @@ def _key_ranges(meta: dict[str, Any]) -> list[_KeyRange]:
     before. Each range is enforced for its own seqs: an entry is checked
     against the key that was current when it was written, so rewriting an old
     range and re-signing it with a newer key fails, just as stripping its
-    signatures does."""
+    signatures does.
+
+    Nothing in `keys` is taken on trust beyond the key bytes: every id shown
+    is derived from its key (a stated `key_id` is a label the builder wrote,
+    and is ignored -- a sidecar may name its key anything), every range has
+    an integer `since_seq`, no two start at the same seq (so the ranges tile
+    the signed part of the chain without overlap), the newest key is the
+    chain's stated `public_key` and the oldest range starts where the chain
+    says signing began (`signed_from_seq`). A `keys` list that disagrees with
+    the rest of its own meta is a pack somebody edited, and a range table is
+    exactly what an editor would forge to make re-signed entries verify."""
     listed = meta.get("keys")
     if isinstance(listed, list) and listed:
         ranges = []
-        for item in listed:
+        for n, item in enumerate(listed):
             if not isinstance(item, dict) or not item.get("public_key"):
                 raise ValueError("meta.keys entries need a public_key")
             since = item.get("since_seq")
-            ranges.append(
-                _KeyRange(
-                    since=int(since) if since is not None else None,
-                    key=_decode_key(str(item["public_key"])),
-                    key_id=item.get("key_id"),
-                )
+            if not isinstance(since, int) or isinstance(since, bool) or since < 0:
+                raise ValueError(f"meta.keys[{n}] needs a non-negative integer since_seq")
+            raw = _decode_key(str(item["public_key"]))
+            ranges.append(_KeyRange(since=since, key=raw, key_id=_derived_key_id(raw)))
+        ranges.sort(key=lambda r: r.since if r.since is not None else -1)
+        starts = [r.since for r in ranges]
+        if len(set(starts)) != len(starts):
+            raise ValueError(f"meta.keys ranges overlap: two keys start at the same seq ({starts})")
+        stated = meta.get("public_key")
+        if not stated or _decode_key(str(stated)) != ranges[-1].key:
+            raise ValueError(
+                "meta.keys' newest key is not the chain's public_key — the range table "
+                "and the key the pack names for this chain disagree"
             )
-        return sorted(ranges, key=lambda r: -1 if r.since is None else r.since)
+        if meta.get("signed_from_seq") != ranges[0].since:
+            raise ValueError(
+                f"meta.keys' first range starts at seq {ranges[0].since}, but the chain says "
+                f"signing began at seq {meta.get('signed_from_seq')!r}"
+            )
+        return ranges
     key_b64 = meta.get("public_key")
     if not key_b64:
         return []
     signed_from = meta.get("signed_from_seq")
+    raw = _decode_key(key_b64)
     return [
         _KeyRange(
             since=int(signed_from) if signed_from is not None else None,
-            key=_decode_key(key_b64),
-            key_id=meta.get("key_id"),
+            key=raw,
+            key_id=_derived_key_id(raw),
         )
     ]
+
+
+def _describe_ranges(ranges: list[_KeyRange]) -> str:
+    return ", ".join(
+        f"{r.key_id} from {'the start' if r.since is None else f'seq {r.since}'}" for r in ranges
+    )
 
 
 def _range_for(ranges: list[_KeyRange], seq: Any) -> _KeyRange | None:
@@ -384,7 +419,12 @@ def _verify_chain(meta: dict[str, Any], entries: list[dict[str, Any]]) -> tuple[
     if not ranges:
         detail += "; no public key — integrity only, not authorship"
     elif len(ranges) > 1:
-        detail += f"; {len(ranges)} signing keys, each checked over its own seq range"
+        detail += (
+            f"; {len(ranges)} signing keys, each checked over its own seq range: "
+            + _describe_ranges(ranges)
+        )
+    else:
+        detail += "; signing key " + _describe_ranges(ranges)
     return True, detail
 
 

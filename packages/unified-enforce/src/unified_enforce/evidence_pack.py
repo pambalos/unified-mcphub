@@ -664,8 +664,23 @@ def main(argv: list[str] | None = None) -> int:
         public_key = _read_value(keys[name]) if name in keys else None
         start_seq = int(signed_from[name]) if name in signed_from else None
         if ranges:
-            # The record names the current key and where signing began;
-            # explicit flags still win for anything they set.
+            # The record names the current key and where signing began. An
+            # explicit flag may restate either, never contradict it: the
+            # verifier requires the newest range's key to be the chain's key
+            # and the first range to start where signing began, so a pack
+            # built from a contradiction would only ever FAIL.
+            if public_key is not None and pack_verify._decode_key(
+                public_key
+            ) != pack_verify._decode_key(ranges[-1]["public_key"]):
+                raise SystemExit(
+                    f"--chain-key {name}=... is not the current key in {signing[name]}; "
+                    "drop one of them"
+                )
+            if start_seq is not None and start_seq != ranges[0]["since_seq"]:
+                raise SystemExit(
+                    f"--chain-signed-from {name}={start_seq} contradicts {signing[name]}, where "
+                    f"signing began at seq {ranges[0]['since_seq']}; drop one of them"
+                )
             public_key = public_key or ranges[-1]["public_key"]
             start_seq = start_seq if start_seq is not None else ranges[0]["since_seq"]
         chains.append(

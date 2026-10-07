@@ -375,29 +375,37 @@ class HashChainWriter:
         # read only that file resumed from GENESIS -- a chain break at the
         # next entry, `seq` restarting at 1 below where signing began, and
         # every checkpoint after it refused.
-        skipped = 0
+        # Per file, because the skipped lines may sit in newer files than the
+        # one the head is finally recovered from -- and the log must point at
+        # the damage, not at the file that was fine.
+        skipped: dict[str, int] = {}
+
+        def report_skipped() -> None:
+            if skipped:
+                log.error(
+                    "skipped %d unparseable trailing line(s) recovering the chain head (%s). "
+                    "Run `AuditChain.verify` -- this is a crash or an edit, and the "
+                    "difference matters.",
+                    sum(skipped.values()),
+                    ", ".join(f"{name}: {n}" for name, n in skipped.items()),
+                )
+
         for path in reversed(files):
             lines = [raw for raw in path.read_bytes().splitlines() if raw.strip()]
             for raw in reversed(lines):
                 try:
                     entry = json.loads(raw)
                 except ValueError:
-                    skipped += 1
+                    skipped[path.name] = skipped.get(path.name, 0) + 1
                     continue
                 if not isinstance(entry, dict) or "hash" not in entry:
                     self._quarantine_legacy(files)
                     return
-                if skipped:
-                    log.error(
-                        "%s: skipped %d unparseable trailing line(s) recovering the chain "
-                        "head. Run `AuditChain.verify` -- this is a crash or an edit, and the "
-                        "difference matters.",
-                        path.name,
-                        skipped,
-                    )
+                report_skipped()
                 self._head = entry["hash"]
                 self._last_entry = entry
                 return
+        report_skipped()
 
     def _quarantine_legacy(self, files: list[Path]) -> None:
         legacy = self._dir / "legacy"

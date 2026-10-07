@@ -392,3 +392,30 @@ def test_an_empty_newest_day_file_does_not_reset_the_chain(tmp_path):
     assert c.append("decision", {"n": 2})["seq"] == 2
     c.stop()
     assert AuditChain.verify(tmp_path / "engine").ok
+
+
+def test_recovery_names_the_file_that_holds_the_unparseable_lines(tmp_path, caplog):
+    """The garbage sits in a newer day file than the head that is recovered;
+    the error must point at the damaged file, not the one that was fine."""
+    import logging
+
+    d = tmp_path / "audit"
+    c1 = AuditChain(d)
+    c1.start()
+    e1 = c1.append("decision", {"n": 1})
+    c1.stop()
+    (good,) = sorted(d.glob("*.jsonl"))
+    damaged = d / "9999-12-31.jsonl"
+    damaged.write_text('{"half a line\n')
+
+    with caplog.at_level(logging.ERROR, logger="unified_enforce.audit"):
+        c2 = AuditChain(d)
+        c2.start()
+    try:
+        e2 = c2.append("decision", {"n": 2})
+    finally:
+        c2.stop()
+    (record,) = [r for r in caplog.records if "unparseable" in r.getMessage()]
+    message = record.getMessage()
+    assert f"{damaged.name}: 1" in message and good.name not in message
+    assert e2["prev_hash"] == e1["hash"]

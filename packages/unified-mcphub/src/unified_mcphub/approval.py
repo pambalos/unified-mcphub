@@ -49,6 +49,7 @@ from unified_enforce import (
     Approvals,
     Principal,
 )
+from unified_enforce.approval import gate_forced
 from unified_enforce.policy import Decision as EngineDecision
 from unified_enforce.policy import Verdict
 
@@ -378,6 +379,20 @@ class Approval:
             )
         )
         persistent = outcome.persistent
+        if (
+            outcome.kind in (ApprovalKind.ALLOW_ALWAYS, ApprovalKind.DENY_ALWAYS)
+            and not persistent
+            and gate_forced(deferral)
+        ):
+            # The engine already refused to make it persistent; say so, since
+            # a terminal operator was just shown "will persist".
+            logger.warning(
+                "%s for %s answered a prompt forced by fleet distribution state (%s); "
+                "applying it to this call only and persisting no rule",
+                outcome.kind.value,
+                tool_uri,
+                deferral.reason or deferral.source,
+            )
         if (
             self._console
             and persistent

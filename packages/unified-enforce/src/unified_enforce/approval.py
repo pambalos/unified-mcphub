@@ -48,6 +48,50 @@ class ApprovalKind(str, Enum):
 _ALLOWING = {ApprovalKind.ALLOW, ApprovalKind.ALLOW_SESSION, ApprovalKind.ALLOW_ALWAYS}
 _PERSISTENT = {ApprovalKind.ALLOW_ALWAYS, ApprovalKind.DENY_ALWAYS}
 
+#: Decision sources that are distribution state rather than policy: the
+#: verdict says "we cannot confirm this is safe right now" (revocations
+#: unknown, bundle expired, a `defer` containment), not anything about the
+#: action itself.
+GATE_SOURCES = frozenset({"distribution", "containment"})
+
+
+def gate_forced(decision: Decision) -> bool:
+    """Whether a DEFER was forced (wholly or partly) by distribution state.
+
+    True for a DEFER the gate produced, and for an engine DEFER the gate also
+    demanded (`no_looser_than_defer` records it under `context["gate"]`).
+
+    A human answering such a prompt is answering for *this* call in *this*
+    condition. Nothing about it may outlive the call: no learned rule from an
+    `*_always` (it would override curated policy forever, for a reason that
+    was only ever "the revocation list had not arrived yet"), no session
+    allow (the next call might come after a containment that arrived in
+    between), and no session allow served to it either (a session allow given
+    to a policy prompt must not answer a containment's).
+    """
+    return decision.source in GATE_SOURCES or bool((decision.context or {}).get("gate"))
+
+
+def no_looser_than_defer(forced: Decision, engine: Decision) -> Decision:
+    """min(engine verdict, the gate's DEFER) -- see `Enforcer.enforce`.
+
+    - engine DENY  -> the engine's DENY, unchanged: a curated deny never
+      becomes an approvable prompt because a list has not been fetched.
+    - engine DEFER -> the engine's DEFER, keeping its rule id and source (a
+      floor stays a floor), with the gate's reason under `context["gate"]` so
+      `gate_forced` sees it and the chain records why both asked.
+    - engine ALLOW -> the gate's DEFER.
+    """
+    if engine.verdict is Verdict.DENY:
+        return engine
+    if engine.verdict is Verdict.DEFER:
+        engine.context = {
+            **(engine.context or {}),
+            "gate": {"source": forced.source, "reason": forced.reason},
+        }
+        return engine
+    return forced
+
 
 @dataclass(frozen=True)
 class ApprovalRequest:
@@ -241,8 +285,10 @@ class Approvals:
                 )
             )
 
+        # A gate-forced deferral is one-time in every direction (`gate_forced`).
+        one_time = gate_forced(request.decision)
         key = self._session_key(request.action)
-        if key in self._session_allows:
+        if not one_time and key in self._session_allows:
             return done(
                 ApprovalOutcome(
                     decision=_resolved(Verdict.ALLOW, "approval_session", request),
@@ -282,7 +328,7 @@ class Approvals:
             )
 
         kind = response.kind
-        if kind is ApprovalKind.ALLOW_SESSION:
+        if kind is ApprovalKind.ALLOW_SESSION and not one_time:
             self._session_allows.add(key)
         allowed = kind in _ALLOWING
         return done(
@@ -290,8 +336,8 @@ class Approvals:
                 decision=_resolved(Verdict.ALLOW if allowed else Verdict.DENY, "approval", request),
                 kind=kind,
                 decided_by=response.decided_by,
-                persistent=kind in _PERSISTENT,
-                session=kind is ApprovalKind.ALLOW_SESSION,
+                persistent=kind in _PERSISTENT and not one_time,
+                session=kind is ApprovalKind.ALLOW_SESSION and not one_time,
                 scope=response.scope,
                 approver=response.approver,
                 attestation=response.attestation,

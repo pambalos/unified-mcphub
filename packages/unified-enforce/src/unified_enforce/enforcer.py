@@ -18,7 +18,13 @@ import logging
 from typing import Any
 
 from .action import Action
-from .approval import ApprovalOutcome, ApprovalRequest, Approvals, RecordedApproval
+from .approval import (
+    ApprovalOutcome,
+    ApprovalRequest,
+    Approvals,
+    RecordedApproval,
+    no_looser_than_defer,
+)
 from .audit import AuditChain
 from .counters import Counters
 from .distribution import Distribution
@@ -97,10 +103,23 @@ class Enforcer:
         contained whatever the rules say, and a sidecar that cannot verify its
         policy must not consult it — otherwise the two failures that most need
         to override policy are the two that policy would overrule.
+
+        A forced DEFER is the exception to "before the engine is consulted".
+        It means "cannot confirm this is safe" (a revocation list never
+        fetched or gone stale, an expired bundle under `on_stale: defer`, a
+        `defer` containment), not "this is acceptable with a human's nod" --
+        and returning it unconditionally turned every curated DENY into an
+        approvable prompt on exactly the hub that knows least (a joined hub
+        that has not polled yet). So the engine is still asked, and the result
+        is the stricter of the two: the engine's DENY stays a DENY, the
+        engine's own DEFER keeps its rule and source (a danger floor stays a
+        floor, so its warning still shows) with the gate recorded beside it,
+        and only an engine ALLOW is held back as the gate's DEFER.
         """
+        forced: Decision | None = None
         if self._distribution is not None:
             forced = self._distribution.gate(action)
-            if forced is not None:
+            if forced is not None and forced.verdict is not Verdict.DEFER:
                 return self.record(action, forced, signals=signals)
 
         totals = (
@@ -108,7 +127,10 @@ class Enforcer:
             if self._engine.counter_ids
             else None
         )
-        return self.record(action, self._engine.decide(action, totals), signals=signals)
+        decision = self._engine.decide(action, totals)
+        if forced is not None:
+            decision = no_looser_than_defer(forced, decision)
+        return self.record(action, decision, signals=signals)
 
     def record(
         self,

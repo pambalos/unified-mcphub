@@ -1278,3 +1278,106 @@ def test_a_404_from_the_control_plane_is_not_published(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", refuse)
     with pytest.raises(NotPublished):
         ControlPlaneSource("https://cp", "t").fetch_bundle()
+
+
+# --- a forced DEFER is never looser than the engine (C1) -----------------------
+
+_DENY_AND_FLOOR = """
+version: 1
+rules:
+  - id: no-refunds
+    match:
+      tool: 'sdk://payments/refund'
+    effect: deny
+  - id: allow-rest
+    match:
+      tool: '**'
+    effect: allow
+floors:
+  - id: floor:wire
+    match:
+      tool: 'sdk://payments/wire'
+"""
+
+
+def test_an_unverifiable_revocation_list_never_turns_a_policy_deny_into_a_prompt(root):
+    """min(engine verdict, DEFER): a bundle-optional point that has not polled
+    yet (or whose list went stale) cannot confirm containment, which may cost
+    an ALLOW its automatic pass -- never a DENY its refusal."""
+    from unified_enforce.enforcer import Enforcer
+    from unified_enforce.policy import PolicyEngine
+
+    dist = make(FakeSource(None, None, None), root, require_bundle=False)
+    enforcer = Enforcer(PolicyEngine.from_yaml(_DENY_AND_FLOOR), distribution=dist)
+
+    denied = enforcer.enforce(action(tool="sdk://payments/refund"))
+    assert denied.verdict is Verdict.DENY
+    assert denied.rule_id == "no-refunds" and denied.source != "distribution"
+
+    floored = enforcer.enforce(action(tool="sdk://payments/wire"))
+    assert floored.verdict is Verdict.DEFER
+    assert floored.source == "floor", "a floor stays a floor (its warning still shows)"
+    assert floored.context and floored.context["gate"]["source"] == "distribution"
+
+    held = enforcer.enforce(action(tool="sdk://payments/list"))
+    assert held.verdict is Verdict.DEFER and held.source == "distribution"
+
+
+def test_a_stale_revocation_list_keeps_a_policy_deny_a_deny(source, root):
+    from unified_enforce.enforcer import Enforcer
+    from unified_enforce.policy import PolicyEngine
+
+    dist = make(source, root)
+    dist.refresh(now=NOW)
+    source.down = True
+    dist.refresh(now=NOW + timedelta(hours=1))
+    assert dist.snapshot.revocations_health is Health.STALE
+    enforcer = Enforcer(PolicyEngine.from_yaml(_DENY_AND_FLOOR), distribution=dist)
+    assert enforcer.enforce(action(tool="sdk://payments/refund")).verdict is Verdict.DENY
+
+
+async def test_a_gate_forced_deferral_is_answered_for_one_call_only(root):
+    """No learned rule, no session allow, and no session allow served to it."""
+    from unified_enforce.approval import (
+        ApprovalKind,
+        ApprovalRequest,
+        ApprovalResponse,
+        Approvals,
+    )
+    from unified_enforce.enforcer import Enforcer
+    from unified_enforce.policy import PolicyEngine
+
+    class Answer:
+        def __init__(self, kind):
+            self.kind, self.asked = kind, 0
+
+        async def ask(self, request):
+            self.asked += 1
+            return ApprovalResponse(kind=self.kind, decided_by="op")
+
+    dist = make(FakeSource(None, None, None), root, require_bundle=False)
+    enforcer = Enforcer(PolicyEngine.from_yaml(_DENY_AND_FLOOR), distribution=dist)
+    act = action(tool="sdk://payments/list")
+    deferral = enforcer.enforce(act)
+    assert deferral.source == "distribution"
+
+    for kind in (ApprovalKind.ALLOW_ALWAYS, ApprovalKind.DENY_ALWAYS):
+        out = await Approvals(Answer(kind)).resolve(ApprovalRequest(action=act, decision=deferral))
+        assert out.persistent is False, kind
+
+    channel = Answer(ApprovalKind.ALLOW_SESSION)
+    approvals = Approvals(channel)
+    first = await approvals.resolve(ApprovalRequest(action=act, decision=deferral))
+    assert first.allowed and first.session is False
+    await approvals.resolve(ApprovalRequest(action=act, decision=deferral))
+    assert channel.asked == 2, "a gate-forced prompt is never answered from the session cache"
+
+    # Nor is a session allow given to an ordinary policy prompt reused for it.
+    policy_defer = PolicyEngine.from_yaml(_DENY_AND_FLOOR).decide(
+        action(tool="sdk://payments/wire")
+    )
+    approvals = Approvals(channel)
+    await approvals.resolve(ApprovalRequest(action=act, decision=policy_defer))
+    before = channel.asked
+    await approvals.resolve(ApprovalRequest(action=act, decision=deferral))
+    assert channel.asked == before + 1

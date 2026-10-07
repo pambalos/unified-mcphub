@@ -457,3 +457,23 @@ def test_every_hub_request_carries_a_channel_proof(hub_home, monkeypatch):
         assert verdict.ok, (path, verdict)
 
     assert all(r.get_header("X-unified-proof") is None for r in exercise(link(None)))
+
+
+def test_status_counts_every_decision_row_that_did_not_reach_the_plane(hub_home, plane, keys):
+    from unified_enforce import Action, Principal
+    from unified_enforce.policy import Decision, Verdict
+
+    root, _ = keys
+    hub = _joined_hub(hub_home, plane, root)
+    evidence = hub.fleet.evidence
+    allow = Decision(verdict=Verdict.ALLOW, rule_id=None, source="exact")
+
+    def act(principal="agent:a", tool="mcp://fs/read"):
+        return Action.build(principal=Principal(id=principal), tool=tool, verb="call", resource="*")
+
+    assert evidence.record(act(tool=""), allow) is False
+    assert evidence.record(act(principal="agent:" + "p" * 300), allow) is True
+    evidence.spool.stats.rejected = 3
+    stats = hub.fleet.status()["evidence_stats"]
+    assert stats["invalid"] == 1 and stats["truncated"] == 1 and stats["rejected"] == 3
+    assert stats["queued"] == 1

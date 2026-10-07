@@ -403,6 +403,7 @@ class FleetLink:
             "channel_bound": self.channel_bound,
             "evidence": self.evidence is not None,
             "evidence_signed": self.evidence is not None and self.evidence.signer is not None,
+            **({"evidence_stats": self._evidence_stats()} if self.evidence is not None else {}),
             "payloads": self._payload_status(),
             "approvals": self.config.approvals,
             **(
@@ -410,6 +411,24 @@ class FleetLink:
                 if self.approvals is not None and self.approvals.disabled
                 else {}
             ),
+        }
+
+    def _evidence_stats(self) -> dict[str, Any]:
+        """Every way a decision row did not reach the control plane, counted.
+
+        `invalid` (never queued: an empty principal or tool), `rejected`
+        (refused by the control plane), `dropped` (spool full) and `truncated`
+        (shipped with an oversized field shortened) are the numbers that say
+        the console's view is incomplete; status is where an operator looks."""
+        assert self.evidence is not None
+        spool = self.evidence.spool.stats
+        return {
+            "queued": spool.queued,
+            "shipped": spool.shipped,
+            "rejected": spool.rejected,
+            "dropped": spool.dropped,
+            "invalid": spool.invalid,
+            "truncated": spool.truncated,
         }
 
     def _payload_status(self) -> dict[str, Any]:

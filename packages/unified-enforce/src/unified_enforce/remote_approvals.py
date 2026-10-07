@@ -47,6 +47,7 @@ from .approval import (
     ApprovalResponse,
     Approver,
     SignedResolution,
+    gate_forced,
 )
 from .attest import DEFAULT_SKEW_MS, Reason, VerificationKey, accept_resolution
 
@@ -251,7 +252,12 @@ class RemoteApprovals:
         - `params` are withheld for a rule marked `audit_level: minimal` (the
           customer marked that traffic sensitive; a copy to another system is
           an export) and when the deployment said no content leaves
-          (`share_params=False`, the hub's `control_plane.payloads: off`).
+          (`share_params=False`, the hub's `control_plane.payloads: off`),
+          and for a DEFER that distribution state forced (`gate_forced`: a
+          revocation list not yet fetched or stale, a `defer` containment).
+          That prompt exists because this principal may be contained; its
+          arguments are the last thing to copy to another system on the
+          strength of a rule that never asked for review of them.
           The `summary` is replaced too, because a caller's summary usually
           renders the arguments. The approver then decides on the tool, the
           principal, the rule and the reason -- and is told the arguments
@@ -271,6 +277,8 @@ class RemoteApprovals:
             withheld = "audit_level_minimal"
         elif not self._share_params:
             withheld = "payloads_off"
+        elif gate_forced(request.decision):
+            withheld = "distribution_state"
         summary = request.summary
         if withheld is not None:
             action["params"] = {}

@@ -772,3 +772,29 @@ async def test_a_deadline_with_no_answer_is_a_timeout_not_a_channel_error():
     assert not outcome.allowed
     assert outcome.decision.source == "approval_timeout"
     assert outcome.reason == "approval_timed_out"
+
+
+@pytest.mark.parametrize("source", ["distribution", "containment"])
+def test_arguments_are_withheld_for_a_gate_forced_deferral(source):
+    channel = RemoteApprovals("https://cp", "t", fleet_id=FLEET, decision_key="k" * 43)
+    request = ApprovalRequest(
+        action=_with_extra(),
+        decision=Decision(
+            verdict=Verdict.DEFER,
+            rule_id=None,
+            source=source,
+            reason="revocation list is stale; cannot confirm whether this principal is contained",
+        ),
+        summary="refund $12,400 to acct 9911",
+    )
+    body = _queued_body(channel, request)
+    assert body["action"]["params"] == {} and body["params_withheld"] == "distribution_state"
+    assert "9911" not in json.dumps(body)
+
+
+def test_arguments_are_withheld_when_the_gate_also_deferred_a_policy_prompt():
+    channel = RemoteApprovals("https://cp", "t", fleet_id=FLEET, decision_key="k" * 43)
+    request = _deferred(_with_extra())
+    request.decision.context = {"gate": {"source": "distribution", "reason": "stale"}}
+    body = _queued_body(channel, request)
+    assert body["params_withheld"] == "distribution_state"

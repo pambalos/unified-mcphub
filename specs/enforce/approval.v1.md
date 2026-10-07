@@ -113,7 +113,11 @@ weakening the binding:
   `<tool> (arguments withheld: <reason>)`, when the deferring rule is
   `audit_level: minimal` (`audit_level_minimal`) or the deployment said no
   content leaves (`share_params=False`; the hub's `control_plane.payloads:
-  off` → `payloads_off`). The body then carries `params_withheld: <reason>`.
+  off` → `payloads_off`), or the DEFER was forced by distribution state
+  (`approval.gate_forced`: an unknown or stale revocation list, an expired
+  bundle under `on_stale: defer`, a `defer` containment, including when the
+  engine also deferred → `distribution_state`). The body then carries
+  `params_withheld: <reason>`.
   The approver decides on the tool, principal, rule and reason, and is told
   the arguments were withheld. Otherwise approvers *do* see the arguments —
   deciding whether `rm -rf build/` may run needs the command — so a console

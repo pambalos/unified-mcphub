@@ -122,6 +122,11 @@ class Snapshot:
     #: fresh, and the two failures call for opposite responses.
     revocations_health: Health = Health.UNPROVISIONED
     revocations_version: int | None = None
+    #: Whether the last poll that reached the source found a bundle: False
+    #: when it answered "none published" (404), None until a poll got that
+    #: far. Lets a status page tell "no policy has been published" (expected
+    #: for a fleet of hubs) from "a policy exists and we cannot verify it".
+    bundle_published: bool | None = None
 
     #: A candidate bundle to evaluate, never to enforce (spec §8). Held in
     #: entirely separate fields from the enforcing bundle rather than as a flag
@@ -523,6 +528,7 @@ class Distribution:
                 log.debug("no policy bundle published: %s", exc)
                 bundle_doc = None
                 report.no_bundle = True
+            self.snapshot.bundle_published = bundle_doc is not None
             revocations_doc = self._source.fetch_revocations()
         except Exception as exc:
             # Not a problem, on purpose. Brief unreachability is ordinary, and

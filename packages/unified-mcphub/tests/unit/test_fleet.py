@@ -368,6 +368,8 @@ async def test_a_hub_in_a_fleet_with_no_bundle_published_still_serves(
         report = hub.fleet.distribution.refresh(now=NOW)
         assert report.no_bundle and report.applied_revocations
         assert hub.fleet.distribution.verification_keys()
+        policy = hub.fleet.status()["policy"]
+        assert policy["state"] == "no_bundle_published" and policy["alarming"] is False
         hub._forward = lambda *a: asyncio.sleep(0, {"content": []})  # type: ignore[method-assign]
         assert "result" in await hub._handle_call(_message("crew-1"), "crew-1")
 

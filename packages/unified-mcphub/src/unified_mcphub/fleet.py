@@ -400,7 +400,7 @@ class FleetLink:
         return {
             "fleet_id": self.config.fleet_id,
             "url": self.config.url,
-            "policy": {"health": snap.health.value, "version": snap.version},
+            "policy": self._policy_status(),
             "revocations": {
                 "health": snap.revocations_health.value,
                 "version": snap.revocations_version,
@@ -418,6 +418,24 @@ class FleetLink:
                 else {}
             ),
         }
+
+    def _policy_status(self) -> dict[str, Any]:
+        """The fleet bundle's state, said the way it matters to a hub.
+
+        A hub's policy is its workspace (`require_bundle=False`), so a fleet
+        with no bundle published is expected, not alarming: reported as
+        `state: no_bundle_published` with `alarming: false`, rather than a bare
+        `unprovisioned` that reads like the hub cannot verify its policy."""
+        snap = self.distribution.snapshot
+        status: dict[str, Any] = {"health": snap.health.value, "version": snap.version}
+        if snap.health.value == "unprovisioned" and snap.bundle_published is False:
+            status["state"] = "no_bundle_published"
+            status["alarming"] = False
+            status["note"] = (
+                "no policy bundle is published for this fleet; this hub's policy is its "
+                "workspace, so nothing is affected here"
+            )
+        return status
 
     def _evidence_stats(self) -> dict[str, Any]:
         """Every way a decision row did not reach the control plane, counted.

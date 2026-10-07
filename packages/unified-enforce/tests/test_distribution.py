@@ -1415,3 +1415,29 @@ def test_a_gate_forced_defer_offers_no_payload(root):
     plain = Enforcer(PolicyEngine.from_yaml(_DENY_AND_FLOOR), chain=Chain(), evidence=sink)
     plain.enforce(action(tool="sdk://payments/wire"))
     assert sink.payloads == ["payload.action.params"]
+
+
+async def test_approvals_disabled_never_allows_a_gate_forced_defer(root, caplog):
+    """`when_disabled: allow` (the hub's `approval.enabled: false`) runs policy
+    prompts unasked; it must not run one that distribution state forced."""
+    import logging
+
+    from unified_enforce.approval import ApprovalRequest, Approvals
+    from unified_enforce.enforcer import Enforcer
+    from unified_enforce.policy import PolicyEngine
+
+    dist = make(FakeSource(None, None, None), root, require_bundle=False)
+    enforcer = Enforcer(PolicyEngine.from_yaml(_DENY_AND_FLOOR), distribution=dist)
+    approvals = Approvals(None, enabled=False, when_disabled="allow")
+    for tool in ("sdk://payments/list", "sdk://payments/wire"):  # gate alone; gate + floor
+        act = action(tool=tool)
+        with caplog.at_level(logging.WARNING, logger="unified_enforce.approval"):
+            out = await approvals.resolve(
+                ApprovalRequest(action=act, decision=enforcer.enforce(act))
+            )
+        assert not out.allowed and out.reason == "gate_forced_with_approvals_disabled", tool
+    assert "deferred by fleet distribution state" in caplog.text
+    # A plain policy prompt still runs unasked, as ADR-0018 says.
+    floor = PolicyEngine.from_yaml(_DENY_AND_FLOOR).decide(action(tool="sdk://payments/wire"))
+    out = await approvals.resolve(ApprovalRequest(action=action(), decision=floor))
+    assert out.allowed

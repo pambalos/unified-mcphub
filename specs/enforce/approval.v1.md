@@ -44,6 +44,12 @@ the default.** It exists because the hub's `approval.enabled: false` master
 switch (ADR-0018) means "don't prompt, run it" — a deliberate local-development
 affordance its e2e matrix depends on. Any deployment wanting that has to ask for
 it in writing.
+It never applies to a DEFER that distribution state forced
+(`approval.gate_forced`: unknown or stale revocation list, expired bundle
+under `on_stale: defer`, `defer` containment, alone or beside an engine
+DEFER): with approvals disabled that is DENIED (source `approval_disabled`,
+reason `gate_forced_with_approvals_disabled`, logged), whatever
+`when_disabled` says — otherwise the master switch would turn off containment.
 
 ## §3 What the engine will not do
 

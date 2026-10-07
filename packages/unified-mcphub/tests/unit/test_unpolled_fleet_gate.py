@@ -133,3 +133,11 @@ async def test_an_always_answer_to_a_gate_forced_prompt_is_one_time(hub, decisio
 
     await _call(hub, "list", {"command": "ls"})
     assert len(channel.asked) == 2, "asked again: the answer covered one call"
+
+
+async def test_approval_disabled_denies_a_gate_forced_prompt(hub):
+    """`approval.enabled: false` runs prompts unasked -- not one the fleet's
+    distribution state forced."""
+    hub.approval.enabled = False
+    body = await _call(hub, "list", {"command": "ls"})
+    assert body["error"]["message"] == "denied by policy (prompt_denied)"

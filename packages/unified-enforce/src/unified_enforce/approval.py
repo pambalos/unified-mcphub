@@ -20,6 +20,7 @@ reason to proceed.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -27,6 +28,8 @@ from typing import Any, Literal, Protocol
 
 from .action import Action
 from .policy import Decision, Verdict
+
+log = logging.getLogger("unified_enforce.approval")
 
 
 class ApprovalKind(str, Enum):
@@ -260,6 +263,30 @@ class Approvals:
             return outcome
 
         if not self.enabled:
+            if gate_forced(request.decision):
+                # `when_disabled: allow` means "nobody is prompted, run it" --
+                # for policy prompts. A DEFER distribution state forced means
+                # this principal may be contained (or the list saying whether
+                # is missing); with nobody to ask, running it would make the
+                # master switch an off switch for containment. Denied.
+                log.warning(
+                    "approvals are disabled and %s was deferred by fleet distribution state "
+                    "(%s); denying rather than applying when_disabled=%s",
+                    request.action.tool,
+                    request.decision.reason or request.decision.source,
+                    self._when_disabled,
+                )
+                return done(
+                    ApprovalOutcome(
+                        decision=_resolved(
+                            Verdict.DENY,
+                            "approval_disabled",
+                            request,
+                            "gate_forced_with_approvals_disabled",
+                        ),
+                        reason="gate_forced_with_approvals_disabled",
+                    )
+                )
             allow = self._when_disabled == "allow"
             return done(
                 ApprovalOutcome(

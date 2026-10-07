@@ -733,7 +733,7 @@ def test_the_queue_body_carries_the_deadline_and_policy_digest_never_extra():
     )
     request = _deferred(_with_extra())
     body = _queued_body(channel, request)
-    assert body["deadline_seconds"] == 42.0
+    assert body["deadline_seconds"] == 42 and isinstance(body["deadline_seconds"], int)
     assert body["decision"]["policy_digest"] == "d" * 64
     assert body["action"]["context"]["extra"] == {}
     assert "s3cr3t" not in json.dumps(body)
@@ -772,6 +772,16 @@ async def test_a_deadline_with_no_answer_is_a_timeout_not_a_channel_error():
     assert not outcome.allowed
     assert outcome.decision.source == "approval_timeout"
     assert outcome.reason == "approval_timed_out"
+
+
+def test_a_fractional_deadline_is_sent_as_an_int_rounded_up():
+    """The control plane treats it as advisory; an older one validates an int,
+    and rounding down could expire the item before this client stops."""
+    channel = RemoteApprovals(
+        "https://cp", "t", fleet_id=FLEET, decision_key="k" * 43, deadline_seconds=0.2
+    )
+    body = _queued_body(channel, _deferred(_with_extra()))
+    assert body["deadline_seconds"] == 1 and isinstance(body["deadline_seconds"], int)
 
 
 @pytest.mark.parametrize("source", ["distribution", "containment"])

@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -296,7 +297,10 @@ class RemoteApprovals:
             "action_digest": request.digest,
             "summary": summary,
             "floored": request.floored,
-            "deadline_seconds": self._deadline,
+            # An integer, rounded up: the control plane treats it as advisory
+            # and accepts floats now, but an older one validates an int, and
+            # rounding down could expire the item before this client stops.
+            "deadline_seconds": math.ceil(self._deadline),
         }
         if withheld is not None:
             body["params_withheld"] = withheld

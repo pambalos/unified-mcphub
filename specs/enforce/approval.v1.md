@@ -126,8 +126,10 @@ weakening the binding:
   control plane that is not `https://` (loopback `http://` excepted), denying
   every prompt and reporting `fleet.approvals_disabled: insecure_transport`.
 - The body also carries `deadline_seconds` (how long the reporter will wait, so
-  the control plane can expire the item) and `decision.policy_digest`. Both are
-  optional; an older control plane ignores them.
+  the control plane can expire the item; advisory there) and
+  `decision.policy_digest`. Both are optional; an older control plane ignores
+  them. `deadline_seconds` is sent as an integer, rounded up from the
+  configured deadline, for control planes that validate an int.
 
 A deadline that passes with no answer raises `ApprovalTimeout` (a
 `TimeoutError`) and is recorded as `approval_timeout` / `approval_timed_out`,

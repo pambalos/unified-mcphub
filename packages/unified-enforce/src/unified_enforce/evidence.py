@@ -38,6 +38,7 @@ every record so the receiver can see a hole rather than infer a quiet agent.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -64,11 +65,37 @@ DEFAULT_CAPACITY = 10_000
 #: arrive as a single enormous body.
 DEFAULT_BATCH = 200
 
-#: Field bounds the control plane's decision-evidence schema enforces. A
-#: record over either is refused there; before per-record refusals it was
-#: refused *with its whole batch*, so it is not sent at all (EvidenceShipper).
+#: Field bounds the control plane's decision-evidence schema enforces
+#: (`DecisionIn`). A record over any of them is refused there -- and by an
+#: older control plane *with its whole batch* -- so `summarise` truncates an
+#: oversized value, visibly (`truncate_field`), rather than sending it or
+#: dropping the row. The audit chain keeps the full value.
 MAX_PRINCIPAL_ID = 256
 MAX_TOOL = 512
+MAX_VERB = 64
+MAX_RESOURCE = 512
+
+#: field -> its bound, for every bounded string field of a decision row.
+FIELD_BOUNDS = {
+    "principal_id": MAX_PRINCIPAL_ID,
+    "tool": MAX_TOOL,
+    "verb": MAX_VERB,
+    "resource": MAX_RESOURCE,
+}
+
+
+def truncate_field(value: str, limit: int) -> str:
+    """`value` if it fits in `limit` characters, else a visibly truncated
+    prefix ending in `…[truncated sha256:<16 hex>]`, within `limit`.
+
+    The digest is of the *full* value (UTF-8), so a reader holding the chain
+    entry -- which records it whole -- can tie the truncated row to it, and two
+    different long values never read as the same truncated one by accident.
+    """
+    if len(value) <= limit:
+        return value
+    marker = f"…[truncated sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()[:16]}]"
+    return value[: max(0, limit - len(marker))] + marker
 
 
 def refused_indices(receipt: Any, size: int) -> set[int]:
@@ -145,11 +172,14 @@ class SpoolStats:
     #: dashboard that is quietly wrong.
     dropped: int = 0
     failures: int = 0
-    #: Decision records never queued because a field exceeds what a control
-    #: plane will store (`MAX_PRINCIPAL_ID`, `MAX_TOOL`). Counted rather than
-    #: sent: against a control plane that validates a batch whole, one such
-    #: record would take every other record in its batch down with it.
+    #: Decision records never queued because the control plane could not
+    #: store them however they were shaped: an empty principal id or tool.
+    #: Counted rather than sent: against a control plane that validates a
+    #: batch whole, one such record would take its whole batch down with it.
     invalid: int = 0
+    #: Decision records shipped with at least one field truncated to the
+    #: control plane's bound (`FIELD_BOUNDS`, `truncate_field`).
+    truncated: int = 0
 
 
 @dataclass
@@ -357,6 +387,15 @@ def summarise(
         "parent_id": action.principal.parent_id,
         "decided_at": action.ts,
     }
+    # Within the control plane's bounds, visibly: a row it would refuse (and
+    # an older one would refuse with its whole batch) is worth less than a row
+    # that says it was shortened and names the full value's digest. Before
+    # signing, so the signature covers what is actually sent; the chain entry
+    # the row cites keeps the full value.
+    for name, limit in FIELD_BOUNDS.items():
+        value = record[name]
+        if isinstance(value, str):
+            record[name] = truncate_field(value, limit)
     return sign_evidence(record, signer) if signer is not None else record
 
 
@@ -468,18 +507,30 @@ class EvidenceShipper:
         see `summarise`.
         """
         try:
-            if len(action.principal.id) > MAX_PRINCIPAL_ID or len(action.tool) > MAX_TOOL:
-                self.spool.stats.invalid += 1
-                if self.spool.stats.invalid == 1 or self.spool.stats.invalid % 1000 == 0:
+            stats = self.spool.stats
+            if not action.principal.id or not action.tool:
+                stats.invalid += 1
+                if stats.invalid == 1 or stats.invalid % 1000 == 0:
                     log.warning(
-                        "not shipping decision evidence with a principal id over %d or a tool "
-                        "over %d characters (%d so far); the control plane would refuse it, "
-                        "and an older one its whole batch. It is in the audit chain.",
-                        MAX_PRINCIPAL_ID,
-                        MAX_TOOL,
-                        self.spool.stats.invalid,
+                        "not shipping decision evidence with an empty principal id or tool "
+                        "(%d so far); the control plane would refuse it, and an older one its "
+                        "whole batch. It is in the audit chain.",
+                        stats.invalid,
                     )
                 return False
+            if (
+                len(action.principal.id) > MAX_PRINCIPAL_ID
+                or len(action.tool) > MAX_TOOL
+                or len(action.verb or "") > MAX_VERB
+                or len(action.resource or "") > MAX_RESOURCE
+            ):
+                stats.truncated += 1
+                if stats.truncated == 1 or stats.truncated % 1000 == 0:
+                    log.warning(
+                        "shipping decision evidence with an oversized field truncated to the "
+                        "control plane's bound (%d so far); the audit chain has the full value",
+                        stats.truncated,
+                    )
             return self.submit(
                 summarise(
                     action, decision, entry=entry, signer=self._signer, action_digest=action_digest

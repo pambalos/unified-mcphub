@@ -690,24 +690,60 @@ def test_an_all_or_nothing_receipt_still_means_everything_was_accepted():
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    "field, overrides, limit",
     [
-        {"principal": Principal(id="agent:" + "p" * 251)},
-        {"tool": "sdk://" + "t" * 508},
+        ("principal_id", {"principal": Principal(id="agent:" + "p" * 251)}, 256),
+        ("tool", {"tool": "sdk://" + "t" * 508}, 512),
+        ("verb", {"verb": "v" * 65}, 64),
+        ("resource", {"resource": "r" * 513}, 512),
     ],
 )
-def test_an_oversized_field_is_counted_locally_and_never_sinks_a_batch(overrides, caplog):
-    """Against a control plane that validates a batch whole, one record with a
-    field it will not store took every other record in the batch with it."""
+def test_an_oversized_field_ships_truncated_and_marked(field, overrides, limit, caplog):
+    """The control plane's DecisionIn bounds these four; a record over one is
+    refused there, and by an older control plane with its whole batch. The
+    row ships with the field visibly shortened and the full value's digest,
+    so it can be tied to the chain entry that holds the full value."""
+    import hashlib
+
+    from unified_enforce.attest import accept_evidence, b64u
+    from unified_enforce.signing import Signer
+
+    sink = Collecting()
+    signer = Signer.generate("k")
+    shipper = EvidenceShipper(sink, signer=signer)
+    long_action = action(**overrides)
+    full = {
+        "principal_id": long_action.principal.id,
+        "tool": long_action.tool,
+        "verb": long_action.verb,
+        "resource": long_action.resource,
+    }[field]
+    assert shipper.record(action(), decision()) is True
+    assert shipper.record(long_action, decision()) is True
+    assert shipper.record(long_action, decision()) is True
+    shipper.flush()
+    assert len(sink.records) == 3
+    shipped = sink.records[1][field]
+    assert len(shipped) <= limit
+    digest = hashlib.sha256(full.encode()).hexdigest()[:16]
+    assert shipped.endswith(f"…[truncated sha256:{digest}]")
+    assert full.startswith(shipped.split("…[truncated")[0])
+    assert accept_evidence(sink.records[1], b64u(signer.public_bytes())), "signed as sent"
+    assert shipper.spool.stats.truncated == 2 and shipper.spool.stats.invalid == 0
+    assert sum("truncated" in r.message for r in caplog.records) == 1
+
+
+@pytest.mark.parametrize(
+    "overrides", [{"principal": Principal(id="")}, {"tool": ""}], ids=["principal", "tool"]
+)
+def test_an_empty_principal_or_tool_is_counted_invalid_and_never_sinks_a_batch(overrides):
     sink = Collecting()
     shipper = EvidenceShipper(sink)
     assert shipper.record(action(), decision()) is True
     assert shipper.record(action(**overrides), decision()) is False
-    assert shipper.record(action(**overrides), decision()) is False
     shipper.flush()
     assert len(sink.records) == 1
-    assert shipper.spool.stats.invalid == 2
-    assert sum("not shipping decision evidence" in r.message for r in caplog.records) == 1
+    assert shipper.spool.stats.invalid == 1
 
 
 def test_fields_at_the_bound_still_ship():

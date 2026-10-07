@@ -326,14 +326,12 @@ async def test_console_allow_and_scoped_allow_always_verify_in_a_pack(hub, tmp_p
     assert run.returncode == 0, run.stdout + run.stderr
 
 
-async def test_a_legacy_scoped_hub_approval_is_noted_not_failed(hub, tmp_path):
-    """A hub entry from before `resolution` was recorded, for a kind that
-    carries a scope: what was signed cannot be rebuilt from the entry, which
-    is a limit of the old record, not tampering -- a NOTE, never a FAIL."""
+async def _console_entry(hub, kind, scope) -> tuple[dict, Key, Key]:
+    """One genuinely signed console approval entry from the hub, and its keys."""
     root, dk = Key(), Key()
     remote = SignedRemote(dk)
     hub.approval = Approval(enabled=True, channel=None, console=remote)
-    remote.answers = [(ApprovalKind.ALLOW_ALWAYS, {"path": {"equals": ["x"]}})]
+    remote.answers = [(kind, scope)]
     await _call(hub)
     (entry,) = [
         json.loads(line)
@@ -342,36 +340,107 @@ async def test_a_legacy_scoped_hub_approval_is_noted_not_failed(hub, tmp_path):
         if "attestation" in line
     ]
     hub.audit.stop()
-    legacy_dir = tmp_path / "legacy-audit"
-    log = AuditLog(legacy_dir)
+    return entry, root, dk
+
+
+def _write_legacy(directory: Path, entries: list[dict], *, with_resolution: list[bool]) -> None:
+    """Hub `received` entries carrying these approvals; `resolution` written
+    only where `with_resolution` says (as hubs did before it existed)."""
+    log = AuditLog(directory)
     log.start()
-    log.write_received(
-        request_id="r",
-        trace_id="t",
-        span_id="s",
-        caller_id="crew-1",
-        caller_token_id=None,
-        mcp_server="filesystem",
-        tool="read_file",
-        args={"path": "x"},
-        authz_decision="prompt_allowed",
-        authz_rule=PROMPTED,
-        audit_level="standard",
-        decided_by=SUBJECT,
-        action_digest=entry["action_digest"],
-        approver=entry["approver"],
-        attestation=entry["attestation"],
-    )
+    for i, (entry, keep) in enumerate(zip(entries, with_resolution, strict=True)):
+        log.write_received(
+            request_id=f"r{i}",
+            trace_id="t",
+            span_id="s",
+            caller_id="crew-1",
+            caller_token_id=None,
+            mcp_server="filesystem",
+            tool="read_file",
+            args={"path": "x"},
+            authz_decision="prompt_allowed",
+            authz_rule=PROMPTED,
+            audit_level="standard",
+            decided_by=SUBJECT,
+            action_digest=entry["action_digest"],
+            approver=entry["approver"],
+            attestation=entry["attestation"],
+            **({"resolution": entry["resolution"]} if keep else {}),
+        )
     log.stop()
-    pack = _pack(tmp_path, legacy_dir, csv_path=None, root=root, dk=dk)
-    report = verify_pack(pack)
+
+
+def _verify_cli(pack: Path, *flags: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(pack / "verify" / "verify.py"), *flags], capture_output=True, text=True
+    )
+
+
+async def test_a_legacy_unscoped_allow_always_recovers_its_kind(hub, tmp_path):
+    entry, root, dk = await _console_entry(hub, ApprovalKind.ALLOW_ALWAYS, None)
+    _write_legacy(tmp_path / "legacy", [entry], with_resolution=[False])
+    report = verify_pack(_pack(tmp_path, tmp_path / "legacy", csv_path=None, root=root, dk=dk))
     assert report.ok, _failures(report)
     (approval,) = [c for c in report.checks if c.name.startswith("approval ")]
-    assert approval.warning and "not re-verifiable" in approval.detail
-    run = subprocess.run(
-        [sys.executable, str(pack / "verify" / "verify.py")], capture_output=True, text=True
+    assert approval.detail.startswith("allow_always by ") and "recovered" in approval.detail
+
+
+async def test_a_legacy_approval_that_verifies_as_no_kind_fails_unless_accepted(hub, tmp_path):
+    """A scoped allow_always written before `resolution`: the signature cannot
+    be rebuilt, and from the record alone that is indistinguishable from a
+    forgery. FAILED by default; admitted only by the auditor's explicit flag,
+    and even then listed as UNVERIFIED, never as verified."""
+    entry, root, dk = await _console_entry(
+        hub, ApprovalKind.ALLOW_ALWAYS, {"path": {"equals": ["x"]}}
     )
-    assert run.returncode == 0 and "not re-verifiable" in run.stdout, run.stdout + run.stderr
+    _write_legacy(tmp_path / "legacy", [entry], with_resolution=[False])
+    pack = _pack(tmp_path, tmp_path / "legacy", csv_path=None, root=root, dk=dk)
+
+    report = verify_pack(pack)
+    assert not report.ok
+    (check,) = [c for c in report.checks if c.name.startswith("UNVERIFIED APPROVAL")]
+    assert not check.ok and "--accept-unverifiable-legacy" in check.detail
+    run = _verify_cli(pack)
+    assert run.returncode == 1 and "RESULT: FAILED" in run.stdout, run.stdout + run.stderr
+
+    accepted = verify_pack(pack, accept_unverifiable_legacy=True)
+    assert accepted.ok, _failures(accepted)
+    assert [c.name for c in accepted.unverified] == [check.name]
+    assert not any(c.name.startswith("approval ") for c in accepted.checks), "never verified"
+    run = _verify_cli(pack, "--accept-unverifiable-legacy")
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "[UNVERIFIED]" in run.stdout and "NOT VERIFIED" in run.stdout
+    assert "with --accept-unverifiable-legacy: 1 unverified" in run.stdout
+
+
+async def test_a_forged_legacy_approval_fails(hub, tmp_path):
+    """Whoever controls the hub writes a fake approver and a garbage signature
+    under the fleet's decision key id, and leaves `resolution` out."""
+    entry, root, dk = await _console_entry(hub, ApprovalKind.ALLOW, None)
+    forged = {
+        **entry,
+        "approver": {**entry["approver"], "subject": "local:mallory", "email": "m@evil"},
+        "attestation": {**entry["attestation"], "signature": b64u(b"\x01" * 64)},
+    }
+    _write_legacy(tmp_path / "forged", [forged], with_resolution=[False])
+    pack = _pack(tmp_path, tmp_path / "forged", csv_path=None, root=root, dk=dk)
+    assert not verify_pack(pack).ok
+    assert _verify_cli(pack).returncode == 1
+
+
+async def test_a_missing_resolution_after_the_chain_records_one_always_fails(hub, tmp_path):
+    """Once the chain shows a hub that records `resolution`, a later approval
+    without it is a record that dropped what was signed -- even with the
+    flag, and even when its signature would have verified as a legacy one."""
+    entry, root, dk = await _console_entry(hub, ApprovalKind.ALLOW, None)
+    _write_legacy(tmp_path / "late", [entry, entry], with_resolution=[True, False])
+    pack = _pack(tmp_path, tmp_path / "late", csv_path=None, root=root, dk=dk)
+    for accept in (False, True):
+        report = verify_pack(pack, accept_unverifiable_legacy=accept)
+        assert not report.ok
+        late = [c for c in report.checks if not c.ok and "records it from seq" in c.detail]
+        assert len(late) == 1, [c.detail for c in report.checks]
+    assert _verify_cli(pack, "--accept-unverifiable-legacy").returncode == 1
 
 
 async def test_an_incomplete_or_tampered_hub_approval_fails_without_crashing(hub, tmp_path):

@@ -645,10 +645,23 @@ def main(argv: list[str] | None = None) -> int:
     v = sub.add_parser("verify", help="verify a pack directory")
     v.add_argument("pack", type=Path)
     v.add_argument("--json", action="store_true")
+    v.add_argument(
+        pack_verify.ACCEPT_LEGACY_FLAG,
+        dest="accept_unverifiable_legacy",
+        action="store_true",
+        help="admit legacy hub approvals whose signature cannot be rebuilt (still reported "
+        "as UNVERIFIED)",
+    )
 
     args = parser.parse_args(argv)
     if args.cmd == "verify":
-        return pack_verify.main([str(args.pack), *(["--json"] if args.json else [])])
+        return pack_verify.main(
+            [
+                str(args.pack),
+                *(["--json"] if args.json else []),
+                *([pack_verify.ACCEPT_LEGACY_FLAG] if args.accept_unverifiable_legacy else []),
+            ]
+        )
 
     keys = _pairs(args.chain_key, "--chain-key")
     reporters = _pairs(args.chain_reporter, "--chain-reporter")

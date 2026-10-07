@@ -90,6 +90,10 @@ class Check:
     ok: bool
     detail: str = ""
     warning: bool = False
+    #: An approval whose signature could not be re-verified, admitted only
+    #: because the auditor passed `--accept-unverifiable-legacy`. Never a PASS:
+    #: rendered as UNVERIFIED and listed again beside the result.
+    unverified: bool = False
 
 
 @dataclass
@@ -97,8 +101,20 @@ class Report:
     checks: list[Check] = field(default_factory=list)
     facts: dict[str, Any] = field(default_factory=dict)
 
-    def add(self, name: str, ok: bool, detail: str = "", *, warning: bool = False) -> None:
-        self.checks.append(Check(name, ok, detail, warning))
+    def add(
+        self,
+        name: str,
+        ok: bool,
+        detail: str = "",
+        *,
+        warning: bool = False,
+        unverified: bool = False,
+    ) -> None:
+        self.checks.append(Check(name, ok, detail, warning, unverified))
+
+    @property
+    def unverified(self) -> list[Check]:
+        return [c for c in self.checks if c.unverified]
 
     @property
     def ok(self) -> bool:
@@ -461,8 +477,15 @@ def _approvals_in(chain: Chain) -> list[dict[str, Any]]:
     recorded under `resolution` (unified_mcphub.audit). They are lifted into
     the same shape as the sidecar's here, so one check covers both — and a hub
     entry *without* them is passed on as it is, to fail that check as
-    incomplete rather than be skipped."""
+    incomplete rather than be skipped.
+
+    "Written before `resolution` existed" is only believable *before* the
+    chain shows a hub that records it: once one entry in this chain carries
+    `resolution`, every later approval entry without it is a record that
+    dropped part of what was signed, and is marked to FAIL whatever the
+    auditor accepts (`_AFTER_RESOLUTION`)."""
     found = []
+    first_resolution: Any = None
     for e in chain.entries:
         payload = e.get("payload") if e.get("kind") == "approval" else e
         if isinstance(payload, dict) and payload.get("attestation") and payload.get("approver"):
@@ -477,26 +500,49 @@ def _approvals_in(chain: Chain) -> list[dict[str, Any]]:
                     if "scope" in resolution:
                         payload["scope"] = resolution["scope"]
                 elif "resolution" not in e:
-                    # Written before hubs recorded `resolution` at all: what
-                    # was signed is only partly here. Checked against the
-                    # kinds that carry no scope (`_LEGACY_KINDS`) rather than
-                    # failed for a field the writer did not know about.
-                    payload[_LEGACY] = True
+                    if first_resolution is not None:
+                        payload[_AFTER_RESOLUTION] = first_resolution
+                    else:
+                        # Written before hubs recorded `resolution` at all:
+                        # what was signed is only partly here. Checked
+                        # against every kind with scope null
+                        # (`_LEGACY_KINDS`) rather than failed for a field
+                        # the writer did not know about.
+                        payload[_LEGACY] = True
             found.append(payload)
+        if first_resolution is None and "phase" in e and "resolution" in e:
+            first_resolution = e.get("seq")
     return found
 
 
 #: Marks a hub approval recorded before `resolution` was (see `_approvals_in`).
 _LEGACY = "_recorded_before_resolution"
+#: Marks a hub approval with no `resolution` *after* an entry in the same chain
+#: recorded one (value: that entry's seq). Always a FAIL.
+_AFTER_RESOLUTION = "_missing_resolution_after_seq"
 
-#: The resolution kinds that never carry a scope, so a legacy entry -- which
-#: records neither kind nor scope -- can still be re-verified if it was one of
-#: these: with scope None, the signed payload is fully determined by them.
-_LEGACY_KINDS = ("allow", "allow_session", "deny")
+#: The kinds a legacy entry -- which records neither kind nor scope -- is
+#: tried against, each with scope null: then the signed payload is fully
+#: determined by what the entry holds. A scoped `*_always` cannot be rebuilt.
+_LEGACY_KINDS = ("allow", "allow_session", "deny", "allow_always", "deny_always")
+
+#: The auditor's explicit opt-in to admit legacy approvals that verify under
+#: no candidate kind. Without it they FAIL the pack.
+ACCEPT_LEGACY_FLAG = "--accept-unverifiable-legacy"
 
 
 class _Incomplete(Exception):
     """An approval record missing something its signature covers."""
+
+
+class _UnverifiedLegacy(Exception):
+    """A legacy hub approval whose signature verifies under no candidate kind.
+
+    Indistinguishable, from the record alone, from a forgery: anyone who can
+    write the hub's log can write a fake approver and a garbage signature
+    under the fleet's key id and leave `resolution` out. So it FAILS unless
+    the auditor explicitly accepts it (`ACCEPT_LEGACY_FLAG`), and even then it
+    is reported as UNVERIFIED, never as verified."""
 
 
 def _field(record: Any, name: str, kind: type | tuple[type, ...]) -> Any:
@@ -510,27 +556,28 @@ def _field(record: Any, name: str, kind: type | tuple[type, ...]) -> Any:
     return value
 
 
-def _check_one_approval(a: dict[str, Any], keys: dict[str, Any]) -> tuple[bool, str, bool]:
-    """Verify one recorded resolution: `(ok, detail, warning)`.
+def _check_one_approval(a: dict[str, Any], keys: dict[str, Any]) -> tuple[bool, str]:
+    """Verify one recorded resolution: `(ok, detail)`.
 
-    Raises `_Incomplete` for a record that cannot even be checked; the caller
-    reports that as a failure. `warning` is True only for a hub entry written
-    before `resolution` was recorded whose signature cannot be rebuilt from
-    what it holds -- not re-verifiable, which is a limit of the record rather
-    than evidence of tampering, so it does not fail the pack. A record that
-    *does* carry its kind and whose signature does not verify always fails."""
+    Raises `_Incomplete` for a record that cannot even be checked (including
+    a hub entry missing `resolution` after its chain began recording it), and
+    `_UnverifiedLegacy` for a pre-`resolution` hub entry whose signature
+    verifies under none of `_LEGACY_KINDS`; the caller decides what those
+    cost. A record that carries its kind and does not verify fails here."""
+    if _AFTER_RESOLUTION in a:
+        raise _Incomplete(
+            "no 'resolution', but this chain records it from seq "
+            f"{a.get(_AFTER_RESOLUTION)!r} on — an approval written after that dropped part of "
+            "what was signed"
+        )
     ap = _field(a, "approver", dict)
     at = _field(a, "attestation", dict)
     kid = at.get("key_id")
     key = keys.get(kid) if isinstance(kid, str) else None
     if key is None:
-        return False, f"signed by {kid!r}, which the key set does not vouch for", False
+        return False, f"signed by {kid!r}, which the key set does not vouch for"
     if key.role != "decision":
-        return (
-            False,
-            f"key {key.kid} has role {key.role!r}; only a decision key may sign approvals",
-            False,
-        )
+        return False, f"key {key.kid} has role {key.role!r}; only a decision key may sign approvals"
     legacy = bool(a.get(_LEGACY))
     if legacy:
         candidates: list[tuple[str, Any]] = [(k, None) for k in _LEGACY_KINDS]
@@ -576,27 +623,29 @@ def _check_one_approval(a: dict[str, Any], keys: dict[str, Any]) -> tuple[bool, 
         break
     if verified is None:
         if legacy:
-            return (
-                True,
-                "not re-verifiable (recorded before resolution was recorded): the signed kind "
-                "and scope are not in the entry, and it is none of the unscoped kinds "
-                f"{', '.join(_LEGACY_KINDS)}",
-                True,
+            raise _UnverifiedLegacy(
+                "recorded before resolution was recorded, and the signature verifies as none of "
+                f"{', '.join(_LEGACY_KINDS)} (scope null) — it cannot be told from a forgery"
             )
-        return False, "the control plane's signature does not verify", False
+        return False, "the control plane's signature does not verify"
     if key.expires_at_ms <= resolved_at:
-        return False, f"key {key.kid} had expired when this was signed", False
+        return False, f"key {key.kid} had expired when this was signed"
     return (
         True,
         f"{verified} by {ap.get('email') or ap['subject']} ({ap['subject']}), signed by {key.kid}"
         + (
             " (kind recovered from the signature; recorded before resolution was)" if legacy else ""
         ),
-        False,
     )
 
 
-def check_approvals(root: Path, chains: list[Chain], report: Report, at_ms: int) -> None:
+def check_approvals(
+    root: Path,
+    chains: list[Chain],
+    report: Report,
+    at_ms: int,
+    accept_unverifiable_legacy: bool = False,
+) -> None:
     approvals = [(c.name, a) for c in chains for a in _approvals_in(c)]
     if not approvals:
         report.add("approvals", True, "no signed human resolutions in these excerpts", warning=True)
@@ -605,14 +654,30 @@ def check_approvals(root: Path, chains: list[Chain], report: Report, at_ms: int)
     for name, a in approvals:
         digest = a.get("action_digest")
         label = f"approval {digest[:12] if isinstance(digest, str) else '?'}… in {name}"
-        warning = False
         try:
-            ok, detail, warning = _check_one_approval(a, keys)
+            ok, detail = _check_one_approval(a, keys)
+        except _UnverifiedLegacy as exc:
+            if accept_unverifiable_legacy:
+                report.add(
+                    f"UNVERIFIED APPROVAL {label.removeprefix('approval ')}",
+                    True,
+                    f"{exc}; admitted only because the auditor passed {ACCEPT_LEGACY_FLAG}",
+                    warning=True,
+                    unverified=True,
+                )
+            else:
+                report.add(
+                    f"UNVERIFIED APPROVAL {label.removeprefix('approval ')}",
+                    False,
+                    f"{exc}. Fails the pack; an auditor who accepts the risk may pass "
+                    f"{ACCEPT_LEGACY_FLAG} (it is still reported as unverified)",
+                )
+            continue
         except _Incomplete as exc:
             ok, detail = False, f"incomplete approval record, cannot be re-verified: {exc}"
         except Exception as exc:  # noqa: BLE001 - a bad record is a FAILED check, never a crash
             ok, detail = False, f"approval record could not be checked: {type(exc).__name__}: {exc}"
-        report.add(label, ok, detail, warning=warning)
+        report.add(label, ok, detail)
 
 
 # --- 4. policies ---------------------------------------------------------------------
@@ -807,8 +872,9 @@ def _stage(report: Report, name: str, fn: Any, *args: Any, default: Any = None) 
         return default
 
 
-def verify_pack(root: Path) -> Report:
+def verify_pack(root: Path, *, accept_unverifiable_legacy: bool = False) -> Report:
     report = Report()
+    report.facts["accept_unverifiable_legacy"] = accept_unverifiable_legacy
     manifest = _stage(report, "manifest", check_manifest, root, report) or {}
     try:
         at_ms = int(manifest.get("created_at_ms") or 0)
@@ -816,7 +882,16 @@ def verify_pack(root: Path) -> Report:
         at_ms = 0
     chains = _stage(report, "chains", check_chains, root, report, default=[])
     rows = _stage(report, "export rows", _load_rows, root, default=[])
-    _stage(report, "approvals", check_approvals, root, chains, report, at_ms)
+    _stage(
+        report,
+        "approvals",
+        check_approvals,
+        root,
+        chains,
+        report,
+        at_ms,
+        accept_unverifiable_legacy,
+    )
     _stage(report, "policies", check_policies, root, chains, rows, report)
     _stage(report, "export rows", check_rows, chains, rows, report)
     return report
@@ -839,9 +914,24 @@ def render(report: Report) -> str:
             )
         )
     for c in report.checks:
-        mark = "PASS" if c.ok and not c.warning else ("NOTE" if c.warning else "FAIL")
+        if c.unverified:
+            mark = "UNVERIFIED"
+        else:
+            mark = "PASS" if c.ok and not c.warning else ("NOTE" if c.warning else "FAIL")
         lines.append(f"[{mark}] {c.name}: {c.detail}")
-    lines.append("RESULT: " + ("VERIFIED" if report.ok else "FAILED"))
+    unverified = report.unverified
+    if unverified:
+        lines.append(
+            f"!!! {len(unverified)} APPROVAL(S) NOT VERIFIED, admitted by {ACCEPT_LEGACY_FLAG}:"
+        )
+        lines.extend(f"!!!   {c.name}" for c in unverified)
+    result = "VERIFIED" if report.ok else "FAILED"
+    if report.facts.get("accept_unverifiable_legacy"):
+        result += (
+            f" (with {ACCEPT_LEGACY_FLAG}: {len(unverified)} unverified legacy approval(s) "
+            "accepted, none counted as verified)"
+        )
+    lines.append("RESULT: " + result)
     return "\n".join(lines)
 
 
@@ -854,11 +944,28 @@ def main(argv: list[str] | None = None) -> int:
         help="the pack directory (default: the pack this script sits in)",
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument(
+        ACCEPT_LEGACY_FLAG,
+        dest="accept_unverifiable_legacy",
+        action="store_true",
+        help="admit hub approvals recorded before 'resolution' existed whose signature cannot "
+        "be rebuilt (they are still reported as UNVERIFIED, never as verified)",
+    )
     args = parser.parse_args(argv)
-    report = verify_pack(Path(args.pack))
+    report = verify_pack(
+        Path(args.pack), accept_unverifiable_legacy=args.accept_unverifiable_legacy
+    )
     if args.json:
         print(
-            json.dumps({"ok": report.ok, "checks": [c.__dict__ for c in report.checks]}, indent=2)
+            json.dumps(
+                {
+                    "ok": report.ok,
+                    "accept_unverifiable_legacy": args.accept_unverifiable_legacy,
+                    "unverified_approvals": [c.name for c in report.unverified],
+                    "checks": [c.__dict__ for c in report.checks],
+                },
+                indent=2,
+            )
         )
     else:
         print(render(report))

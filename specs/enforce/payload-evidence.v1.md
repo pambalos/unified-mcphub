@@ -114,6 +114,15 @@ The receipt of `POST /api/v1/evidence` gains `payloads` (`"accept"` or
   http excepted). The decision binding is unaffected — the control plane keys
   and signs on `action_digest`, which the reporter computed over the full
   action.
+- **Only portable JSON.** A value whose canonical bytes are not strict JSON
+  — a `NaN`/`Infinity` (Python writes them as bare tokens, which a strict
+  parser, proxy or WAF rejects along with the rest of the batch) — or that
+  does not survive a parse and re-serialise byte for byte (non-string keys:
+  `{10: …, 9: …}` sorts numerically when digested and as strings when parsed
+  back; keys of mixed type cannot be sorted at all) is not sent, and is
+  counted as `unportable` in the hub's `fleet.payloads` status. It cannot be
+  repaired: the digest is over those exact bytes, so any substitute would
+  fail verification. The chain still commits to it.
 - **Only beside a row.** Payloads are offered only for a decision row that was
   actually queued, under the same `action_digest` (a hub: the lenient digest
   its `received` entry records). Findings (`count=False` records) ship none.

@@ -433,5 +433,6 @@ class FleetLink:
             "oversize": stats.oversize,
             "unsigned": stats.unsigned,
             "unrecorded": stats.unrecorded,
+            "unportable": stats.unportable,
             "refused": stats.refused + spool.rejected,
         }

@@ -837,6 +837,37 @@ class PayloadStats:
     unrecorded: int = 0
     #: Records the receiver refused individually (`refused` in its response).
     refused: int = 0
+    #: Values whose canonical bytes are not portable JSON, so no receiver
+    #: could check them (`_portable`): a NaN/Infinity, or keys that collapse
+    #: or reorder when the bytes are parsed back. Skipped, never sent -- the
+    #: chain still commits to them.
+    unportable: int = 0
+
+
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"non-finite number {name}")
+
+
+def _portable(body: bytes) -> bool:
+    """Whether these canonical bytes survive a strict JSON round trip.
+
+    Two ways they do not, and both are skipped rather than repaired, because
+    the chain's digest is over *these* bytes and any substitute would not
+    match it:
+
+    - **Non-finite floats.** Python writes `NaN`/`Infinity`, which is not JSON;
+      a strict proxy or WAF in front of the control plane rejects the request
+      -- with up to a batch of other values in it.
+    - **Non-string keys.** `{1: "a", "1": "b"}` serialises to two `"1"` keys,
+      and a parse keeps one: the value the receiver would verify is not the
+      one that was digested. Detected as bytes that differ once parsed and
+      re-serialised.
+    """
+    try:
+        parsed = json.loads(body, parse_constant=_reject_constant)
+    except ValueError:
+        return False
+    return _detach.canonical(parsed) == body
 
 
 class PayloadShipper(EvidenceShipper):
@@ -1074,7 +1105,17 @@ class PayloadShipper(EvidenceShipper):
             self.payload_stats.unrecorded += 1
             return
 
-        body = _detach.canonical(value)
+        try:
+            body = _detach.canonical(value)
+        except (TypeError, ValueError):
+            # Keys of mixed type cannot even be sorted; the chain wrote this
+            # value with the same rule, so it could not have been digested
+            # either -- but a value is never worth an exception here.
+            self.payload_stats.unportable += 1
+            return
+        if not _portable(body):
+            self.payload_stats.unportable += 1
+            return
         size = len(body)
         # Before any receipt there is no receiver limit to apply, so a
         # conservative one of our own: see DEFAULT_PENDING_MAX_BYTES.

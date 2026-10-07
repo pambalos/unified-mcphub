@@ -514,3 +514,31 @@ def test_only_entries_with_inline_content_are_called_legacy(world, tmp_path):
     pack = build(out=tmp_path / "legacy-pack", payloads="digests-only", **kwargs)
     meta = json.loads((pack / "chains" / "old" / "meta.json").read_text())
     assert meta["legacy_inline_entries"] == 1
+
+
+@pytest.mark.parametrize(
+    "stage, name",
+    [
+        ("check_manifest", "manifest"),
+        ("check_chains", "chains"),
+        ("check_approvals", "approvals"),
+        ("check_policies", "policies"),
+        ("check_rows", "export rows"),
+    ],
+)
+def test_a_stage_that_raises_fails_by_name_and_the_rest_still_run(world, monkeypatch, stage, name):
+    """The `_stage` backstop: an exception nobody anticipated is that stage
+    FAILING, named, beside every other stage's verdict -- never a traceback."""
+    from unified_enforce import pack_verify
+
+    def explode(*a, **k):
+        raise RuntimeError("doctored beyond recognition")
+
+    monkeypatch.setattr(pack_verify, stage, explode)
+    report = verify_pack(world["pack"])  # does not raise
+    assert not report.ok
+    failed = [c for c in report.checks if c.name == name and not c.ok]
+    assert failed and "could not be checked: RuntimeError" in failed[-1].detail
+    # Another stage's verdict is still there.
+    other = "chain sidecar" if name == "manifest" else "manifest"
+    assert any(c.name == other for c in report.checks)

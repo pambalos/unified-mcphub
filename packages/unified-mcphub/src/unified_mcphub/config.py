@@ -262,6 +262,17 @@ class ControlPlaneConfig(BaseModel):
     #: hostile or wrong control plane is a refused refresh, not a new policy.
     root_public_key: str | None = None
     credential_secret_ref: str = "control-plane-credential"
+    #: The enrolled credential's id (not a secret: it names the credential,
+    #: it does not prove anything). The `iss` of every request proof.
+    credential_id: str | None = None
+    #: The channel key: an Ed25519 seed in the secrets store, registered at
+    #: enrolment as `channel_key`. With it every request to the control plane
+    #: carries a proof (`x-unified-proof`) bound to its method, path and body,
+    #: so the bearer credential alone -- stolen from a log or a backup -- is
+    #: not enough to report, fetch or approve in this hub's name. A hub joined
+    #: before this has no key and keeps working bearer-only; re-join
+    #: (`fleet join --force` with a new token) to upgrade.
+    channel_key_secret_ref: str = "control-plane-channel-key"
     poll_seconds: float = 30.0
     #: What an expired policy bundle does: keep enforcing the old rules
     #: (default), defer everything to a human, or deny everything.

@@ -376,3 +376,84 @@ async def test_a_hub_in_a_fleet_with_no_bundle_published_still_serves(
         assert (await hub._handle_call(_message("crew-1", 2), "crew-1"))["error"]["code"] == -32003
     finally:
         hub.audit.stop()
+
+
+def test_every_hub_request_carries_a_channel_proof(hub_home, monkeypatch):
+    """With a channel key, the source, both evidence sinks and the console
+    approval client sign each request (x-unified-proof) under the enrolled
+    credential id; without one, the hub stays bearer-only, as joined hubs
+    did before channel binding."""
+    import io
+    import json as _json
+    import urllib.request
+
+    from unified_enforce.attest import accept_proof, b64u
+    from unified_enforce.approval import ApprovalRequest
+    from unified_enforce.policy import Decision, Verdict
+    from unified_enforce import Action, Principal
+
+    from unified_mcphub import signing
+
+    seed = signing.generate_seed()
+    public = b64u(signing.signer_from_secret(seed).public_bytes())
+    seen: list = []
+
+    class Response(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def urlopen(request, timeout):
+        seen.append(request)
+        path = request.full_url.split("cp.example", 1)[1]
+        body = {"id": "01A", "status": "pending"} if path.endswith("approvals") else {}
+        return Response(_json.dumps(body).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    def link(channel_seed):
+        cfg = ControlPlaneConfig(
+            url="https://cp.example",
+            fleet_id="acme",
+            root_public_key="k",
+            credential_id="cred-123",
+        )
+        fl = FleetLink(cfg)
+        channel = fl._channel(channel_seed)  # noqa: SLF001
+        fl._transport.bind("uai_cred", channel)  # noqa: SLF001
+        fl.approvals.bind("uai_cred", channel)
+        return fl
+
+    def exercise(fl):
+        seen.clear()
+        fl._transport.fetch_revocations()  # noqa: SLF001
+        fl._transport.send([{"r": 1}])  # noqa: SLF001
+        fl._transport.payloads.send([{"v": 1}])  # noqa: SLF001
+        action = Action.build(principal=Principal(id="agent:a"), tool="t", verb="v", resource="*")
+        fl.approvals._remote._queue(  # noqa: SLF001
+            ApprovalRequest(action, Decision(verdict=Verdict.DEFER, rule_id=None, source="x"))
+        )
+        return list(seen)
+
+    requests = exercise(link(seed))
+    assert len(requests) == 4
+    for request in requests:
+        proof = request.get_header("X-unified-proof")
+        assert proof, request.full_url
+        path = request.full_url.split("cp.example", 1)[1]
+        verdict = accept_proof(
+            proof,
+            public_key_b64=public,
+            credential_id="cred-123",
+            method=request.get_method(),
+            path=path,
+            body=request.data,
+            now=int(__import__("time").time()),
+        )
+        assert verdict.ok, (path, verdict)
+
+    assert all(r.get_header("X-unified-proof") is None for r in exercise(link(None)))

@@ -236,6 +236,7 @@ def test_bind_builds_the_engine_client_with_the_fleets_keys_and_timeout():
         "keys": keys,
         "deadline_seconds": 42,
         "share_params": True,
+        "channel": None,
     }
 
 

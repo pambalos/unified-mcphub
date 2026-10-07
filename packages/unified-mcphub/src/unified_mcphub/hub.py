@@ -269,6 +269,7 @@ class Hub:
                 refs.add(spec.auth_secret_ref)
         if self.fleet is not None:
             refs.add(self.fleet.credential_secret_ref)
+            refs.add(self.fleet.channel_key_secret_ref)
         # The signing key, always: whether this hub signs is decided by the
         # store holding one, and the store can only be asked once unlocked.
         # Listing it unconditionally means a hub that has a key signs whether
@@ -350,12 +351,10 @@ class Hub:
             )
         self._loop = asyncio.get_running_loop()
         if self.fleet is not None:
-            credential = (
-                self.secrets.get(self.fleet.credential_secret_ref)
-                if self.secrets.exists()
-                else None
-            )
-            await self.fleet.start(credential, signer=signer)
+            stored = self.secrets.exists()
+            credential = self.secrets.get(self.fleet.credential_secret_ref) if stored else None
+            channel_seed = self.secrets.get(self.fleet.channel_key_secret_ref) if stored else None
+            await self.fleet.start(credential, signer=signer, channel_seed=channel_seed)
 
         for name, spec in self.config.workspace.servers.items():
             if not spec.enabled:

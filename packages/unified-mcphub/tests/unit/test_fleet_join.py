@@ -212,3 +212,28 @@ def test_join_is_quiet_about_bundles_when_one_exists(plane, store, capsys):
     state["bundle"] = 200
     assert _join() == 0
     assert "publish-policy" not in capsys.readouterr().out
+
+
+def test_join_registers_a_channel_key_and_records_the_credential_id(plane, store, capsys):
+    """Channel binding: the enrolment registers the public half of a key kept
+    in the secrets store, and the block names the credential id every request
+    proof is issued under."""
+    seen, _ = plane
+    assert _join() == 0
+    (call,) = seen
+    seed = store.get("control-plane-channel-key")
+    assert seed is not None and seed != store.get("hub-signing-key")
+    channel = Signer.from_private_bytes(base64.b64decode(seed), "k")
+    assert call["body"]["channel_key"] == b64u(channel.public_bytes())
+    cp = load_hub_config().control_plane
+    assert cp.credential_id == "cred-123"
+    assert seed not in capsys.readouterr().out
+
+
+def test_force_re_join_keeps_the_channel_key(plane, store):
+    """A re-join that fails after the key step must not have replaced the key
+    the current credential proves with, so an existing key is reused."""
+    assert _join() == 0
+    before = store.get("control-plane-channel-key")
+    assert _join("--force") == 0
+    assert store.get("control-plane-channel-key") == before

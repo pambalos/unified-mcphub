@@ -75,10 +75,12 @@ class _BoundLater:
         #: moment, a different endpoint (payload-evidence.v1).
         self.payloads = _BoundPayloads(self)
 
-    def bind(self, credential: str) -> None:
+    def bind(self, credential: str, channel: Any = None) -> None:
+        """`channel` is the hub's `ChannelKey`, when it enrolled one: every
+        request through this transport then carries a proof."""
         assert self._cfg.url is not None
-        self._source = ControlPlaneSource(self._cfg.url, credential)
-        self._sink = HttpSink(self._cfg.url, credential)
+        self._source = ControlPlaneSource(self._cfg.url, credential, channel=channel)
+        self._sink = HttpSink(self._cfg.url, credential, channel=channel)
         # Never built for a plain-http control plane (FleetLink logs why), so
         # even a stream wired by mistake would have nothing to send through.
         self._payload_sink = (
@@ -88,6 +90,7 @@ class _BoundLater:
                 path=PAYLOADS_PATH,
                 field=PAYLOADS_FIELD,
                 ensure_ascii=False,
+                channel=channel,
             )
             if payload_transport_ok(self._cfg.url)
             else None
@@ -186,7 +189,7 @@ class ConsoleApprovals:
                 cfg.url,
             )
 
-    def bind(self, credential: str) -> None:
+    def bind(self, credential: str, channel: Any = None) -> None:
         assert self._cfg.url is not None and self._cfg.fleet_id is not None
         if self.disabled is not None:
             return
@@ -203,6 +206,7 @@ class ConsoleApprovals:
             # sees the tool, rule and reason, not the arguments. A `minimal`
             # rule withholds them in any mode (RemoteApprovals._queue).
             share_params=self._cfg.payloads != "off",
+            channel=channel,
         )
 
     @property
@@ -287,6 +291,8 @@ class FleetLink:
             else None
         )
         self._poller = Poller(self.distribution, interval_seconds=cfg.poll_seconds)
+        #: Whether requests carry a channel proof (set at `start`).
+        self.channel_bound = False
         #: The approval channel for `approvals: console`; None in terminal mode,
         #: where the hub keeps choosing its local channel exactly as standalone.
         self.approvals: ConsoleApprovals | None = (
@@ -299,7 +305,48 @@ class FleetLink:
     def credential_secret_ref(self) -> str:
         return self.config.credential_secret_ref
 
-    async def start(self, credential: str | None, *, signer: Any = None) -> None:
+    @property
+    def channel_key_secret_ref(self) -> str:
+        return self.config.channel_key_secret_ref
+
+    def _channel(self, seed: str | None) -> Any:
+        """The request-proof signer, or None for a bearer-only hub.
+
+        None when no channel key was enrolled (a hub joined before channel
+        binding: it keeps working, and `fleet join --force` upgrades it). A
+        key without the credential id it belongs to cannot make a proof the
+        control plane would accept; said, and run bearer-only."""
+        if seed is None:
+            logger.info(
+                "control plane: no channel key under secret ref %r; requests are bearer-only "
+                "(re-join with `unified-mcphub fleet join --force` to bind them)",
+                self.config.channel_key_secret_ref,
+            )
+            return None
+        if not self.config.credential_id:
+            logger.warning(
+                "control plane: a channel key is stored but control_plane.credential_id is "
+                "not set, so no request proof can be made; running bearer-only"
+            )
+            return None
+        from unified_enforce.channel import ChannelKey
+
+        from .signing import signer_from_secret
+
+        try:
+            return ChannelKey(signer_from_secret(seed), self.config.credential_id)
+        except ValueError as exc:
+            # The operator enrolled this key: a control plane holding it
+            # refuses unproven requests, so a broken one must stop start-up
+            # rather than leave the hub silently unable to report.
+            raise SystemExit(
+                f"control plane: channel key under {self.config.channel_key_secret_ref!r} "
+                f"is unusable: {exc}"
+            ) from None
+
+    async def start(
+        self, credential: str | None, *, signer: Any = None, channel_seed: str | None = None
+    ) -> None:
         """Bind the credential and start polling and shipping.
 
         `signer` is the hub's audit signer, when it has one. Attached to the
@@ -322,10 +369,12 @@ class FleetLink:
                 "; every console approval will be denied" if self.approvals is not None else "",
             )
         else:
+            channel = self._channel(channel_seed)
+            self.channel_bound = channel is not None
             if isinstance(self._transport, _BoundLater):
-                self._transport.bind(credential)
+                self._transport.bind(credential, channel)
             if self.approvals is not None:
-                self.approvals.bind(credential)
+                self.approvals.bind(credential, channel)
         await self._poller.start()
         if self.evidence is not None:
             self.evidence.start()
@@ -351,6 +400,7 @@ class FleetLink:
                 "version": snap.revocations_version,
                 "contained": sorted(snap.containment),
             },
+            "channel_bound": self.channel_bound,
             "evidence": self.evidence is not None,
             "evidence_signed": self.evidence is not None and self.evidence.signer is not None,
             "payloads": self._payload_status(),

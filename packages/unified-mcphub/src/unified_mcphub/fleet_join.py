@@ -14,8 +14,12 @@ order that wastes nothing if a step fails:
 2. Load or generate the hub signing key and store it in the secrets store.
    Also before enrolling: a secrets backend that cannot persist anything (the
    `env` backend with no key) must fail here, not after the token is spent.
-3. Enrol: `POST {url}/api/v1/enrol` with the join token, `kind: sidecar` and
-   the signing key's public half as `evidence_key`.
+   The channel key likewise (`control_plane.channel_key_secret_ref`, reused
+   when present).
+3. Enrol: `POST {url}/api/v1/enrol` with the join token, `kind: sidecar`, the
+   signing key's public half as `evidence_key` and the channel key's as
+   `channel_key` -- after which every request this hub makes carries a proof
+   bound to that key, and the bearer credential alone is not enough.
 4. Render the `control_plane:` block with ruamel round-trip, so the
    operator's comments and layout in `config.yaml` survive (as servers.py does
    for workspaces), pinning the `root_key` from the enrolment response — and
@@ -103,13 +107,22 @@ def _current_block(doc: CommentedMap) -> Any:
     return block if isinstance(block, dict) else None
 
 
-def _enrol(url: str, join_token: str, evidence_key: str) -> dict[str, Any]:
+def _enrol(url: str, join_token: str, evidence_key: str, channel_key: str) -> dict[str, Any]:
     endpoint = url.rstrip("/") + "/api/v1/enrol"
     try:
         with httpx.Client(timeout=ENROL_TIMEOUT_SECONDS) as client:
             response = client.post(
                 endpoint,
-                json={"join_token": join_token, "kind": "sidecar", "evidence_key": evidence_key},
+                json={
+                    "join_token": join_token,
+                    "kind": "sidecar",
+                    "evidence_key": evidence_key,
+                    # The key every later request is proved with. One-way at
+                    # the control plane: once registered, a request from this
+                    # credential without a valid proof is refused, so a stolen
+                    # bearer token alone cannot report, fetch or approve.
+                    "channel_key": channel_key,
+                },
             )
     except httpx.HTTPError as exc:
         raise JoinError(f"cannot reach the control plane at {endpoint}: {exc}") from None
@@ -163,6 +176,7 @@ def join(
             "(the old credential stays valid at the control plane until revoked there)"
         )
     credential_ref = hub_cfg.control_plane.credential_secret_ref
+    channel_ref = hub_cfg.control_plane.channel_key_secret_ref
     signing_ref = hub_cfg.audit.signing_key_secret_ref
 
     # 2. The signing key, before the token is spent.
@@ -173,15 +187,27 @@ def join(
         if seed is None:
             seed = generate_seed()
             store.set(signing_ref, seed)
+        # The channel key, the same way and for the same reason (before the
+        # token is spent). Reused when present: a `--force` re-join that
+        # fails after this point must not have replaced the key the current
+        # credential proves its requests with.
+        channel_seed = store.get(channel_ref)
+        if channel_seed is None:
+            channel_seed = generate_seed()
+            store.set(channel_ref, channel_seed)
     except SecretsKeyError as exc:
         raise JoinError(f"secrets: {exc}") from None
     try:
         signer = signer_from_secret(seed)
     except ValueError as exc:
         raise JoinError(f"the existing signing key under {signing_ref!r} is unusable: {exc}")
+    try:
+        channel = signer_from_secret(channel_seed)
+    except ValueError as exc:
+        raise JoinError(f"the existing channel key under {channel_ref!r} is unusable: {exc}")
 
     # 3. Enrol.
-    payload = _enrol(url, join_token, public_key_b64u(signer))
+    payload = _enrol(url, join_token, public_key_b64u(signer), public_key_b64u(channel))
     if payload["fleet_id"] != fleet:
         # The token decides the fleet, not the flag; a mismatch means the
         # operator holds a token for a fleet they did not mean. Nothing is
@@ -201,6 +227,15 @@ def join(
     block["root_public_key"] = payload["root_key"]
     block["on_stale"] = "keep"
     block["approvals"] = approvals
+    if payload.get("credential_id"):
+        # The `iss` of every request proof; not a secret.
+        block["credential_id"] = payload["credential_id"]
+    elif "credential_id" in block:
+        del block["credential_id"]
+    if "channel_key_secret_ref" in block or (
+        channel_ref != ControlPlaneConfig().channel_key_secret_ref
+    ):
+        block["channel_key_secret_ref"] = channel_ref
     if (
         "credential_secret_ref" in block
         or credential_ref != ControlPlaneConfig().credential_secret_ref

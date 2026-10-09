@@ -38,6 +38,7 @@ from unified_enforce import (
     Action,
     ActionContext,
     Approvals,
+    AttachmentProvider,
     AuditChain,
     Decision,
     Enforcer,
@@ -46,6 +47,7 @@ from unified_enforce import (
     Telemetry,
     Verdict,
 )
+from unified_enforce.attachments import AttachmentsSpec
 
 from .errors import ApprovalRequired, Denied
 
@@ -159,6 +161,11 @@ class UnifiedAI:
         self._principal = Principal(id=principal, kind=principal_kind)
         self._workspace = workspace
         self._chain: AuditChain | None = None  # set by local(), for close()
+        #: `attachments_for` registrations, in order (approval-attachments.v1
+        #: §3.2). Applied to every `check_async` on a matching tool, which is
+        #: every async path in this package: the `action()` decorator,
+        #: `ToolGuard`, wrapped tools and `GuardedSession` all route through it.
+        self._attachment_providers: list[AttachmentProvider] = []
 
     @classmethod
     def local(
@@ -255,6 +262,7 @@ class UnifiedAI:
         params: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
         summary: str = "",
+        attachments: AttachmentsSpec = None,
     ) -> Acting:
         """Decide, and take a DEFER to a human if approvals are configured.
 
@@ -268,10 +276,45 @@ class UnifiedAI:
         Without approvals configured this is `check()` with an await: DEFER
         comes back as DEFER rather than a synthesized deny, so a missing
         approval channel is visible instead of silently strict.
+
+        `attachments` is evidence for the approver: a sequence of
+        `Attachment`s, or a callable receiving the built `Action` (sync or
+        async) that returns them. The callable runs **only** if the action is
+        actually going to a person -- never for ALLOW or DENY -- so loading a
+        claim's documents costs nothing on the actions policy settles alone.
+        Providers registered with `attachments_for` are appended after it.
+        A loader that fails is shown to the approver as an unavailable entry;
+        the request is still asked.
         """
         action = self._build(tool, verb, resource, params, extra)
-        outcome = await self._enforcer.enforce_with_approval(action, summary=summary)
+        outcome = await self._enforcer.enforce_with_approval(
+            action,
+            summary=summary,
+            attachments=attachments,
+            attachment_providers=tuple(self._attachment_providers),
+        )
         return Acting(action, outcome.decision)
+
+    def attachments_for(self, tool_glob: str) -> Callable[[Callable], Callable]:
+        """Register a provider of approval evidence for tools matching `tool_glob`.
+
+            @ua.attachments_for("mcp://insurance/approve_claim")
+            def claim_documents(action):
+                return load_claim_documents(action.params["claim_id"])
+
+        The glob is the policy engine's (segment-aware: `*` stops at `/`),
+        compiled now so a malformed one fails at import rather than on the
+        first deferral in production. Providers run in registration order,
+        only for a DEFER that will be put to a person, after any call-site
+        `attachments=`; together they share one time budget. The decorated
+        function is returned unchanged.
+        """
+
+        def register(fn: Callable) -> Callable:
+            self._attachment_providers.append(AttachmentProvider.build(tool_glob, fn))
+            return fn
+
+        return register
 
     @contextmanager
     def acting(
@@ -308,6 +351,7 @@ class UnifiedAI:
         params: Sequence[str] = (),
         extra: dict[str, Any] | None = None,
         summary: str = "",
+        attachments: Callable[..., Any] | Sequence[Any] | None = None,
     ) -> Callable[[Callable], Callable]:
         """Decorate a function so calling it is an enforced action.
 
@@ -322,6 +366,13 @@ class UnifiedAI:
 
         Unknown names in `params`, `tool`, or `resource` raise at decoration
         time rather than on the first call in production.
+
+        `attachments` is approval evidence: a sequence of `Attachment`s, or a
+        callable receiving the decorated function's bound arguments as
+        keywords (`lambda claim_id, **_: [...]`), run only when the call is
+        put to a person. Async functions only: a sync call never waits for
+        approval, so evidence for it would never be seen -- passing it is a
+        mistake, and raises at decoration time.
         """
         signature_error = "unknown argument {name!r} in @action(...) for {fn}"
 
@@ -330,6 +381,11 @@ class UnifiedAI:
             for name in params:
                 if name not in sig.parameters:
                     raise TypeError(signature_error.format(name=name, fn=fn.__qualname__))
+            if attachments is not None and not inspect.iscoroutinefunction(fn):
+                raise TypeError(
+                    f"@action(attachments=...) on {fn.__qualname__}: only async functions "
+                    "wait for approval, so attachments for a sync one would never be shown"
+                )
 
             def resolve_call(args: tuple, kwargs: dict) -> dict[str, Any]:
                 bound = sig.bind(*args, **kwargs)
@@ -343,6 +399,7 @@ class UnifiedAI:
                         signature_error.format(name=exc.args[0], fn=fn.__qualname__)
                     ) from exc
                 return {
+                    "attachments": _over_arguments(attachments, values),
                     "tool": resolved_tool,
                     "verb": verb,
                     "resource": resolved_resource,
@@ -370,9 +427,28 @@ class UnifiedAI:
             @functools.wraps(fn)
             def wrapper(*args: Any, **kwargs: Any) -> Any:
                 call = resolve_call(args, kwargs)
+                call.pop("attachments")
                 self.check(call.pop("tool"), **call).raise_for_verdict()
                 return fn(*args, **kwargs)
 
             return wrapper
 
         return decorate
+
+
+def _over_arguments(attachments: Any, values: dict[str, Any]) -> AttachmentsSpec:
+    """`@action(attachments=...)` as an engine `attachments=` spec.
+
+    The decorator's callable takes the function's bound arguments, not the
+    Action: the Action holds only the captured `params`, and the document a
+    reviewer needs is usually keyed by an argument policy has no reason to
+    see. Its name is kept, so a failure is labelled with it for the approver.
+    """
+    if not callable(attachments):
+        return attachments
+
+    def over_arguments(_action: Action) -> Any:
+        return attachments(**values)
+
+    over_arguments.__name__ = getattr(attachments, "__name__", "attachments")
+    return over_arguments

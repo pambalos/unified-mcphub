@@ -50,7 +50,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -65,6 +65,12 @@ MANIFEST_SCHEMA = "unified.policy-bundle/v1"
 #: signature: a verifier that accepted both would honour a self-declared name
 #: from anything still speaking the old shape.
 RESOLUTION_VERSION = 2
+#: The same payload, plus `attachments_digest` (approval-attachments.v1 §5).
+#: Used only when the request carried attachments, so a request without them
+#: still signs and verifies exactly as v2 -- every sidecar built before
+#: attachments keeps working, and a request *with* them can only come from a
+#: sidecar that knows to check the digest.
+RESOLUTION_VERSION_ATTACHMENTS = 3
 REVOCATIONS_SCHEMA = "unified.revocations/v1"
 KEYSET_SCHEMA = "unified.keyset/v1"
 
@@ -102,6 +108,9 @@ class Reason(StrEnum):
     FILE_MISSING = "file_missing"
     FILE_TAMPERED = "file_tampered"
     FILE_UNEXPECTED = "file_unexpected"
+    #: A resolution signed over different evidence than this sidecar attached:
+    #: the approver was shown something else, or the record was altered.
+    ATTACHMENTS_MISMATCH = "attachments_mismatch"
 
 
 @dataclass(frozen=True)
@@ -583,8 +592,14 @@ def resolution_payload(
     expires_at_ms: int,
     nonce: str,
     fleet_id: str,
+    attachments_digest: str | None = None,
 ) -> dict[str, Any]:
     """Exactly what is signed.
+
+    `attachments_digest` is the digest of the evidence manifest the approver
+    was shown (`attachments_digest()` below). Present only when the request
+    had attachments, and then the payload is v3; absent, the payload is the v2
+    one byte for byte.
 
     One function on each side of the wire, and the vendored copy makes them the
     same function. A verifier that reconstructs the payload independently is a
@@ -596,7 +611,7 @@ def resolution_payload(
     response carries it as a nested object precisely so there is no
     reconstruction step to get subtly wrong.
     """
-    return {
+    payload: dict[str, Any] = {
         "v": RESOLUTION_VERSION,
         "action_digest": action_digest,
         "approver": dict(approver),
@@ -607,6 +622,42 @@ def resolution_payload(
         "resolved_at_ms": resolved_at_ms,
         "scope": dict(scope) if scope is not None else None,
     }
+    if attachments_digest is not None:
+        payload["v"] = RESOLUTION_VERSION_ATTACHMENTS
+        payload["attachments_digest"] = attachments_digest
+    return payload
+
+
+#: Every key a manifest entry carries, so two producers cannot disagree about
+#: which optional keys to omit and produce different digests for one manifest.
+ATTACHMENT_FIELDS = (
+    "sha256",
+    "size",
+    "media_type",
+    "label",
+    "source",
+    "note",
+    "origin_ref",
+    "added_at_ms",
+    "status",
+    "detail",
+)
+
+
+def attachments_digest(entries: Sequence[Mapping[str, Any]]) -> str:
+    """The digest of an evidence manifest (approval-attachments.v1 §2).
+
+    sha256 over canonical JSON of `{"attachments": [...]}`, entries ordered by
+    (`added_at_ms`, `sha256`, `label`) so the order they were attached in is
+    not something two producers can disagree about. Every entry is reduced to
+    exactly `ATTACHMENT_FIELDS` (absent ones as None), for the same reason.
+    Shared with the control plane through the vendored copy of this module.
+    """
+    normalised = [{f: entry.get(f) for f in ATTACHMENT_FIELDS} for entry in entries]
+    normalised.sort(
+        key=lambda e: (int(e["added_at_ms"] or 0), str(e["sha256"] or ""), str(e["label"] or ""))
+    )
+    return hashlib.sha256(canonical({"attachments": normalised})).hexdigest()
 
 
 #: What a resolution may say. An unrecognised value is refused rather than
@@ -628,8 +679,14 @@ def accept_resolution(
     action_digest: str,
     now_ms: int,
     skew_ms: int = DEFAULT_SKEW_MS,
+    attachments_digest: str | None = None,
 ) -> Verdict:
     """Decide whether a polled decision may release the action it names.
+
+    `attachments_digest` is the manifest digest of the evidence *this sidecar
+    attached*, supplied by the caller like `action_digest` and for the same
+    reason: a decision signed over other evidence -- or over none, when this
+    sidecar attached some -- answers a different question and is refused.
 
     Returns a `Verdict` and never raises, like everything else here. **False
     must mean deny** — an allow nobody can vouch for does not release a held
@@ -684,6 +741,12 @@ def accept_resolution(
         )
     if response.get("fleet_id") != fleet_id:
         return _refuse(Reason.WRONG_FLEET, f"resolution is for {response.get('fleet_id')!r}")
+    if response.get("attachments_digest") != attachments_digest:
+        return _refuse(
+            Reason.ATTACHMENTS_MISMATCH,
+            f"resolution covers evidence {str(response.get('attachments_digest'))[:12]}…, "
+            f"attached {str(attachments_digest)[:12]}…",
+        )
     if expires_at_ms + skew_ms <= now_ms:
         return _refuse(Reason.EXPIRED, "resolution has expired")
 
@@ -707,6 +770,7 @@ def accept_resolution(
                 expires_at_ms=expires_at_ms,
                 nonce=nonce,
                 fleet_id=fleet_id,
+                attachments_digest=attachments_digest,
             )
         )
     except CanonicalisationError as exc:

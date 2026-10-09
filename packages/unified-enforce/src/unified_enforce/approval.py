@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Any, Literal, Protocol
 
 from .action import Action
+from .attachments import Attachment
 from .policy import Decision, Verdict
 
 log = logging.getLogger("unified_enforce.approval")
@@ -104,6 +105,11 @@ class ApprovalRequest:
     decision: Decision  # the DEFER that triggered this
     summary: str = ""  # human-readable one-liner
     floored: bool = False  # deferred by a floor rather than an explicit rule
+    #: Evidence for the approver (approval-attachments.v1). Empty by default,
+    #: so every existing channel and test is unaffected; a channel that cannot
+    #: show attachments may ignore them. Fixed once the request is built --
+    #: what an approver is shown must not change under them.
+    attachments: tuple[Attachment, ...] = ()
 
     @property
     def principal(self) -> str:
@@ -173,6 +179,11 @@ class ApprovalResponse:
     #: imply otherwise by carrying an empty approver object.
     approver: Approver | None = None
     attestation: SignedResolution | None = None
+    #: The digest of the evidence manifest the resolution was verified
+    #: against (attest `attachments_digest`), set by a channel that sent one.
+    #: It is what the signature covers, so the chain must record it or the
+    #: approval cannot be re-verified offline.
+    attachments_digest: str | None = None
 
 
 @dataclass
@@ -189,6 +200,7 @@ class ApprovalOutcome:
     elapsed_ms: float = 0.0
     approver: Approver | None = None
     attestation: SignedResolution | None = None
+    attachments_digest: str | None = None
 
     @property
     def allowed(self) -> bool:
@@ -254,6 +266,22 @@ class Approvals:
 
     def clear_session(self) -> None:
         self._session_allows.clear()
+
+    def will_ask(self, action: Action, decision: Decision) -> bool:
+        """Whether `resolve` would put this DEFER in front of a person.
+
+        False when approvals are off, there is no channel, or a session allow
+        already answers it -- exactly the branches of `resolve` that return
+        before `channel.ask`. Used to decide whether to gather attachments at
+        all: loading a claim's documents for a request nobody will see is
+        wasted I/O and, worse, content read for no reviewer. Advisory only;
+        `resolve` still makes every decision itself.
+        """
+        if not self.enabled or self.channel is None:
+            return False
+        if gate_forced(decision):
+            return True
+        return self._session_key(action) not in self._session_allows
 
     async def resolve(self, request: ApprovalRequest) -> ApprovalOutcome:
         start = time.monotonic()
@@ -368,6 +396,7 @@ class Approvals:
                 scope=response.scope,
                 approver=response.approver,
                 attestation=response.attestation,
+                attachments_digest=response.attachments_digest,
             )
         )
 
@@ -407,6 +436,14 @@ class RecordedApproval:
     #: whoever operates the control plane.
     approver: dict[str, Any] | None = field(default=None)
     attestation: dict[str, Any] | None = field(default=None)
+    #: The evidence manifest the signed resolution covers (attest
+    #: `attachments_digest`; approval-attachments.v1 §5), so an evidence pack
+    #: can show offline which documents the approver was shown, by hash, and
+    #: re-verify the signature that names them. None -- and then *omitted*
+    #: from the chain entry (`AuditChain.append_approval`) -- when the request
+    #: carried no attachments, so entries for such requests are byte for byte
+    #: what they were before attachments existed.
+    attachments_digest: str | None = field(default=None)
 
     @classmethod
     def build(cls, request: ApprovalRequest, outcome: ApprovalOutcome) -> "RecordedApproval":
@@ -423,4 +460,5 @@ class RecordedApproval:
             approver=asdict(outcome.approver) if outcome.approver else None,
             attestation=asdict(outcome.attestation) if outcome.attestation else None,
             policy_digest=outcome.decision.policy_digest,
+            attachments_digest=outcome.attachments_digest,
         )

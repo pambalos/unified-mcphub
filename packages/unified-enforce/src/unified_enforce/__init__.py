@@ -29,6 +29,7 @@ from .approval import (
     RecordedApproval,
     SignedResolution,
 )
+from .attachments import Attachment, AttachmentProvider, AttachmentSource
 from .audit import AuditChain, HashChainWriter, VerifyResult
 from .canonical import CanonicalizationError, GENESIS_HASH, canonical_bytes, digest, sha256_hex
 from .enforcer import Enforcer
@@ -67,6 +68,9 @@ __all__ = [
     "Action",
     "ActionContext",
     "ApprovalChannel",
+    "Attachment",
+    "AttachmentProvider",
+    "AttachmentSource",
     "ApprovalKind",
     "ApprovalOutcome",
     "ApprovalRequest",

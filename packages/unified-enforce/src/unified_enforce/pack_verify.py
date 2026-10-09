@@ -602,7 +602,15 @@ def _check_one_approval(a: dict[str, Any], keys: dict[str, Any]) -> tuple[bool, 
         "auth_time_ms": _field(ap, "authenticated_at_ms", int),
     }
     resolved_at = _field(at, "resolved_at_ms", int)
+    # The evidence manifest the approver was shown (approval-attachments.v1
+    # §5). Absent for a request without attachments, and then the signed
+    # payload is the v2 one; present, it is part of what was signed, so a
+    # record whose digest was altered fails like any other altered field.
+    shown = a.get("attachments_digest")
+    if shown is not None and not isinstance(shown, str):
+        raise _Incomplete(f"'attachments_digest' is {type(shown).__name__}, not a string")
     signed = dict(
+        attachments_digest=shown,
         action_digest=_field(a, "action_digest", str),
         approver=wire,
         resolved_at_ms=resolved_at,

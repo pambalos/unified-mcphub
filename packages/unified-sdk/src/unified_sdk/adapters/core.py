@@ -29,6 +29,8 @@ import inspect
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from unified_enforce.attachments import AttachmentsSpec
+
 from ..client import Acting, UnifiedAI
 
 
@@ -92,13 +94,23 @@ class ToolGuard:
         )
 
     async def check_async(
-        self, name: str, args: dict[str, Any] | None = None, *, summary: str = ""
+        self,
+        name: str,
+        args: dict[str, Any] | None = None,
+        *,
+        summary: str = "",
+        attachments: AttachmentsSpec = None,
     ) -> Acting:
         """Decide, taking a DEFER to a human when approvals are configured.
 
         Async tool execution is the only place in an agent loop where waiting
         for an approval is affordable, which is why the async wrappers below
         route through here and the sync ones cannot.
+
+        `attachments` passes through to `UnifiedAI.check_async`. Wrapped tools
+        and adapters that never pass it still get the client's registered
+        providers (`UnifiedAI.attachments_for`), which is how evidence is
+        attached without touching a framework's tool signatures.
         """
         return await self._client.check_async(
             self.tool_uri(name),
@@ -107,6 +119,7 @@ class ToolGuard:
             params=self._params(args or {}),
             extra=self._extra(),
             summary=summary or f"{self._origin}: {name}",
+            attachments=attachments,
         )
 
     # --- wrapping ---

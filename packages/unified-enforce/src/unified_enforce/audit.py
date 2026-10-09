@@ -614,8 +614,16 @@ class AuditChain:
         of what the control plane signed: an export that withheld it could no
         longer have its approval signature checked, which is the point of
         exporting an approval at all.
+
+        `attachments_digest` is omitted when None rather than written as null:
+        an approval for a request without attachments then records exactly
+        the entry it did before attachments existed, and a reader that has
+        never heard of them sees nothing new.
         """
-        return self.append("approval", asdict(recorded))
+        payload = asdict(recorded)
+        if payload.get("attachments_digest", "absent") is None:
+            del payload["attachments_digest"]
+        return self.append("approval", payload)
 
     # --- verification ---
 

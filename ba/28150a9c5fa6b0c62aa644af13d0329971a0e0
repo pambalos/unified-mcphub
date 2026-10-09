@@ -1,0 +1,25 @@
+packages/unified-enforce/tests/unit/test_approval_attachments.py
+  s_0c910bc3416b64::t_02a5d2b4feb5d1 1-61,63-185,187-427,429-631
+specs/enforce/approval-attachments.v1.md
+  s_0c910bc3416b64::t_d0bb99c6b60e7b 1-2,6-391,394-395
+packages/unified-enforce/src/unified_enforce/attachments.py
+  s_0c910bc3416b64::t_7ba13a357396b6 1-499
+packages/unified-sdk/tests/unit/test_sdk_attachments.py
+  s_0c910bc3416b64::t_bdca9394ff6af6 1-144
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "development:1.5.3",
+  "base_commit_sha": "ba28150a9c5fa6b0c62aa644af13d0329971a0e0",
+  "prompts": {},
+  "sessions": {
+    "s_0c910bc3416b64": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cd1d2cc0-2f81-4b97-97ed-3ef568117658",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Bradley Justice <bradleyjusticeca@gmail.com>"
+    }
+  }
+}

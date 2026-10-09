@@ -27,6 +27,13 @@ lock with exactly one outbound path. Requiring the control plane to reach *into*
 their network would invert the whole trust arrangement, and is the thing a
 security review refuses. The sidecar owns its timeout and fails closed on it.
 
+**Attachments are uploaded, then referenced, then bound** (approval-attachments
+.v1 §8). Bytes go to their own route first, so they never sit in the approval
+JSON; the request then carries a manifest of hashes; and the resolution is
+verified against the digest of the manifest *this client* sent, never one the
+control plane reports. A control plane that showed the approver a substituted
+document cannot produce a decision this client honours.
+
 Standard library plus `cryptography`, like the rest of the package: this runs in
 every sidecar, and the decision path stays import-light.
 """
@@ -34,11 +41,12 @@ every sidecar, and the decision path stays import-light.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import math
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -50,7 +58,15 @@ from .approval import (
     SignedResolution,
     gate_forced,
 )
-from .attest import DEFAULT_SKEW_MS, Reason, VerificationKey, accept_resolution
+from .attachments import STORED, UNAVAILABLE, WITHHELD, Attachment, build_manifest
+from .evidence import payload_transport_ok
+from .attest import (
+    DEFAULT_SKEW_MS,
+    Reason,
+    VerificationKey,
+    accept_resolution,
+    attachments_digest,
+)
 
 log = logging.getLogger("unified_enforce.remote_approvals")
 
@@ -67,9 +83,37 @@ DEFAULT_DEADLINE_SECONDS = 300.0
 #: single stuck socket must not consume the whole window in one call.
 DEFAULT_HTTP_TIMEOUT = 10.0
 
+#: Largest base64 body this client will upload for one attachment. The
+#: manifest limits (10 MiB per attachment) keep every real upload far below
+#: it; this is the backstop if those limits are ever raised or bypassed, so a
+#: single request cannot become an unbounded POST.
+MAX_UPLOAD_B64_BYTES = 36 * 1024 * 1024
+
+#: Statuses on the upload route that mean "this control plane cannot take
+#: attachments at all" (no route, wrong credential) rather than "not this
+#: one". Those raise: queueing anyway would ask a person a question whose
+#: answer is certain to be refused (the resolution will name no manifest),
+#: and the deny is better delivered now than after they have read it.
+_UPLOAD_FATAL_STATUSES = frozenset({401, 403, 404, 405})
+
 
 class ApprovalTransportError(Exception):
     """The control plane could not be reached, or answered incomprehensibly."""
+
+
+class ApprovalHTTPError(ApprovalTransportError):
+    """The control plane answered with an HTTP error status.
+
+    Kept distinct so the attachment upload can tell "refused this document"
+    (a 4xx with a reason, which becomes an `unavailable` entry) from
+    "unreachable" (which fails the request closed). Everywhere else it is an
+    `ApprovalTransportError` like any other.
+    """
+
+    def __init__(self, status: int, reason: str, detail: str = "") -> None:
+        super().__init__(f"HTTP {status}: {reason}")
+        self.status = status
+        self.detail = detail
 
 
 class ApprovalTimeout(ApprovalTransportError, TimeoutError):
@@ -107,6 +151,10 @@ class UnverifiedResolution(Exception):
 class _Queued:
     approval_id: str
     already_resolved: bool
+    #: What the receipt *claims* the manifest digest is. Never used to verify
+    #: -- only compared, so a control plane that recorded a different
+    #: manifest is caught before a person is asked rather than after.
+    attachments_digest: str | None = None
 
 
 class RemoteApprovals:
@@ -202,7 +250,43 @@ class RemoteApprovals:
                 "no verified decision key: cannot verify any resolution, so nothing is queued "
                 "(the fleet's key set has not verified yet)"
             )
-        queued = await asyncio.to_thread(self._queue, request)
+        manifest: list[dict[str, Any]] | None = None
+        expected: str | None = None
+        if request.attachments:
+            manifest = build_manifest(request.attachments, _now_ms())
+            withheld = self._withheld(request)
+            if withheld is None and not payload_transport_ok(self._base):
+                # Content goes over https, or plain http to this machine
+                # (payload-evidence.v1's rule). The request proof protects the
+                # integrity of what is sent, not its confidentiality.
+                withheld = "insecure_transport"
+            if withheld is not None:
+                # No content leaves. The manifest still does: the approver
+                # sees that the evidence exists, what it is called and its
+                # hash -- "withheld" and "there was nothing" must look
+                # different to a reviewer.
+                manifest = [_withhold(entry, withheld) for entry in manifest]
+            else:
+                manifest = await asyncio.to_thread(self._upload_all, manifest, request.attachments)
+            # Computed here, from what this client is about to send, and
+            # never read back from the control plane: the digest is what the
+            # resolution has to match, so taking it from the other side would
+            # let that side choose what it is checked against.
+            expected = attachments_digest(manifest)
+
+        queued = await asyncio.to_thread(self._queue, request, manifest)
+        claimed = getattr(queued, "attachments_digest", None)
+        if claimed is not None and claimed != expected:
+            log.error(
+                "control plane recorded evidence %s… for %s; this client sent %s…",
+                str(claimed)[:12],
+                digest[:12],
+                str(expected)[:12],
+            )
+            raise UnverifiedResolution(
+                Reason.ATTACHMENTS_MISMATCH,
+                "the control plane recorded a different evidence manifest than was sent",
+            )
 
         if queued.already_resolved:
             # The control plane is idempotent on (fleet, digest), so a retry
@@ -224,10 +308,11 @@ class RemoteApprovals:
                 action_digest=digest,
                 now_ms=_now_ms(),
                 skew_ms=self._skew_ms,
+                attachments_digest=expected,
             )
 
             if verdict.ok:
-                return _response_from(response)
+                return replace(_response_from(response), attachments_digest=expected)
 
             if verdict.reason is not Reason.NOT_RESOLVED:
                 # Anything other than "nobody has answered yet" is a decision
@@ -252,7 +337,82 @@ class RemoteApprovals:
 
     # --- HTTP -------------------------------------------------------------------
 
-    def _queue(self, request: ApprovalRequest) -> _Queued:
+    def _withheld(self, request: ApprovalRequest) -> str | None:
+        """Why no content may leave for this request, or None (see `_queue`).
+
+        One answer for params and attachments alike: a request whose arguments
+        are withheld must not ship the invoice those arguments describe.
+        """
+        if request.decision.audit_level == "minimal":
+            return "audit_level_minimal"
+        if not self._share_params:
+            return "payloads_off"
+        if gate_forced(request.decision):
+            return "distribution_state"
+        return None
+
+    def _upload_all(
+        self, manifest: list[dict[str, Any]], attachments: Sequence[Attachment]
+    ) -> list[dict[str, Any]]:
+        """Upload every `stored` entry's bytes; return the manifest as it now stands.
+
+        `manifest` is `build_manifest(attachments)`, one entry per attachment
+        in order. Each sha256 is uploaded once per request (the route is
+        content-addressed, so a duplicate would be a no-op anyway, and two
+        identical photos should not cost two uploads). An entry the control
+        plane would not take becomes `unavailable` with its reason; it stays
+        in the manifest, because the approver is owed the knowledge that it
+        was meant to be there.
+
+        Raises on transport failure and on a response that does not describe
+        the bytes sent: `Approvals` denies, which is the right answer when
+        this client cannot tell what the approver will be shown.
+        """
+        out: list[dict[str, Any]] = []
+        outcome: dict[str, tuple[str, str]] = {}
+        for entry, attachment in zip(manifest, attachments, strict=True):
+            if entry["status"] != STORED:
+                out.append(entry)
+                continue
+            sha = entry["sha256"]
+            if sha not in outcome:
+                outcome[sha] = self._upload_one(entry, attachment)
+            status, detail = outcome[sha]
+            out.append(entry if status == STORED else {**entry, "status": status, "detail": detail})
+        return out
+
+    def _upload_one(self, entry: Mapping[str, Any], attachment: Attachment) -> tuple[str, str]:
+        """POST one attachment's bytes: `(status, detail)` for its manifest entry."""
+        encoded = base64.b64encode(attachment.data).decode("ascii")
+        if len(encoded) > MAX_UPLOAD_B64_BYTES:
+            return UNAVAILABLE, "too_large"
+        try:
+            receipt = self._post(
+                "/api/v1/approvals/attachments",
+                {"sha256": entry["sha256"], "media_type": entry["media_type"], "data_b64": encoded},
+            )
+        except ApprovalHTTPError as exc:
+            if exc.status in _UPLOAD_FATAL_STATUSES or not 400 <= exc.status < 500:
+                raise
+            # Refused this document (too large, type, validation): the
+            # request goes ahead without its content, and says why.
+            return UNAVAILABLE, f"refused: {exc.detail or exc.status}"[:200]
+        status = receipt.get("status")
+        if status == "not_accepted":
+            # The fleet does not take content (hosted without opt-in). The
+            # approver sees the hash and label, without the document.
+            return UNAVAILABLE, "not_accepted"
+        if status != STORED:
+            raise ApprovalTransportError(f"attachment upload returned status {status!r}")
+        if receipt.get("sha256") != entry["sha256"] or receipt.get("size") != entry["size"]:
+            # Stored *something*, and not what was sent. The approver would
+            # be shown a document this client never attached.
+            raise ApprovalTransportError("attachment upload receipt does not match the bytes sent")
+        return STORED, ""
+
+    def _queue(
+        self, request: ApprovalRequest, attachments: list[dict[str, Any]] | None = None
+    ) -> _Queued:
         """Post the DEFER, carrying only what an approver needs to see.
 
         **What leaves, and why it can.** The control plane binds an approval
@@ -279,6 +439,11 @@ class RemoteApprovals:
           principal, the rule and the reason -- and is told the arguments
           were withheld, and why.
 
+        `attachments` is the evidence manifest (already uploaded, or marked
+        withheld/unavailable). The key is omitted entirely when the request has
+        none, so a control plane that predates attachments sees exactly the
+        body it always did.
+
         `deadline_seconds` tells the control plane how long this client will
         wait, so it can expire the pending item rather than leave a question
         nobody is waiting on; `policy_digest` names the policy that deferred.
@@ -288,13 +453,7 @@ class RemoteApprovals:
         context = action.get("context")
         if isinstance(context, dict):
             context["extra"] = {}
-        withheld = None
-        if request.decision.audit_level == "minimal":
-            withheld = "audit_level_minimal"
-        elif not self._share_params:
-            withheld = "payloads_off"
-        elif gate_forced(request.decision):
-            withheld = "distribution_state"
+        withheld = self._withheld(request)
         summary = request.summary
         if withheld is not None:
             action["params"] = {}
@@ -319,6 +478,8 @@ class RemoteApprovals:
         }
         if withheld is not None:
             body["params_withheld"] = withheld
+        if attachments:
+            body["attachments"] = attachments
         # Note what is absent: `fleet_id`. It is derived from the credential and
         # rejected in the body, so a sidecar cannot queue into another tenant.
         payload = self._post("/api/v1/approvals", body)
@@ -326,7 +487,12 @@ class RemoteApprovals:
         approval_id = payload.get("id")
         if not isinstance(approval_id, str) or not approval_id:
             raise ApprovalTransportError("control plane returned no approval id")
-        return _Queued(approval_id=approval_id, already_resolved=payload.get("status") != "pending")
+        claimed = payload.get("attachments_digest")
+        return _Queued(
+            approval_id=approval_id,
+            already_resolved=payload.get("status") != "pending",
+            attachments_digest=claimed if isinstance(claimed, str) else None,
+        )
 
     def _poll_once(self, approval_id: str) -> dict[str, Any]:
         return self._get(f"/api/v1/approvals/{approval_id}/decision")
@@ -345,7 +511,7 @@ class RemoteApprovals:
             with urllib.request.urlopen(req, timeout=self._http_timeout) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
-            raise ApprovalTransportError(f"HTTP {exc.code}: {exc.reason}") from exc
+            raise ApprovalHTTPError(exc.code, str(exc.reason), _error_detail(exc)) from exc
         except urllib.error.URLError as exc:
             raise ApprovalTransportError(f"cannot reach the control plane: {exc.reason}") from exc
 
@@ -378,6 +544,28 @@ class RemoteApprovals:
                 self._base + path, headers=self._proof("GET", path, None), method="GET"
             )
         )
+
+
+def _withhold(entry: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    """A `stored` entry whose content may not leave: hash and label kept."""
+    if entry["status"] != STORED:
+        return dict(entry)
+    return {**entry, "status": WITHHELD, "detail": reason}
+
+
+def _error_detail(exc: Any) -> str:
+    """The `detail` of an error response, as short text. Best effort: an error
+    body is the server's to shape, and failing to read it must not mask the
+    status that was already decided on."""
+    try:
+        body = json.loads(exc.read() or b"{}")
+    except Exception:  # noqa: BLE001
+        return ""
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if detail is None:
+        return ""
+    text = detail if isinstance(detail, str) else json.dumps(detail, separators=(",", ":"))
+    return text[:180]
 
 
 def _now_ms() -> int:

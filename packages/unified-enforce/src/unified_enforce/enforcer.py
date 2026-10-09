@@ -15,6 +15,7 @@ which is a different kind of operation entirely — hence the separate
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from .action import Action
@@ -25,6 +26,13 @@ from .approval import (
     RecordedApproval,
     gate_forced,
     no_looser_than_defer,
+)
+from .attachments import (
+    DEFAULT_PROVIDER_TIMEOUT,
+    Attachment,
+    AttachmentProvider,
+    AttachmentsSpec,
+    resolve_attachments,
 )
 from .audit import AuditChain
 from .counters import Counters
@@ -249,7 +257,14 @@ class Enforcer:
         return decision
 
     async def enforce_with_approval(
-        self, action: Action, *, summary: str = "", floored: bool | None = None
+        self,
+        action: Action,
+        *,
+        summary: str = "",
+        floored: bool | None = None,
+        attachments: AttachmentsSpec = None,
+        attachment_providers: Sequence[AttachmentProvider] = (),
+        attachments_timeout: float = DEFAULT_PROVIDER_TIMEOUT,
     ) -> ApprovalOutcome:
         """Decide, and if the verdict is DEFER, take it to a human.
 
@@ -262,16 +277,42 @@ class Enforcer:
         being handed a synthesized deny that hides a missing configuration.
         Surfaces that cannot wait — the gateway — must still treat it as a
         refusal, which is exactly what they do today.
+
+        `attachments` (a sequence, or a callable over `action`) and the
+        `attachment_providers` matching `action.tool` are evidence for the
+        approver (approval-attachments.v1 §3). They are resolved **only** when
+        the verdict is DEFER and a person is actually going to be asked --
+        not for ALLOW or DENY, not when approvals are off or have no channel,
+        not when a session allow answers it. Loading three PDFs for an action
+        policy allows outright is wasted I/O, and content read for a request
+        nobody reviews is a privacy cost with no benefit. A source that fails
+        becomes an `unavailable` entry and the request is still asked
+        (`resolve_attachments` never raises): missing evidence is a reason
+        for the approver to deny, not for the engine to deny for them.
         """
         decision = self.enforce(action)
         if decision.verdict is not Verdict.DEFER or self.approvals is None:
             return ApprovalOutcome(decision=decision)
+
+        resolved: tuple[Attachment, ...] = ()
+        if attachments is not None or attachment_providers:
+            # Looked up rather than called: an approvals object that predates
+            # `will_ask` is asked unconditionally, so it gets the attachments.
+            will_ask = getattr(self.approvals, "will_ask", None)
+            if will_ask is None or will_ask(action, decision):
+                resolved = await resolve_attachments(
+                    attachments,
+                    action,
+                    providers=attachment_providers,
+                    timeout=attachments_timeout,
+                )
 
         request = ApprovalRequest(
             action=action,
             decision=decision,
             summary=summary,
             floored=decision.source == "floor" if floored is None else floored,
+            attachments=resolved,
         )
         outcome = await self.approvals.resolve(request)
         self.record_approval(request, outcome)

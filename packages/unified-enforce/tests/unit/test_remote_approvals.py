@@ -413,8 +413,8 @@ class FakeControlPlane:
         self.queued: list[dict[str, Any]] = []
         self.polls = 0
 
-    def queue(self, request: ApprovalRequest) -> Any:
-        self.queued.append({"digest": request.digest})
+    def queue(self, request: ApprovalRequest, attachments: Any = None) -> Any:
+        self.queued.append({"digest": request.digest, "attachments": attachments})
         return type("Q", (), {"approval_id": self.approval_id, "already_resolved": False})()
 
     def poll(self, _approval_id: str) -> dict[str, Any]:

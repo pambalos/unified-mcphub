@@ -99,6 +99,12 @@ authz:
     # Built-in liveness check (harmless; otherwise default-denied):
     - tool: "mcp://built-in/ping"
       effect: allow
+    # Approval evidence (approval-attachments.v1 §4.2): stage_attachment,
+    # list_staged, discard_staged, attach_to_approval. They change no state
+    # outside the hub; staged evidence is only ever shown to an approver of the
+    # same agent's deferred call. Remove to stop agents attaching evidence.
+    - tool: "mcp://unified/*"
+      effect: allow
     # Read-only tools whose names don't start with those verbs, named explicitly:
     - tool: "mcp://filesystem/file_info"
       effect: allow

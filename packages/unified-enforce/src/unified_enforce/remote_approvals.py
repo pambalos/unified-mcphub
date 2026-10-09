@@ -30,9 +30,17 @@ security review refuses. The sidecar owns its timeout and fails closed on it.
 **Attachments are uploaded, then referenced, then bound** (approval-attachments
 .v1 §8). Bytes go to their own route first, so they never sit in the approval
 JSON; the request then carries a manifest of hashes; and the resolution is
-verified against the digest of the manifest *this client* sent, never one the
-control plane reports. A control plane that showed the approver a substituted
-document cannot produce a decision this client honours.
+verified against a manifest that must contain, unaltered, every entry *this
+client* attached. A control plane that showed the approver a substituted
+document -- or dropped one -- cannot produce a decision this client honours.
+
+**Late evidence** (§4.3) is the one way the manifest grows after queueing:
+`attach` adds entries to a pending request through this same credential. The
+control plane accepts them only from the credential that queued the request,
+so entries beyond this client's own are this deployment's late attachments
+(another process or session of the same principal). The resolution's digest
+then covers the manifest as the control plane returns it -- checked to contain
+everything this client attached, and its digest recomputed here, never read.
 
 Standard library plus `cryptography`, like the rest of the package: this runs in
 every sidecar, and the decision path stays import-light.
@@ -45,8 +53,9 @@ import base64
 import json
 import logging
 import math
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -61,6 +70,7 @@ from .approval import (
 from .attachments import STORED, UNAVAILABLE, WITHHELD, Attachment, build_manifest
 from .evidence import payload_transport_ok
 from .attest import (
+    ATTACHMENT_FIELDS,
     DEFAULT_SKEW_MS,
     Reason,
     VerificationKey,
@@ -157,6 +167,22 @@ class _Queued:
     attachments_digest: str | None = None
 
 
+@dataclass
+class _Waiting:
+    """A request `ask` is polling for, and the evidence this client attached to it."""
+
+    request: ApprovalRequest
+    #: Every manifest entry this client attached, initially and late. The
+    #: resolution must cover all of them, unaltered.
+    own: list[dict[str, Any]] = field(default_factory=list)
+
+
+#: `on_queued(approval_id, request)`: told the control plane's id for a
+#: request as soon as it is queued, so a surface that does not block can hand
+#: the agent an `approval_ref` for late attachment (§4.3).
+OnQueued = Callable[[str, ApprovalRequest], None]
+
+
 class RemoteApprovals:
     """An `ApprovalChannel` backed by a control plane's approval queue.
 
@@ -186,9 +212,16 @@ class RemoteApprovals:
         skew_ms: int = DEFAULT_SKEW_MS,
         channel: Any = None,
         share_params: bool = True,
+        on_queued: OnQueued | None = None,
     ) -> None:
         """`share_params=False` never sends an action's arguments to the
-        approver (see `_queue`); `minimal` rules withhold them regardless."""
+        approver (see `_queue`); `minimal` rules withhold them regardless.
+
+        `on_queued(approval_id, request)` is called once per request, right
+        after it is queued and before the first poll. It is how an
+        application learns the `approval_ref` to return with a 202 or to pass
+        to `attach`. It is a notification: an exception from it is logged and
+        the request still waits for its answer."""
         if keys is None and decision_key is None:
             raise ValueError(
                 "RemoteApprovals needs a key source: pass `keys` (preferred, "
@@ -209,6 +242,11 @@ class RemoteApprovals:
         self._http_timeout = http_timeout
         self._skew_ms = skew_ms
         self._share_params = share_params
+        self.on_queued = on_queued
+        #: approval id -> the asks currently polling it. A list, because the
+        #: queue is idempotent on the action digest: two identical calls
+        #: waiting at once share one approval.
+        self._waiting: dict[str, list[_Waiting]] = {}
 
         if keys is not None:
             self._keys = keys
@@ -269,8 +307,10 @@ class RemoteApprovals:
             else:
                 manifest = await asyncio.to_thread(self._upload_all, manifest, request.attachments)
             # Computed here, from what this client is about to send, and
-            # never read back from the control plane: the digest is what the
-            # resolution has to match, so taking it from the other side would
+            # never read back from the control plane: the receipt is checked
+            # against it below, and the resolution later against a manifest
+            # that must still contain every one of these entries
+            # (`_expected_digest`) -- taking either from the other side would
             # let that side choose what it is checked against.
             expected = attachments_digest(manifest)
 
@@ -296,11 +336,32 @@ class RemoteApprovals:
             # two different ways.
             log.debug("approval %s was already queued for %s", queued.approval_id, digest[:12])
 
+        waiting = _Waiting(request, list(manifest or ()))
+        self._waiting.setdefault(queued.approval_id, []).append(waiting)
+        try:
+            self._notify_queued(queued.approval_id, request)
+            return await self._await_resolution(queued.approval_id, digest, waiting)
+        finally:
+            asks = self._waiting.get(queued.approval_id, [])
+            if waiting in asks:
+                asks.remove(waiting)
+            if not asks:
+                self._waiting.pop(queued.approval_id, None)
+
+    async def _await_resolution(
+        self, approval_id: str, digest: str, waiting: _Waiting
+    ) -> ApprovalResponse:
         loop = asyncio.get_running_loop()
         expires = loop.time() + self._deadline
 
         while True:
-            response = await asyncio.to_thread(self._poll_once, queued.approval_id)
+            response = await asyncio.to_thread(self._poll_once, approval_id)
+            expected = None
+            if response.get("status") == "resolved":
+                # Read `own` at resolution time, not at queue time: an
+                # `attach` made while this was waiting is evidence this
+                # client added, and the answer must cover it too.
+                expected = _expected_digest(response, waiting.own, digest)
             verdict = accept_resolution(
                 response,
                 self._keys(),
@@ -334,6 +395,80 @@ class RemoteApprovals:
             # with whatever the agent is doing, and holding it for five minutes
             # would stall every other decision in the process.
             await asyncio.sleep(min(self._poll, max(0.0, expires - loop.time())))
+
+    def _notify_queued(self, approval_id: str, request: ApprovalRequest) -> None:
+        if self.on_queued is None:
+            return
+        try:
+            self.on_queued(approval_id, request)
+        except Exception:  # noqa: BLE001 - a notification is never a decision
+            log.exception("on_queued raised for approval %s; still waiting for it", approval_id)
+
+    # --- late attachment (§4.3) -------------------------------------------------
+
+    def waiting_request(self, approval_id: str) -> ApprovalRequest | None:
+        """The request an `ask` on this instance is waiting on under
+        `approval_id`, or None. Lets an agent-facing surface refuse a late
+        attachment to a request that is not the caller's own."""
+        asks = self._waiting.get(approval_id)
+        return asks[0].request if asks else None
+
+    async def attach(self, approval_id: str, attachments: Sequence[Attachment]) -> dict[str, Any]:
+        """Add evidence to a request that is still pending (§4.3).
+
+        Built, limited and uploaded exactly as `ask` does for the initial
+        evidence, then posted to the request. The control plane accepts it
+        only from the credential that queued the request, and only while
+        pending (404 / 409 otherwise, raised as `ApprovalHTTPError`).
+
+        Content is withheld by the same rules as the request's params. When
+        this instance is not the one waiting on the request it cannot know
+        the rule's `audit_level` or whether distribution state forced the
+        DEFER, so content is withheld (`request_not_local`) rather than
+        guessed: a `minimal` rule's evidence leaving this machine because a
+        different process attached it is the export the rule exists to stop.
+        The manifest still goes, so the approver sees the evidence exists.
+
+        When an `ask` on this instance is waiting on `approval_id`, the new
+        entries become part of what its resolution must cover. Returns the
+        control plane's `{"attachments": [...], "attachments_digest": ...}`.
+        """
+        if not attachments:
+            raise ValueError("attach needs at least one attachment")
+        manifest = build_manifest(list(attachments), _now_ms())
+        asks = self._waiting.get(approval_id, [])
+        if asks:
+            withheld = self._withheld(asks[0].request)
+        else:
+            withheld = None if self._share_params else "payloads_off"
+            withheld = withheld or "request_not_local"
+        if withheld is None and not payload_transport_ok(self._base):
+            withheld = "insecure_transport"
+        if withheld is not None:
+            manifest = [_withhold(entry, withheld) for entry in manifest]
+        else:
+            manifest = await asyncio.to_thread(self._upload_all, manifest, list(attachments))
+
+        result = await asyncio.to_thread(
+            self._post, f"/api/v1/approvals/{approval_id}/attachments", {"attachments": manifest}
+        )
+        returned = result.get("attachments")
+        if not isinstance(returned, list) or _missing(manifest, returned):
+            raise UnverifiedResolution(
+                Reason.ATTACHMENTS_MISMATCH,
+                "the control plane did not record the late attachment as sent",
+            )
+        claimed = result.get("attachments_digest")
+        if claimed is not None and claimed != attachments_digest(returned):
+            raise UnverifiedResolution(
+                Reason.ATTACHMENTS_MISMATCH,
+                "the control plane's digest does not describe the manifest it returned",
+            )
+        # Only after the control plane confirmed them: an entry recorded here
+        # but not there would make every resolution of this request refuse.
+        for waiting in self._waiting.get(approval_id, []):
+            waiting.own.extend(manifest)
+        return result
 
     # --- HTTP -------------------------------------------------------------------
 
@@ -544,6 +679,54 @@ class RemoteApprovals:
                 self._base + path, headers=self._proof("GET", path, None), method="GET"
             )
         )
+
+
+def _normalised(entry: Mapping[str, Any]) -> str:
+    """An entry as the digest sees it, as a comparable key."""
+    return json.dumps({f: entry.get(f) for f in ATTACHMENT_FIELDS}, sort_keys=True)
+
+
+def _missing(own: Sequence[Mapping[str, Any]], returned: Sequence[Any]) -> bool:
+    """Whether any of `own` is absent from `returned` (as a multiset: two
+    identical entries this client attached need two in the manifest)."""
+    if not all(isinstance(e, Mapping) for e in returned):
+        return True
+    have = Counter(_normalised(e) for e in returned)
+    need = Counter(_normalised(e) for e in own)
+    return any(have[k] < n for k, n in need.items())
+
+
+def _expected_digest(
+    response: Mapping[str, Any], own: Sequence[Mapping[str, Any]], digest: str
+) -> str | None:
+    """The manifest digest a resolved `response` must be signed over.
+
+    Every entry this client attached must be in the returned manifest,
+    unaltered; anything more is a late attachment the control plane accepted
+    from this same credential, and is part of what the approver saw. The
+    digest is then computed *here* over the returned manifest and handed to
+    `accept_resolution`, which checks the signature covers exactly that.
+
+    Raises `UnverifiedResolution` when the manifest is absent (and this
+    client attached something), malformed, or missing or altering one of
+    this client's entries: the approver was not shown what was attached.
+    """
+    returned = response.get("attachments")
+    if returned is None:
+        if own:
+            log.error("resolution for %s carries no manifest; evidence was attached", digest[:12])
+            raise UnverifiedResolution(
+                Reason.ATTACHMENTS_MISMATCH,
+                "the resolution names no evidence manifest, and evidence was attached",
+            )
+        return None
+    if not isinstance(returned, list) or _missing(own, returned):
+        log.error("resolution for %s omits or alters evidence this client attached", digest[:12])
+        raise UnverifiedResolution(
+            Reason.ATTACHMENTS_MISMATCH,
+            "the resolution's manifest omits or alters evidence this client attached",
+        )
+    return attachments_digest(returned) if returned else None
 
 
 def _withhold(entry: Mapping[str, Any], reason: str) -> dict[str, Any]:

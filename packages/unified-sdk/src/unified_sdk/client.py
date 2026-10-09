@@ -47,7 +47,8 @@ from unified_enforce import (
     Telemetry,
     Verdict,
 )
-from unified_enforce.attachments import AttachmentsSpec
+from unified_enforce.attachments import Attachment, AttachmentsSpec
+from unified_enforce.staging import StagedAttachments
 
 from .errors import ApprovalRequired, Denied
 
@@ -315,6 +316,45 @@ class UnifiedAI:
             return fn
 
         return register
+
+    @property
+    def staging(self) -> StagedAttachments:
+        """The enforcer's staged-evidence store (approval-attachments.v1 §4.2),
+        shared with `unified_sdk.adapters.mcp.register_attachment_tools`."""
+        return self._enforcer.staging
+
+    async def attach_to_approval(
+        self, approval_ref: str, *attachments: Attachment
+    ) -> dict[str, Any]:
+        """Add evidence to an approval request that is still pending (§4.3).
+
+            await ua.attach_to_approval(ref, Attachment.file(path, label="Revised invoice"))
+
+        `approval_ref` is the control plane's id for the request. An
+        application learns it by constructing its `RemoteApprovals` with
+        `on_queued=lambda approval_id, request: ...` -- called as soon as the
+        request is queued, which is what a surface that answers 202 returns
+        to its client. The attachments are `application`-sourced, built,
+        limited and uploaded exactly as `attachments=` ones are; the approver
+        sees them marked as added late.
+
+        Needs console approvals (`RemoteApprovals` as the approvals channel):
+        a local channel has no pending request to add to, and saying so is
+        better than accepting evidence nobody will see. Returns the control
+        plane's manifest and digest. Raises the transport's error for a
+        request that is no longer pending (409) or not this credential's (404).
+        """
+        approvals = self._enforcer.approvals
+        channel = getattr(approvals, "channel", None)
+        attach = getattr(channel, "attach", None)
+        if attach is None:
+            raise RuntimeError(
+                "attach_to_approval needs console approvals: configure "
+                "Approvals(RemoteApprovals(...)) so requests are queued at a control plane"
+            )
+        if not attachments:
+            raise ValueError("attach_to_approval needs at least one Attachment")
+        return await attach(approval_ref, attachments)
 
     @contextmanager
     def acting(

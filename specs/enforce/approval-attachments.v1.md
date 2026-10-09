@@ -311,6 +311,9 @@ POST /api/v1/approvals                         (existing; one new field)
   -> receipt adds {"attachments_digest", "limits": {...}}
 
 POST /api/v1/approvals/{id}/attachments        (§4.3; the queuing credential only; pending only)
+     {"attachments": [manifest entries]}          (stored entries uploaded first, as above)
+  -> 200 {"attachments": [full manifest], "attachments_digest"}; 404 other credential; 409 not pending
+GET  /api/v1/approvals/{id}/decision           (resolved with attachments: + "attachments": [full manifest])
 GET  /api/v1/approvals/{id}                    (detail gains "attachments" manifest + per-viewer "viewed")
 GET  /api/v1/approvals/{id}/attachments/{sha256}   (operator; read_attachments; admin event; 404 across fleets/entities)
 POST /api/v1/approvals/{id}/resolve            (body gains "attachments_digest", §5)
@@ -329,7 +332,7 @@ Server-side checks:
 1. upload each attachment, skipping any the control plane already holds by hash;
 2. queue with the manifest;
 3. poll as today;
-4. verify the resolution against the request's `attachments_digest`, including any late attachments this client added.
+4. verify the resolution: every entry this client attached (initially, or late through `attach`) must be in the returned manifest unaltered, or the answer is refused (`ATTACHMENTS_MISMATCH`); the digest is then recomputed over the returned manifest -- which may include late entries another process of the same credential added -- and must equal the signed one.
 
 ## §9 Console
 

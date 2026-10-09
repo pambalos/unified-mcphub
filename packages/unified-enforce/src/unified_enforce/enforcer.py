@@ -27,6 +27,7 @@ from .approval import (
     gate_forced,
     no_looser_than_defer,
 )
+from .staging import StagedAttachments
 from .attachments import (
     DEFAULT_PROVIDER_TIMEOUT,
     Attachment,
@@ -82,6 +83,21 @@ class Enforcer:
         #: making it optional would mean a deployment can load a policy with a
         #: budget in it and silently not enforce the budget.
         self.counters = counters or Counters()
+        self._staging: StagedAttachments | None = None
+
+    @property
+    def staging(self) -> StagedAttachments:
+        """Evidence staged by agents for their next deferred call (staging.py).
+
+        One per enforcer, created on first use, so every surface built on
+        this enforcer -- the SDK's MCP attachment tools, its deferred checks
+        -- stages into and takes from the same place. Never consulted by
+        `enforce` itself: staging is about what a person is shown, not about
+        what policy decides.
+        """
+        if self._staging is None:
+            self._staging = StagedAttachments()
+        return self._staging
 
     def recover_counters(self) -> int:
         """Rebuild cumulative totals from the audit chain. Call once, at start-up.

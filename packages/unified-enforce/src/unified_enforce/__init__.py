@@ -58,6 +58,7 @@ from .policy import (
 )
 from .replay import Divergence, ReplayReport, replay
 from .signing import SignedAction, Signer, verify_bytes
+from .staging import RecordedResults, StagedAttachments, StagedItem, StagingError
 from .telemetry import Telemetry
 
 __all__ = [
@@ -71,6 +72,10 @@ __all__ = [
     "Attachment",
     "AttachmentProvider",
     "AttachmentSource",
+    "RecordedResults",
+    "StagedAttachments",
+    "StagedItem",
+    "StagingError",
     "ApprovalKind",
     "ApprovalOutcome",
     "ApprovalRequest",

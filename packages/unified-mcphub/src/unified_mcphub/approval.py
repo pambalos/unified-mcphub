@@ -50,6 +50,7 @@ from unified_enforce import (
     Principal,
 )
 from unified_enforce.approval import gate_forced
+from unified_enforce.attachments import Attachment
 from unified_enforce.policy import Decision as EngineDecision
 from unified_enforce.policy import Verdict
 
@@ -217,6 +218,22 @@ class TerminalChannel:
 
         return ChannelDecision(kind, None, "terminal")
 
+    def show_attachments(self, attachments: tuple[Attachment, ...]) -> None:
+        """List the evidence staged for this prompt (approval-attachments.v1 §10).
+
+        Label, type, size and source only -- never the content, and never as
+        part of the prompt line itself: an attachment is the agent's claim,
+        and a terminal is a development surface, which the line says.
+        """
+        if not attachments:
+            return
+        print(f"\n[approval] {len(attachments)} attachment(s), listed at a development terminal:")
+        for a in attachments:
+            if a.unavailable is not None:
+                print(f"  - {a.label!r} (unavailable: {a.unavailable}, {a.source.value})")
+            else:
+                print(f"  - {a.label!r} ({a.media_type}, {a.size} bytes, {a.source.value})")
+
     @staticmethod
     def _echo_rule(tool_uri: str, args_filter: dict, floored: bool, broad: bool = False) -> None:
         print(f"  -> will persist: allow {tool_uri} where {_describe(args_filter)}", flush=True)
@@ -259,6 +276,12 @@ class _EngineChannel:
     async def ask(self, request: ApprovalRequest):
         from unified_enforce import ApprovalResponse
 
+        # Hub channels predate attachments; one that can show them says so
+        # with `show_attachments`, and the rest are unaffected (an approver
+        # on them decides without the evidence, as before).
+        show = getattr(self.inner, "show_attachments", None)
+        if show is not None and request.attachments:
+            show(request.attachments)
         decision = await self.inner.ask(
             request.action.tool,
             request.principal.removeprefix("agent:"),
@@ -338,6 +361,17 @@ class Approval:
         """Whether decisions come from the fleet's control plane."""
         return self._console
 
+    def will_ask(self, action: Action, deferral: EngineDecision | None = None) -> bool:
+        """Whether a person will actually be asked (`Approvals.will_ask`).
+
+        The hub consumes staged evidence only then: evidence staged for a
+        call a session allow answers should stay staged for one that is
+        actually reviewed, not be spent on a prompt nobody saw.
+        """
+        if deferral is None:
+            deferral = EngineDecision(verdict=Verdict.DEFER, rule_id=None, source="prompt")
+        return self._approvals.will_ask(action, deferral)
+
     async def resolve(
         self,
         tool_uri: str,
@@ -348,6 +382,7 @@ class Approval:
         floored: bool = False,
         action: Action | None = None,
         deferral: EngineDecision | None = None,
+        attachments: tuple[Attachment, ...] = (),
     ) -> PromptOutcome:
         """`action` is the canonical Action the hub already built for this call;
         it is reconstructed here only for callers that do not have one (tests,
@@ -358,7 +393,11 @@ class Approval:
         asked": the rule id (the readable hub pattern) and whether it was a
         floor — and the resolved decision keeps its rule id and policy digest.
         Without it the request names no rule at all, which is what every
-        approval looked like from the control plane before it was passed."""
+        approval looked like from the control plane before it was passed.
+
+        `attachments` is the evidence staged for this call
+        (approval-attachments.v1 §4.2). It travels in the request: the console
+        channel uploads it and binds the answer to it; the terminal lists it."""
         args = args or {}
         if action is None:
             action = Action.build(
@@ -376,6 +415,7 @@ class Approval:
                 decision=deferral,
                 summary=summary,
                 floored=floored,
+                attachments=tuple(attachments),
             )
         )
         persistent = outcome.persistent

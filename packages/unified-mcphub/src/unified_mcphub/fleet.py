@@ -171,6 +171,10 @@ class ConsoleApprovals:
         self._keys = keys
         self._factory = factory
         self._remote: Any = None
+        #: `(approval_id, request) -> None`, told each request's control-plane
+        #: id as it is queued (`RemoteApprovals.on_queued`). The hub sets it to
+        #: put an `approval_ref` in the result of a call that was deferred.
+        self.on_queued: Any = None
         #: Why console approvals cannot run at all, when they cannot. Reported
         #: by `ask` (a deny) and by `FleetLink.status()`.
         self.disabled: str | None = None
@@ -207,7 +211,13 @@ class ConsoleApprovals:
             # rule withholds them in any mode (RemoteApprovals._queue).
             share_params=self._cfg.payloads != "off",
             channel=channel,
+            on_queued=self._queued,
         )
+
+    def _queued(self, approval_id: str, request: Any) -> None:
+        # Read at call time, so a hook set after `bind` still hears.
+        if self.on_queued is not None:
+            self.on_queued(approval_id, request)
 
     @property
     def bound(self) -> bool:
@@ -223,6 +233,19 @@ class ConsoleApprovals:
                 "control plane credential not yet bound; console approvals unavailable"
             )
         return await self._remote.ask(request)
+
+    # --- late attachment (approval-attachments.v1 §4.3) ----------------------
+
+    def waiting_request(self, approval_id: str) -> Any:
+        """The request this hub is waiting on under `approval_id`, or None."""
+        return self._remote.waiting_request(approval_id) if self._remote is not None else None
+
+    async def attach(self, approval_id: str, attachments: Any) -> Any:
+        if self._remote is None:
+            raise ApprovalTransportError(
+                "control plane credential not yet bound; console approvals unavailable"
+            )
+        return await self._remote.attach(approval_id, attachments)
 
 
 class FleetLink:

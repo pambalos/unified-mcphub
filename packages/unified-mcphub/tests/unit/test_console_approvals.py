@@ -237,6 +237,9 @@ def test_bind_builds_the_engine_client_with_the_fleets_keys_and_timeout():
         "deadline_seconds": 42,
         "share_params": True,
         "channel": None,
+        # The approval id reaches the hub through the shell, so a hook set
+        # after `bind` still hears it (approval-attachments.v1 §4.3).
+        "on_queued": channel._queued,  # noqa: SLF001
     }
 
 

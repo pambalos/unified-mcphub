@@ -373,12 +373,17 @@ async def test_a_provider_error_still_asks_the_human():
 
 class FakeHTTP:
     """Stands in for `_post` and `_poll_once`: records what was sent, and
-    answers the poll with a resolution signed over the manifest that was
-    queued -- what an honest control plane does."""
+    answers the poll with a resolution signed over the manifest as it now
+    stands -- the queued entries plus any late ones, returned beside the
+    digest (contract B) -- which is what an honest control plane does.
 
-    def __init__(self, s, *, upload=None, sign_over=None) -> None:
+    `returned` rewrites the manifest the poll returns (a dishonest plane);
+    `sign_over` overrides the digest it signs."""
+
+    def __init__(self, s, *, upload=None, sign_over=None, returned=None) -> None:
         self.s = s
         self.posts: list[tuple[str, dict[str, Any]]] = []
+        self.late: list[dict[str, Any]] = []
         self.upload = upload or (
             lambda body: {
                 "sha256": body["sha256"],
@@ -388,6 +393,7 @@ class FakeHTTP:
             }
         )
         self.sign_over = sign_over  # override what the "control plane" signs
+        self.returned = returned
 
     def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         self.posts.append((path, body))
@@ -396,6 +402,12 @@ class FakeHTTP:
             if isinstance(result, Exception):
                 raise result
             return result
+        if path.endswith("/attachments"):
+            self.late.extend(body["attachments"])
+            return {
+                "attachments": self.manifest,
+                "attachments_digest": attachments_digest(self.manifest),
+            }
         return {"id": "01APPROVAL", "status": "pending"}
 
     @property
@@ -404,12 +416,20 @@ class FakeHTTP:
         return body
 
     @property
+    def manifest(self) -> list[dict[str, Any]]:
+        bodies = [b for p, b in self.posts if p == "/api/v1/approvals"]
+        initial = bodies[0].get("attachments") or [] if bodies else []
+        return [*initial, *self.late]
+
+    @property
     def uploads(self) -> list[dict[str, Any]]:
         return [b for p, b in self.posts if p == "/api/v1/approvals/attachments"]
 
     def poll(self, _id: str) -> dict[str, Any]:
         body = self.queued
-        manifest = body.get("attachments")
+        manifest = self.manifest
+        if self.returned is not None:
+            manifest = self.returned(manifest)
         shown = attachments_digest(manifest) if manifest else None
         if self.sign_over is not None:
             shown = self.sign_over
@@ -430,6 +450,8 @@ class FakeHTTP:
         response["signature"] = sign(self.s, canonical(signed))
         if shown is not None:
             response["attachments_digest"] = shown
+        if manifest:
+            response["attachments"] = manifest
         return response
 
 

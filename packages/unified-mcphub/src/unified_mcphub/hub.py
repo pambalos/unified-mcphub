@@ -27,6 +27,17 @@ from watchfiles import awatch
 from unified_enforce import Action, ActionContext, Principal, Telemetry
 from unified_enforce.approval import gate_forced
 from unified_enforce.distribution import FLEET_WIDE as _FLEET_WIDE
+from unified_enforce.staging import (
+    ACTION_DIGEST_META,
+    RESERVED_SERVER,
+    RESERVED_TOOLS,
+    TOOL_SPECS,
+    AttachmentTools,
+    RecordedResults,
+    StagedAttachments,
+    StagingError,
+    channel_attach,
+)
 from unified_paths import canonical
 
 from . import audit as audit_mod
@@ -151,8 +162,34 @@ def _ok(req_id, result) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
 
-def _err(req_id, code: int, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+def _err(req_id, code: int, message: str, data: dict | None = None) -> dict:
+    error: dict = {"code": code, "message": message}
+    if data:
+        error["data"] = data
+    return {"jsonrpc": "2.0", "id": req_id, "error": error}
+
+
+def _session_of(caller_token_id: str | None) -> str:
+    """The session staged evidence is scoped to (approval-attachments.v1 §4.2).
+
+    The hub speaks stateless JSON-RPC over HTTP and has no MCP session of its
+    own, so the narrowest identity it holds below the principal is the
+    credential the caller presented: one issued bearer token, or the local
+    socket. Two harnesses holding different tokens for the same caller id do
+    not see -- or ride on -- each other's evidence.
+    """
+    return f"token:{caller_token_id}" if caller_token_id else "local"
+
+
+def _reserved_tools() -> list[dict]:
+    return [
+        types.Tool(
+            name=f"{RESERVED_SERVER}__{name}",
+            description=TOOL_SPECS[name][0],
+            inputSchema=TOOL_SPECS[name][1],
+        ).model_dump(by_alias=True, exclude_none=True, mode="json")
+        for name in RESERVED_TOOLS
+    ]
 
 
 def _result_dict(value) -> dict:
@@ -223,6 +260,27 @@ class Hub:
             channel=None if console is not None else self._select_approval_channel(approval_cfg),
             console=console,
         )
+        #: Evidence agents stage for their next deferred call, and the tool
+        #: results `from_call` may cite (approval-attachments.v1 §4.2). In
+        #: memory only: nothing staged leaves this hub until a DEFER takes it.
+        self.staging = StagedAttachments()
+        self.recorded_results = RecordedResults()
+        self.attachment_tools = AttachmentTools(
+            self.staging,
+            recorded=self.recorded_results,
+            attach=channel_attach(
+                lambda: (
+                    self.fleet.approvals
+                    if self.fleet is not None and self.approval.console
+                    else None
+                )
+            ),
+        )
+        #: trace id of a call waiting on a console approval -> the control
+        #: plane's id for it, so a denied call can name its `approval_ref`.
+        self._approval_refs: dict[str, str] = {}
+        if console is not None:
+            console.on_queued = self._approval_queued
         self.audit = audit_mod.AuditLog(
             audit_dir(), record_payloads=config.hub.audit.record_payloads
         )
@@ -419,7 +477,7 @@ class Hub:
         return _err(req_id, -32601, f"method not found: {method}")
 
     def _aggregate_tools(self) -> list[dict]:
-        tools: list[dict] = []
+        tools: list[dict] = _reserved_tools()
         for server in self.servers.values():
             for tool in server.tools:
                 tools.append(self._namespaced(server.name, tool))
@@ -443,6 +501,14 @@ class Hub:
         server_name, sep, tool = full_name.partition("__")
         if not sep:
             return _err(req_id, -32602, f"tool name must be '<server>__<tool>': {full_name!r}")
+        # The reserved attachment tools (approval-attachments.v1 §4.2) are
+        # answered by the hub itself, never routed upstream -- but decided,
+        # audited and interdictable like any other call, as
+        # `mcp://unified/<tool>`. No upstream can be named `unified`.
+        reserved = server_name == RESERVED_SERVER
+        if reserved and tool not in RESERVED_TOOLS:
+            return _err(req_id, -32602, f"unknown tool: {full_name!r}")
+        session = _session_of(caller_token_id)
 
         tool_uri = f"mcp://{server_name}/{tool}"
         # Canonicalise path arguments BEFORE the Action is built, so the value
@@ -479,17 +545,30 @@ class Hub:
 
         authz_decision = decision.effect.value
         prompt_ms: float | None = None
+        approval_ref: str | None = None
         if decision.effect is Effect.PROMPT:
             t0 = time.monotonic()
-            outcome = await self.approval.resolve(
-                tool_uri,
-                caller_id,
-                _summary(tool, args),
-                args,
-                floored=decision.source == "danger_floor",
-                action=action,  # same canonical Action the verdict was made on
-                deferral=decision.engine,  # the rule that asked, for the approver
+            # Evidence the agent staged for this call goes to the person who
+            # will see it -- and only if someone will: a session allow or a
+            # disabled approval leaves it staged for a call that is reviewed.
+            staged = (
+                self.staging.take(action, session)
+                if self.approval.will_ask(action, decision.engine)
+                else ()
             )
+            try:
+                outcome = await self.approval.resolve(
+                    tool_uri,
+                    caller_id,
+                    _summary(tool, args),
+                    args,
+                    floored=decision.source == "danger_floor",
+                    action=action,  # same canonical Action the verdict was made on
+                    deferral=decision.engine,  # the rule that asked, for the approver
+                    attachments=staged,
+                )
+            finally:
+                approval_ref = self._approval_refs.pop(trace_id, None)
             prompt_ms = (time.monotonic() - t0) * 1000
             authz_decision = outcome.authz_decision
             if outcome.persistent:
@@ -548,8 +627,11 @@ class Hub:
         # stale revocation list, a `defer` containment): the approval queue
         # was told the arguments are withheld (`distribution_state`), and this
         # principal may be contained -- the copy would contradict both.
+        # Nor for the reserved attachment tools: their arguments are staged
+        # evidence, which leaves only with the approval request it is for.
         ship_payloads = (
             shipped
+            and not reserved
             and decision.audit_level != "minimal"
             and not (
                 decision.effect is Effect.PROMPT
@@ -562,12 +644,24 @@ class Hub:
 
         if not allowed:
             # deny / prompt_denied / no_approval_channel -> received only (spec §6.2)
+            if approval_ref is not None:
+                # The control plane's id for the request this denial answered,
+                # so the agent (or its operator) can find it in the console.
+                return _err(
+                    req_id,
+                    -32003,
+                    f"denied by policy ({authz_decision}); approval_ref={approval_ref}",
+                    {"approval_ref": approval_ref, "status": authz_decision},
+                )
             return _err(req_id, -32003, f"denied by policy ({authz_decision})")
 
         t0 = time.monotonic()
-        task = asyncio.create_task(
-            self._forward(server_name, tool, args), name=f"forward:{request_id}"
+        work = (
+            self._reserved_call(tool, args, action.principal.id, session)
+            if reserved
+            else self._forward(server_name, tool, args)
         )
+        task = asyncio.create_task(work, name=f"forward:{request_id}")
         flight = InFlight(
             request_id=request_id,
             principal=action.principal.id,
@@ -643,6 +737,16 @@ class Hub:
         # was accepted, and `write_interdicted` records none.
         if ship_payloads:
             self.authz.ship_payload(completed, "result", action_digest=recorded_digest)
+        returned = result
+        if not reserved and status == "ok" and self._records_results(decision.audit_level):
+            # Kept for `from_call` (§4.2): the result as it came back to this
+            # agent, citable by this principal in this session only. The
+            # digest goes back in `_meta` so the agent has something to cite;
+            # it is transport metadata about the result, added after the
+            # completed entry recorded the result itself.
+            if self.recorded_results.record(action.principal.id, session, recorded_digest, result):
+                meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else {}
+                returned = {**result, "_meta": {**meta, ACTION_DIGEST_META: recorded_digest}}
         if hits and finding is not None:
             # The finding is shipped after the entry that records it (the
             # `completed` line's `injection`), for the same reason as the
@@ -652,7 +756,38 @@ class Hub:
                 self.authz.record_ingress(action, hits, completed, finding=finding)
             except Exception:  # noqa: BLE001
                 logger.exception("could not record injection finding request=%s", request_id)
-        return _ok(req_id, result)
+        return _ok(req_id, returned)
+
+    def _records_results(self, audit_level: str) -> bool:
+        """Whether a call's result may later be cited as `observed` evidence.
+
+        Only when the hub records payloads at all (`audit.record_payloads`:
+        a hub told not to keep results must not keep them here either), and
+        never for a `minimal` rule: the customer marked that traffic
+        sensitive, and citing it in an approval request would ship it to the
+        control plane on the strength of a different rule.
+        """
+        return bool(self.config.hub.audit.record_payloads) and audit_level != "minimal"
+
+    async def _reserved_call(self, tool: str, args: dict, principal: str, session: str):
+        """Answer a reserved attachment tool, after policy allowed it.
+
+        Principal and session are the ones this hub established for the
+        caller, never arguments. A refusal (bad content, over a limit, an
+        unknown approval) is an `isError` result the agent can read and act
+        on, not a transport error.
+        """
+        try:
+            return await self.attachment_tools.call(tool, args, principal, session)
+        except StagingError as exc:
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str(exc))], isError=True
+            )
+
+    def _approval_queued(self, approval_id: str, request) -> None:
+        trace_id = request.action.context.trace_id
+        if trace_id:
+            self._approval_refs[trace_id] = approval_id
 
     def refuse_unidentified(self, *, source: str, method: str = "mcp") -> None:
         """A caller with no valid identity was turned away (build-14 S-1).
@@ -838,6 +973,12 @@ class Hub:
         return False
 
     async def _add_server(self, name: str, spec) -> None:
+        if name == RESERVED_SERVER:
+            # `unified__*` is the hub's own attachment tools; an upstream of
+            # that name could never be reached, and would shadow them in
+            # tools/list for a client that de-duplicates by name.
+            logger.error("server '%s' refused: the name is reserved for the hub's own tools", name)
+            return
         if not self._pinning_ok(name, spec):
             return
         server = SupervisedServer(name, spec, token_store=self.secrets)

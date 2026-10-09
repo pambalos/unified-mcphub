@@ -525,10 +525,11 @@ class AttachmentTools:
 
     def stage(self, args: Mapping[str, Any], principal: str, session: str) -> dict:
         _only(args, set(_CONTENT_PROPS) | {"for_tool", "match"})
+        for_tool = args.get("for_tool")
+        if not isinstance(for_tool, str) or not for_tool:
+            raise StagingError("for_tool is required: the tool URI this evidence is for")
         attachment = self.attachment_from(args, principal, session)
-        item = self.staging.stage(
-            principal, session, args.get("for_tool"), args.get("match"), attachment
-        )
+        item = self.staging.stage(principal, session, for_tool, args.get("match"), attachment)
         return item.public()
 
     async def attach_to_approval(

@@ -192,7 +192,7 @@ def attachment_tools(
             ),
         )
 
-    fns = {
+    fns: dict[str, Callable[..., Any]] = {
         "stage_attachment": stage_attachment,
         "list_staged": list_staged,
         "discard_staged": discard_staged,

@@ -234,6 +234,9 @@ def _resolved(
         audit_level=request.decision.audit_level,
         reason=reason,
         policy_digest=request.decision.policy_digest,
+        # The clauses travel with the rule id: a human settled what this rule
+        # demanded, and the clause it implements is still the reason it asked.
+        implements=request.decision.implements,
     )
 
 

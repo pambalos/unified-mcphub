@@ -162,8 +162,13 @@ class AuditLog:
         approver: dict[str, Any] | None = None,
         attestation: dict[str, Any] | None = None,
         resolution: dict[str, Any] | None = None,
+        implements: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
-        """`approver`, `attestation` and `resolution` are set when a console approver
+        """`implements` names the company-policy clauses the deciding rule
+        carries out (policy-records.v1); omitted when there are none, so an
+        entry from a workspace that does not use the key is unchanged.
+
+        `approver`, `attestation` and `resolution` are set when a console approver
         resolved a `prompt` (control_plane.approvals: console): who, as the
         control plane's signature attests it, and the signature itself. Kept
         here rather than only at the control plane because its approvals table
@@ -207,6 +212,8 @@ class AuditLog:
             entry["action_digest"] = action_digest
         if policy_digest:
             entry["policy_digest"] = policy_digest
+        if implements:
+            entry["implements"] = list(implements)
         if reason:
             entry["reason"] = reason
         if decided_by:

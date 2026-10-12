@@ -39,6 +39,16 @@ area that looks like an attack from both ends.
 5. *Export rows* — every row of the control plane's CSV is joined to its chain
    entry and must agree with it. Proves the summary an auditor reads in a
    spreadsheet says what the signed record says.
+6. *Policy records* (policy-records.v1) — the per-clause decision counts in
+   `policy-records/decisions.json` and the per-control roll-up in
+   `control-map.json` are recomputed from the signed chain entries, and every
+   decision's `implements` must equal what the rule it cites says in the
+   policy file of the digest it cites. Proves "these decisions carried out
+   that clause, which addresses that ISO/IEC 42001 control" is read off the
+   signed record rather than asserted beside it. Clause references the
+   included catalogue does not know, or knows as unapproved, are NOTEs: the
+   chain is the record of what ran, and a reference to a clause nobody
+   approved is a finding about governance, not about integrity.
 
 Exit status is non-zero if any check fails. Warnings (an export row whose
 reporter's chain was not included, a digest with no policy file) do not fail
@@ -863,6 +873,276 @@ def check_rows(chains: list[Chain], rows: list[dict[str, str]], report: Report) 
         )
 
 
+# --- 6. policy records (policy-records.v1) -----------------------------------------------
+
+#: Built from the chains by `evidence_pack`; recomputed here.
+CLAUSE_DECISIONS = "policy-records/decisions.json"
+#: The control plane's policy-records export, copied verbatim when supplied.
+CLAUSE_CATALOGUE = "policy-records/catalogue.json"
+CONTROL_MAP_FILE = "control-map.json"
+
+#: The tiers whose entries decide, and so may carry `implements`.
+_DECIDING_TIERS = ("constitutional", "attestation_floors", "rules", "floors")
+
+
+def _decisions(chains: list[Chain]) -> list[dict[str, Any]]:
+    """Every decision recorded in the excerpts, in one shape.
+
+    An engine `decision` entry, or a hub `received` entry (the hub records
+    its verdict on the line that received the call). A line of a shape this
+    does not know is skipped, as in `_index`: the chain check has already
+    judged its integrity, and this stage only reads what decided."""
+    out: list[dict[str, Any]] = []
+    for c in chains:
+        for e in c.entries:
+            payload = e.get("payload")
+            if e.get("kind") == "decision" and isinstance(payload, dict):
+                out.append(
+                    {
+                        "chain": c.name,
+                        "seq": e.get("seq"),
+                        "rule": payload.get("rule_id"),
+                        "verdict": payload.get("verdict"),
+                        "implements": payload.get("implements"),
+                        "policy_digest": payload.get("policy_digest"),
+                        "hub": False,
+                    }
+                )
+            elif e.get("phase") == "received":
+                decided = e.get("authz_decision", "")
+                out.append(
+                    {
+                        "chain": c.name,
+                        "seq": e.get("seq"),
+                        "rule": e.get("authz_rule"),
+                        "verdict": _HUB_TO_VERDICT.get(decided, decided),
+                        "implements": e.get("implements"),
+                        "policy_digest": e.get("policy_digest"),
+                        "hub": True,
+                    }
+                )
+    return out
+
+
+def _refs(value: Any) -> list[str]:
+    return [r for r in value if isinstance(r, str)] if isinstance(value, list) else []
+
+
+def clause_tally(chains: list[Chain]) -> dict[str, Any]:
+    """Decisions per clause reference, from the chains alone.
+
+    What `evidence_pack` writes to `policy-records/decisions.json` and what
+    this verifier recomputes; one function, so builder and verifier cannot
+    count two different ways. Deterministic (sorted), so the comparison is
+    equality, not interpretation."""
+    decisions = _decisions(chains)
+    clauses: dict[str, dict[str, Any]] = {}
+    naming = 0
+    for d in decisions:
+        refs = _refs(d["implements"])
+        if not refs:
+            continue
+        naming += 1
+        for ref in refs:
+            slot = clauses.setdefault(
+                ref, {"decisions": 0, "verdicts": {}, "rules": set(), "chains": set()}
+            )
+            slot["decisions"] += 1
+            verdict = str(d["verdict"])
+            slot["verdicts"][verdict] = slot["verdicts"].get(verdict, 0) + 1
+            if isinstance(d["rule"], str):
+                slot["rules"].add(d["rule"])
+            slot["chains"].add(d["chain"])
+    return {
+        "format": "policy-records.decisions.v1",
+        "decisions": len(decisions),
+        "decisions_naming_a_clause": naming,
+        "clauses": {
+            ref: {
+                "decisions": slot["decisions"],
+                "verdicts": dict(sorted(slot["verdicts"].items())),
+                "rules": sorted(slot["rules"]),
+                "chains": sorted(slot["chains"]),
+            }
+            for ref, slot in sorted(clauses.items())
+        },
+    }
+
+
+def _catalogue_clauses(catalogue: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """ref -> clause (with its document's status), from a policy-records export."""
+    out: dict[str, dict[str, Any]] = {}
+    for doc in catalogue.get("documents") or []:
+        if not isinstance(doc, dict):
+            continue
+        for clause in doc.get("clauses") or []:
+            if isinstance(clause, dict) and isinstance(clause.get("ref"), str):
+                out[clause["ref"]] = {**clause, "_status": doc.get("status")}
+    return out
+
+
+def control_rollup(chains: list[Chain], catalogue: dict[str, Any]) -> list[dict[str, Any]]:
+    """Per ISO/IEC 42001 control in the catalogue: the clauses that address it
+    and the decisions in this pack that carried one of them out.
+
+    A decision counts once per control even when it names two clauses that
+    both address it -- the question is "how many decisions evidence this
+    control", and double counting would overstate exactly the number an
+    auditor samples from."""
+    clauses = _catalogue_clauses(catalogue)
+    addressed: dict[str, list[str]] = {}
+    for ref, clause in clauses.items():
+        for control in clause.get("controls") or []:
+            if isinstance(control, str):
+                addressed.setdefault(control, []).append(ref)
+    counts: dict[str, int] = {}
+    for d in _decisions(chains):
+        controls: set[str] = set()
+        for ref in _refs(d["implements"]):
+            controls.update(
+                c for c in clauses.get(ref, {}).get("controls") or [] if isinstance(c, str)
+            )
+        for control in controls:
+            counts[control] = counts.get(control, 0) + 1
+    out = []
+    for control in catalogue.get("controls") or []:
+        if not isinstance(control, dict) or not isinstance(control.get("ref"), str):
+            continue
+        ref = control["ref"]
+        out.append(
+            {
+                "ref": ref,
+                "topic": control.get("topic"),
+                "clauses": sorted(addressed.get(ref, [])),
+                "decisions": counts.get(ref, 0),
+            }
+        )
+    return out
+
+
+def _rule_implements(doc: dict[str, Any]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for tier in _DECIDING_TIERS:
+        for entry in doc.get(tier) or []:
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+                out[entry["id"]] = _refs(entry.get("implements"))
+    return out
+
+
+def check_policy_records(root: Path, chains: list[Chain], report: Report) -> None:
+    decisions_path = root / CLAUSE_DECISIONS
+    catalogue_path = root / CLAUSE_CATALOGUE
+    tally = clause_tally(chains)
+    if not decisions_path.is_file():
+        # A pack built before policy records existed. Said only when the
+        # chains carry clause references the pack then never summarised.
+        if tally["decisions_naming_a_clause"]:
+            report.add(
+                "policy records",
+                True,
+                f"{tally['decisions_naming_a_clause']} decision(s) name a policy clause, but "
+                "this pack has no policy-records summary (built by an older builder)",
+                warning=True,
+            )
+        return
+
+    recorded = json.loads(decisions_path.read_text(encoding="utf-8"))
+    ok = recorded == tally
+    report.add(
+        "policy records: decisions per clause",
+        ok,
+        f"{tally['decisions_naming_a_clause']} of {tally['decisions']} decision(s) name a "
+        f"clause, across {len(tally['clauses'])} clause(s); recomputed from the chains"
+        if ok
+        else f"{CLAUSE_DECISIONS} does NOT match the chains (recomputed: "
+        f"{tally['decisions_naming_a_clause']} decision(s) naming "
+        f"{len(tally['clauses'])} clause(s))",
+    )
+
+    # Each decision's clauses must be the ones its rule declares in the policy
+    # it cites. The link lives inside the hashed policy document, so a chain
+    # entry that names a clause its rule never claimed is a contradiction
+    # between two signed records -- not a note.
+    index_path = root / "policies" / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.is_file() else {}
+    by_digest: dict[str, dict[str, list[str]]] = {}
+    for digest, info in index.items():
+        by_digest[digest] = _rule_implements(
+            json.loads((root / "policies" / info["normalized"]).read_text(encoding="utf-8"))
+        )
+    checked, mismatched = 0, []
+    for d in _decisions(chains):
+        if d["hub"] or not isinstance(d["rule"], str):
+            continue
+        rules = by_digest.get(str(d["policy_digest"]))
+        if rules is None or d["rule"] not in rules:
+            continue
+        checked += 1
+        if sorted(_refs(d["implements"])) != sorted(rules[d["rule"]]):
+            mismatched.append(f"{d['chain']}#{d['seq']} ({d['rule']})")
+    if checked:
+        report.add(
+            "policy records: rule links",
+            not mismatched,
+            f"{checked} decision(s) name exactly the clauses their rule declares in the cited policy"
+            if not mismatched
+            else f"{len(mismatched)} decision(s) name clauses their rule does not declare: "
+            + ", ".join(mismatched[:10]),
+        )
+
+    if not catalogue_path.is_file():
+        if tally["clauses"]:
+            report.add(
+                "policy records: catalogue",
+                True,
+                "no policy-records catalogue in this pack: clauses are named, but which policy "
+                "documents and ISO/IEC 42001 controls they belong to is not included",
+                warning=True,
+            )
+        return
+    catalogue = json.loads(catalogue_path.read_text(encoding="utf-8"))
+    known = _catalogue_clauses(catalogue)
+    unknown = sorted(r for r in tally["clauses"] if r not in known)
+    unapproved = sorted(
+        r for r in tally["clauses"] if r in known and known[r].get("_status") != "approved"
+    )
+    if unknown or unapproved:
+        report.add(
+            "policy records: clause status",
+            True,
+            "; ".join(
+                part
+                for part in (
+                    f"not in the catalogue: {', '.join(unknown)}" if unknown else "",
+                    f"in a document that is not approved: {', '.join(unapproved)}"
+                    if unapproved
+                    else "",
+                )
+                if part
+            ),
+            warning=True,
+        )
+    control_map_path = root / CONTROL_MAP_FILE
+    control_map = (
+        json.loads(control_map_path.read_text(encoding="utf-8"))
+        if control_map_path.is_file()
+        else {}
+    )
+    rolled = (control_map.get("policy_records") or {}).get("controls")
+    if rolled is not None:
+        expected = control_rollup(chains, catalogue)
+        ok = rolled == expected
+        covered = sum(1 for c in expected if c["decisions"])
+        report.add(
+            "policy records: controls",
+            ok,
+            f"{covered} of {len(expected)} ISO/IEC 42001 control(s) evidenced by decisions in "
+            "this window; recomputed from the chains and the catalogue"
+            if ok
+            else "control-map.json's policy_records roll-up does NOT match the chains and catalogue",
+        )
+
+
 # --- entry point -----------------------------------------------------------------------------
 
 
@@ -902,6 +1182,7 @@ def verify_pack(root: Path, *, accept_unverifiable_legacy: bool = False) -> Repo
     )
     _stage(report, "policies", check_policies, root, chains, rows, report)
     _stage(report, "export rows", check_rows, chains, rows, report)
+    _stage(report, "policy records", check_policy_records, root, chains, report)
     return report
 
 

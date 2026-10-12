@@ -28,6 +28,11 @@ sidecar already holds, and the policies are the files on disk.
     policies/<digest>.json    normalised policy document, hashes to its digest
     policies/<digest>.yaml    the authored source, where there is one
     policies/index.json       digest -> files
+    policy-records/decisions.json  per company-policy clause, the decisions in
+                              the window whose rule implements it (from the chains)
+    policy-records/catalogue.json  the control plane's policy-records export:
+                              approved documents, clauses, ISO/IEC 42001 links
+                              (only with `--policy-records`)
     verify/verify.py          entry point; `python verify/verify.py`
     verify/pack_verify.py     the verifier (this package's, copied)
     verify/attest.py          the canonical signature verifier (copied)
@@ -335,6 +340,28 @@ CONTROL_MAP: list[dict[str, Any]] = [
         "gaps": ["a signed 'reviewed by / on' attestation for this window is not yet produced"],
     },
     {
+        "ref": "5.2 / A.2.2, A.2.3",
+        "topic": "AI policy and its alignment with other organisational policies",
+        "evidence": [
+            "policies/ — each rule may name the company-policy clauses it implements (`implements`); "
+            "the link is inside the hashed policy document every decision cites, so it cannot be "
+            "added after the fact",
+            "chains — each decision entry names the clauses its rule implements, inside the signed body",
+            "policy-records/decisions.json — per clause, the decisions in this window that carried it "
+            "out; recomputed by the verifier from the chains",
+            "policy-records/catalogue.json (when included) — the approved policy documents: version, "
+            "owner, approver, dates, body digest, and each clause's ISO/IEC 42001 controls; "
+            "control-map.json `policy_records` rolls decisions up to those controls",
+        ],
+        "gaps": [
+            "document bodies are not in the pack; the catalogue carries each approved version's "
+            "sha256 so a body produced on request can be checked against it",
+            "that a rule implements a clause is its author's statement; whether it achieves the "
+            "clause is a review question this pack cannot answer",
+            "the catalogue is the control plane's export, not signed by the customer's chain keys",
+        ],
+    },
+    {
         "ref": "A.6.2.5 / 6.3",
         "topic": "Deployment and planned changes",
         "evidence": ["policy_digest per decision shows exactly when the policy in force changed"],
@@ -372,7 +399,12 @@ _PAYLOADS_README = {
 
 
 def _readme(
-    manifest: dict[str, Any], chains: list[dict[str, Any]], policies: dict[str, Any], rows: int
+    manifest: dict[str, Any],
+    chains: list[dict[str, Any]],
+    policies: dict[str, Any],
+    rows: int,
+    tally: dict[str, Any] | None = None,
+    catalogue: dict[str, Any] | None = None,
 ) -> str:
     lines = [
         f"# Evidence pack — {manifest['title']}",
@@ -434,6 +466,7 @@ def _readme(
             + ("<br>".join(item["gaps"]) or "—")
             + " |"
         )
+    lines += _policy_records_readme(tally, catalogue)
     lines += [
         "",
         "**Out of scope:** " + OUT_OF_SCOPE,
@@ -448,6 +481,57 @@ def _readme(
         "",
     ]
     return "\n".join(lines)
+
+
+def _policy_records_readme(
+    tally: dict[str, Any] | None, catalogue: dict[str, Any] | None
+) -> list[str]:
+    """The policies and clauses behind this window's decisions (policy-records.v1)."""
+    if not tally:
+        return []
+    lines = [
+        "",
+        "## Company policies behind these decisions",
+        "",
+        f"{tally['decisions_naming_a_clause']} of {tally['decisions']} decision(s) in this pack were "
+        "made by a rule that names the company-policy clause(s) it implements. Counts are recomputed "
+        "from the signed chain entries by the verifier.",
+    ]
+    if not tally["clauses"]:
+        return lines
+    known = pack_verify._catalogue_clauses(catalogue or {})
+    lines += [
+        "",
+        "| Clause | Document | ISO/IEC 42001 | Decisions | Verdicts | Rules |",
+        "|---|---|---|---|---|---|",
+    ]
+    for ref, info in tally["clauses"].items():
+        clause = known.get(ref)
+        doc = "not in the catalogue" if catalogue is not None else "—"
+        controls = "—"
+        if clause is not None:
+            doc = f"{clause.get('title') or ''} ({clause.get('_status')})"
+            controls = ", ".join(clause.get("controls") or []) or "—"
+        verdicts = ", ".join(f"{k} {v}" for k, v in info["verdicts"].items())
+        lines.append(
+            f"| `{ref}` | {doc} | {controls} | {info['decisions']} | {verdicts} | "
+            + ", ".join(f"`{r}`" for r in info["rules"])
+            + " |"
+        )
+    if catalogue is None:
+        lines += [
+            "",
+            "No policy-records catalogue was included (`--policy-records`), so which documents and "
+            "ISO/IEC 42001 controls these clauses belong to is not in this pack.",
+        ]
+    return lines
+
+
+def _chains_for_tally(lines_by_chain: list[tuple[str, list[str]]]) -> list[pack_verify.Chain]:
+    return [
+        pack_verify.Chain(name, {}, [json.loads(line) for line in lines])
+        for name, lines in lines_by_chain
+    ]
 
 
 # --- assembly --------------------------------------------------------------------------------
@@ -466,7 +550,16 @@ def build(
     root_key: str | None,
     keyset_path: Path | None,
     payloads: str = "include",
+    policy_records: Path | None = None,
 ) -> Path:
+    """`policy_records` is the control plane's policy-records export
+    (`GET /api/v1/policy-records/export`), copied in verbatim; without it the
+    pack still summarises which clauses decisions named, from the chains."""
+    catalogue: dict[str, Any] | None = None
+    if policy_records is not None:
+        catalogue = json.loads(policy_records.read_text(encoding="utf-8"))
+        if not isinstance(catalogue, dict) or catalogue.get("format") != "policy-records.v1":
+            raise ValueError(f"{policy_records} is not a policy-records.v1 export")
     if payloads not in PAYLOAD_MODES:
         raise ValueError(f"payloads must be one of {PAYLOAD_MODES}, got {payloads!r}")
     staging = Path(tempfile.mkdtemp(prefix="evidence-pack-"))
@@ -479,6 +572,7 @@ def build(
                 rows = sum(1 for _ in csv.DictReader(fh))
 
         chain_meta = []
+        excerpts: list[tuple[str, list[str]]] = []
         for source in chains:
             lines, meta = excerpt(source, start, end, payloads=payloads)
             if not lines:
@@ -491,6 +585,18 @@ def build(
             (target / "chain.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
             (target / "meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
             chain_meta.append(meta)
+            excerpts.append((source.name, lines))
+
+        # Which company-policy clauses the window's decisions carried out,
+        # counted by the same function the verifier recomputes it with.
+        tally_chains = _chains_for_tally(excerpts)
+        tally = pack_verify.clause_tally(tally_chains)
+        (staging / "policy-records").mkdir()
+        (staging / pack_verify.CLAUSE_DECISIONS).write_text(
+            json.dumps(tally, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        if policy_records is not None:
+            shutil.copyfile(policy_records, staging / pack_verify.CLAUSE_CATALOGUE)
 
         index: dict[str, Any] = {}
         if policies:
@@ -548,6 +654,19 @@ def build(
                     "standard": "ISO/IEC 42001:2023",
                     "controls": CONTROL_MAP,
                     "out_of_scope": OUT_OF_SCOPE,
+                    # Per control in the customer's catalogue: the clauses that
+                    # address it and the decisions here that carried one out.
+                    # Recomputed by the verifier; absent without a catalogue.
+                    **(
+                        {
+                            "policy_records": {
+                                "source": pack_verify.CLAUSE_CATALOGUE,
+                                "controls": pack_verify.control_rollup(tally_chains, catalogue),
+                            }
+                        }
+                        if catalogue is not None
+                        else {}
+                    ),
                 },
                 indent=2,
             )
@@ -555,7 +674,7 @@ def build(
             encoding="utf-8",
         )
         (staging / "README.md").write_text(
-            _readme(manifest, chain_meta, index, rows), encoding="utf-8"
+            _readme(manifest, chain_meta, index, rows, tally, catalogue), encoding="utf-8"
         )
 
         # Last, so it covers everything above — including the verifier itself,
@@ -631,6 +750,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--hub-policy", action="store_true", help="include this machine's compiled hub policy"
+    )
+    p.add_argument(
+        "--policy-records",
+        type=Path,
+        help="the control plane's policy-records export for the same window (company policy "
+        "documents, clauses and their ISO/IEC 42001 controls)",
     )
     p.add_argument("--root-key", help="the pinned root public key (base64url, or @file)")
     p.add_argument("--keyset", type=Path, help="the root-signed key set document")
@@ -721,6 +846,7 @@ def main(argv: list[str] | None = None) -> int:
         root_key=_read_value(args.root_key) if args.root_key else None,
         keyset_path=args.keyset,
         payloads=args.payloads,
+        policy_records=args.policy_records,
     )
     print(f"wrote {out}")
     return 0

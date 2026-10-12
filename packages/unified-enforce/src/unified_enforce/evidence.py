@@ -387,6 +387,16 @@ def summarise(
         "parent_id": action.principal.parent_id,
         "decided_at": action.ts,
     }
+    # The clauses the deciding rule implements (policy-records.v1 §3), so the
+    # control plane can count decisions per clause without re-deriving them
+    # from a bundle that may since have changed. Outside EVIDENCE_FIELDS for
+    # the reason `policy_digest` is; the chain entry is the signed copy. Only
+    # when there are some: a record from a policy that does not use the key is
+    # byte-for-byte the record it was, and a control plane that predates the
+    # key ignores it (its record model does not forbid extra fields).
+    implements = tuple(getattr(decision, "implements", ()) or ())
+    if implements:
+        record["implements"] = list(implements)
     # Within the control plane's bounds, visibly: a row it would refuse (and
     # an older one would refuse with its whole batch) is worth less than a row
     # that says it was shortened and names the full value's digest. Before

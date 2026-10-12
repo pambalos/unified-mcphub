@@ -16,7 +16,16 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
+
+from unified_enforce.policy import check_implements
 
 from .util import secure_write
 
@@ -454,6 +463,29 @@ class Rule(BaseModel):
     args_filter: dict[str, dict[str, list[str]]] | None = None
     effect: str  # allow | deny | prompt
     audit_level: str = "standard"
+    #: Company-policy clauses this rule carries out, e.g.
+    #: `["claims-authority#4"]` (policy-records.v1). Passed through to the
+    #: engine rule unchanged, which checks the shape; None and [] both mean
+    #: "names none", and neither changes the compiled policy's digest.
+    implements: list[str] | None = None
+
+    @field_validator("implements")
+    @classmethod
+    def _clause_refs(cls, value: list[str] | None) -> list[str] | None:
+        """The engine's own shape check, at load, so a typo is a config error
+        naming the workspace file rather than a compile failure later."""
+        return None if value is None else check_implements(value)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_implements(self, handler: Any) -> dict[str, Any]:
+        """Keep `implements` out of a dump when unset, so the config hash of a
+        workspace that does not use it is the hash it had before the key
+        existed (a reload must not look like a change)."""
+        data: dict[str, Any] = handler(self)
+        if not self.implements:
+            data.pop("implements", None)
+        return data
+
     #: Set for a rule that came from the machine-managed `.local.yaml`
     #: (ADR-0024) rather than the curated workspace file. Private, so it is
     #: never read from a file -- the *source* says where a rule came from, not

@@ -604,6 +604,7 @@ class Hub:
             decided_by=decided_by,
             action_digest=action.digest(strict=False),
             policy_digest=decision.policy_digest,
+            implements=decision.implements,
             approver=approver,
             attestation=attestation,
             resolution=resolution,

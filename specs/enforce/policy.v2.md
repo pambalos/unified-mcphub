@@ -52,6 +52,47 @@ A decision an attestation floor settles carries the **most restrictive**
 check, not the data, so it never widens a rule's `minimal` — which governs
 payload shipping (payload-evidence.v1) and the default audit view.
 
+### `implements:` — the company-policy clauses an entry carries out (policy-records.v1)
+
+Every *deciding* entry — `constitutional`, `attestation_floors`, `rules` and
+`floors`, never `counters` (a counter decides nothing) — may carry
+`implements: ["claims-authority#4", "human-oversight#2"]`: the clauses of the
+company's own policy documents it implements. The authoritative spec is the
+control plane's `specs/policy-records.v1.md`; what the engine guarantees:
+
+- **Shape only.** Each reference is `<document-key>#<clause>` (lower-case
+  slug, `#`, dotted alphanumeric clause number; ≤ 96 chars), at most 16 per
+  entry, no duplicates. Anything else is a load error, like every malformed
+  key. The engine never resolves a reference: whether the clause exists and is
+  approved is the control plane's lint, because deciding must not depend on a
+  document store.
+- **Carried, never consulted.** It does not affect matching or precedence.
+  `Decision.implements` copies the deciding entry's list (the condition-error
+  DENY and the attestation-floor verdict included; the default deny and
+  structural verdicts carry none); a human resolution of a DEFER keeps the
+  deferring rule's list, as it keeps its `rule_id`.
+- **Recorded.** The chain's decision entry gains `implements` inside the
+  hashed, signed body (never detached); the hub's `received` entry likewise.
+  The record shipped to the control plane carries it outside
+  `EVIDENCE_FIELDS`, beside `policy_digest`.
+- **Backward compatible.** An empty or absent list is omitted from the
+  document's serialisation (as `attestation_floors` is), so a policy that
+  does not use the key keeps its `policy_digest` (pinned in
+  `tests/unit/test_policy_implements.py`), writes the same chain entry and
+  ships the same record. The hub's workspace `Rule` passes `implements`
+  through and keeps it out of its config dump when unset.
+- **In evidence packs.** `policy-records/decisions.json` counts decisions per
+  clause from the chains; with `--policy-records` the control plane's export
+  is copied in and `control-map.json` gains a per-ISO/IEC 42001-control
+  roll-up. `pack_verify` recomputes both, and FAILS a decision whose
+  `implements` differs from what its rule declares in the policy file of the
+  digest it cites.
+
+Named for the relation, not the target: a rule *implements* a clause, and the
+clause *addresses* a 42001 control. The second hop is deliberately not
+expressible in a rule — a rule pointing straight at a control would let a
+programme claim conformance with no policy a person approved.
+
 ## Intentional divergences from the hub (all stricter / fail-closed)
 
 - **Unknown operator** — hub: operator evaluates False at runtime (rule can

@@ -16,7 +16,7 @@ defensible and the same risk discovered by a reader is not.
 
 ## 1. Identity boundaries
 
-Seven places where one party has to prove who it is to another. Each is
+Eight places where one party has to prove who it is to another. Each is
 adversarially tested: `tests/test_spoofing.py` in the control plane registers an
 attack per boundary and **fails the build if a new route or artifact appears
 without one**, so this table cannot quietly fall behind the code.
@@ -58,17 +58,57 @@ the binding rests on.
 **Attacker:** anyone who can reach the console, trying to answer approvals as
 somebody else.
 
-**Control:** authentication is an IdP (any OIDC provider) or a local password
-account; **authentication is not authorisation**. A grant table decides whether a
-subject may act on a fleet and is consulted on every request, so a grant
+**Control:** authentication is an IdP (any OIDC provider, per company if
+configured) or a local password account; **authentication is not
+authorisation**. A membership table decides whether a subject may act in a
+company and as what, and is consulted on every request, so a membership
 withdrawn while somebody is looking at a queue stops working on their next click
-rather than when a cookie expires. Roles are viewer / approver / policy\_admin /
-owner.
+rather than when a cookie expires. Roles are viewer / auditor / csr (approver) /
+supervisor / entity\_admin / policy\_admin / tenant\_admin / owner; the
+roles that manage access or policy cannot answer requests. Releasing a request
+is also held to the person's **authority limits** (CEL over the request, e.g.
+"up to $5,000"), checked by the server, and the limits evaluated are signed
+into the decision.
 
 **Residual:** an operator's IdP account is as strong as their IdP. Local password
 accounts are weaker than a Workspace identity with 2FA, which is why their
 subjects are namespaced `local:` — an audit record shows which kind of
 authentication produced a decision without a join.
+
+### one entity's operator → another entity's requests
+
+**Attacker:** a real, authenticated person with a valid membership -- in a
+*different* company served by the same deployment -- trying to read, count,
+claim, answer or administer another company's requests, cases, evidence,
+members or accounts; or one company's agent trying to route its requests into
+another company's queue (or out of its own reviewers' sight).
+
+**Control:** an action's company comes from its fleet's **binding**, decided
+when the fleet's join token is minted, never from the reporter: an `entity_id`,
+`queue_id` or `case_id` in a request body is refused, and a case is looked up
+from the action's signed `resource` *inside the fleet's company* only.
+**Entity scoping is automatic**, the way fleet scoping is: every query on a
+person's request carries `entity_id IN (their company)`, counts and aggregates
+included, and every new row is stamped from the binding at write time and
+refused if it names another company's entity or case. Another company's object
+is the same 404 as one that does not exist, by id, by list and by count. A
+multi-company console names the company in a signed claim that is checked
+against the person's memberships on every request; a console bound to one
+fleet cannot name another. Queue acts, case notes and access changes are bound
+to the object they change. `tests/test_spoofing.py` attacks every route that
+returns company data from another company's side, and a new route with no
+such attack fails the build.
+
+**Residual:** an application inside the trust boundary that writes the wrong
+claim number or company into an action's resource still puts it on the wrong
+claim *within its own company* -- an annotation is a claim, as everywhere
+else in this model. Shared-agent routing by resource is not built: in this version a
+fleet serves exactly one company, so an agent serving several companies needs
+one fleet per company. Isolation is enforced in the application, not yet by
+row-level security in the database, so a database-level attacker sees every
+company. A deployment-wide owner or tenant administrator acts in every company
+by design; their acts are attributed, but they are not constrained by this
+boundary.
 
 ### console acting on behalf of an operator
 

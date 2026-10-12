@@ -977,7 +977,12 @@ def _catalogue_clauses(catalogue: dict[str, Any]) -> dict[str, dict[str, Any]]:
             continue
         for clause in doc.get("clauses") or []:
             if isinstance(clause, dict) and isinstance(clause.get("ref"), str):
-                out[clause["ref"]] = {**clause, "_status": doc.get("status")}
+                out[clause["ref"]] = {
+                    **clause,
+                    "_status": doc.get("status"),
+                    "_document": doc.get("title") or doc.get("key"),
+                    "_version": doc.get("version"),
+                }
     return out
 
 

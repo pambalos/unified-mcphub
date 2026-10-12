@@ -510,7 +510,11 @@ def _policy_records_readme(
         doc = "not in the catalogue" if catalogue is not None else "—"
         controls = "—"
         if clause is not None:
-            doc = f"{clause.get('title') or ''} ({clause.get('_status')})"
+            doc = (
+                f"{clause.get('_document') or ''} v{clause.get('_version')}, "
+                f"§{clause.get('number') or ''} {clause.get('title') or ''} "
+                f"({clause.get('_status')})"
+            )
             controls = ", ".join(clause.get("controls") or []) or "—"
         verdicts = ", ".join(f"{k} {v}" for k, v in info["verdicts"].items())
         lines.append(

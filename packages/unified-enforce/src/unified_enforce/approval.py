@@ -184,6 +184,11 @@ class ApprovalResponse:
     #: It is what the signature covers, so the chain must record it or the
     #: approval cannot be re-verified offline.
     attachments_digest: str | None = None
+    #: The answering person's standing, as the control plane signed it (attest
+    #: v4 `authority`): membership, role, the authority limits evaluated,
+    #: override, case. Present only when the resolution carried one, and then
+    #: inside the signature, so the chain must record it for the same reason.
+    authority: dict[str, Any] | None = None
 
 
 @dataclass
@@ -201,6 +206,7 @@ class ApprovalOutcome:
     approver: Approver | None = None
     attestation: SignedResolution | None = None
     attachments_digest: str | None = None
+    authority: dict[str, Any] | None = None
 
     @property
     def allowed(self) -> bool:
@@ -400,6 +406,7 @@ class Approvals:
                 approver=response.approver,
                 attestation=response.attestation,
                 attachments_digest=response.attachments_digest,
+                authority=response.authority,
             )
         )
 
@@ -447,6 +454,12 @@ class RecordedApproval:
     #: carried no attachments, so entries for such requests are byte for byte
     #: what they were before attachments existed.
     attachments_digest: str | None = field(default=None)
+    #: The approver's signed standing (attest v4 `authority`: membership,
+    #: role, the limits evaluated and how each held, override, case), so an
+    #: evidence pack can prove offline that whoever released a $4,200 claim
+    #: was within their authority. Omitted from the chain entry when None,
+    #: like `attachments_digest`, so older entries are unchanged.
+    authority: dict[str, Any] | None = field(default=None)
 
     @classmethod
     def build(cls, request: ApprovalRequest, outcome: ApprovalOutcome) -> "RecordedApproval":
@@ -464,4 +477,5 @@ class RecordedApproval:
             attestation=asdict(outcome.attestation) if outcome.attestation else None,
             policy_digest=outcome.decision.policy_digest,
             attachments_digest=outcome.attachments_digest,
+            authority=outcome.authority,
         )

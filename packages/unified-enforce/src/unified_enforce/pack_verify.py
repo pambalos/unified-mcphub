@@ -502,13 +502,19 @@ def _approvals_in(chain: Chain) -> list[dict[str, Any]]:
             if "phase" in payload:
                 resolution = payload.get("resolution")
                 payload = {
-                    k: v for k, v in payload.items() if k not in ("kind", "scope", "resolution")
+                    k: v
+                    for k, v in payload.items()
+                    if k not in ("kind", "scope", "resolution", "authority")
                 }
                 if isinstance(resolution, dict):
                     if "kind" in resolution:
                         payload["kind"] = resolution["kind"]
                     if "scope" in resolution:
                         payload["scope"] = resolution["scope"]
+                    # The signed standing (attest v4), recorded by a hub under
+                    # `resolution` beside kind and scope.
+                    if "authority" in resolution:
+                        payload["authority"] = resolution["authority"]
                 elif "resolution" not in e:
                     if first_resolution is not None:
                         payload[_AFTER_RESOLUTION] = first_resolution
@@ -619,8 +625,17 @@ def _check_one_approval(a: dict[str, Any], keys: dict[str, Any]) -> tuple[bool, 
     shown = a.get("attachments_digest")
     if shown is not None and not isinstance(shown, str):
         raise _Incomplete(f"'attachments_digest' is {type(shown).__name__}, not a string")
+    # The approver's signed standing (attest v4): membership, role, the
+    # authority limits evaluated and how each held, override, case. Absent
+    # for a resolution signed without it (v2/v3); present, it is part of what
+    # was signed, so a record whose limits were edited -- a `held: false`
+    # turned true -- fails like any other altered field.
+    authority = a.get("authority")
+    if authority is not None and (problem := attest.authority_problem(authority)) is not None:
+        raise _Incomplete(f"'authority' is malformed: {problem}")
     signed = dict(
         attachments_digest=shown,
+        authority=authority,
         action_digest=_field(a, "action_digest", str),
         approver=wire,
         resolved_at_ms=resolved_at,
@@ -651,9 +666,27 @@ def _check_one_approval(a: dict[str, Any], keys: dict[str, Any]) -> tuple[bool, 
     return (
         True,
         f"{verified} by {ap.get('email') or ap['subject']} ({ap['subject']}), signed by {key.kid}"
+        + _within(authority)
         + (
             " (kind recovered from the signature; recorded before resolution was)" if legacy else ""
         ),
+    )
+
+
+def _within(authority: dict[str, Any] | None) -> str:
+    """The signed standing, said for an auditor: under which membership and
+    role, and how each authority limit came out."""
+    if authority is None:
+        return ""
+    limits = authority.get("limits") or []
+    held = ", ".join(
+        f"{item.get('id')} {'held' if item.get('held') else 'DID NOT HOLD'}" for item in limits
+    )
+    return (
+        f"; as {authority.get('role')} under membership {authority.get('membership')}"
+        + (f", limits: {held}" if held else ", no authority limits")
+        + (", overriding another's claim" if authority.get("override") else "")
+        + (f", case {authority.get('case')}" if authority.get("case") else "")
     )
 
 

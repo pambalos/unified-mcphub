@@ -631,6 +631,10 @@ class AuditChain:
         payload = asdict(recorded)
         if payload.get("attachments_digest", "absent") is None:
             del payload["attachments_digest"]
+        # The same for the signed authority (attest v4): absent unless the
+        # resolution carried one.
+        if payload.get("authority", "absent") is None:
+            del payload["authority"]
         return self.append("approval", payload)
 
     # --- verification ---

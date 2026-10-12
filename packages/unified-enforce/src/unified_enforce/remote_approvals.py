@@ -610,6 +610,10 @@ class RemoteApprovals:
             # and accepts floats now, but an older one validates an int, and
             # rounding down could expire the item before this client stops.
             "deadline_seconds": math.ceil(self._deadline),
+            # This client verifies a v4 resolution (attest `authority`), so the
+            # control plane may sign the approver's standing into it. An older
+            # control plane ignores the field and signs v2/v3 as before.
+            "signed_authority": True,
         }
         if withheld is not None:
             body["params_withheld"] = withheld
@@ -770,8 +774,12 @@ def _response_from(payload: Mapping[str, Any]) -> ApprovalResponse:
         session_id=str(approver_raw.get("sid", "")),
         authenticated_at_ms=int(approver_raw["auth_time_ms"]),
     )
+    authority = payload.get("authority")
     return ApprovalResponse(
         kind=ApprovalKind(payload["kind"]),
+        # Verified with the rest when present (attest v4): who answered, and
+        # under what membership and limits.
+        authority=dict(authority) if isinstance(authority, Mapping) else None,
         # The stable IdP subject, not the address. Addresses are reassigned; a
         # record naming one stops resolving to a person once they leave.
         decided_by=approver.subject,

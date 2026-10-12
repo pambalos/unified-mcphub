@@ -47,7 +47,7 @@ from typing import Any, Literal
 
 import celpy
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer
 
 from unified_paths import canonical, is_under
 
@@ -81,10 +81,55 @@ class Decision:
     #: policy made -- a containment gate, a request the gateway could not read
     #: -- rather than a digest of a policy that was never consulted.
     policy_digest: str | None = None
+    #: The company-policy clauses the deciding rule says it implements
+    #: (`Rule.implements`, policy-records.v1), copied from that rule. Empty for
+    #: a rule that names none and for every verdict no rule made, so a decision
+    #: by a policy that does not use the key records exactly what it did before.
+    implements: tuple[str, ...] = ()
 
 
 class PolicyError(ValueError):
     """Policy file is malformed or a rule does not compile."""
+
+
+# --- clause references (policy-records.v1) ---
+
+#: `<document key>#<clause number>`: `claims-authority#4`, `ai-policy#2.1`.
+#: The key is the company policy document's slug, the number its clause
+#: numbering. Deliberately narrow -- no spaces, no section sign, no version --
+#: so a reference is the same string in YAML, in a chain entry, in a CSV cell
+#: and in a URL, and so it can never smuggle prose (or the licensed text of a
+#: standard) into the audit record.
+CLAUSE_REF = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*#[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*$")
+CLAUSE_REF_MAX = 96
+#: A rule that implements more than this many clauses is a rule nobody can
+#: review; the bound also keeps a chain entry from growing without limit.
+IMPLEMENTS_MAX = 16
+
+
+def check_implements(value: list[str]) -> list[str]:
+    """Shape-check `implements`; the engine never resolves what a reference names.
+
+    A malformed reference is a load error, like every other malformed key: a
+    rule that claims to implement `claims authority 4` would record a
+    traceability link no reader can follow, and the engine's rule is that a
+    policy which does not mean what it says does not load. Whether the clause
+    *exists* is the control plane's question (its lint warns), because the
+    engine has no document store and must not need one to decide.
+    """
+    if len(value) > IMPLEMENTS_MAX:
+        raise ValueError(f"implements: at most {IMPLEMENTS_MAX} clause references per rule")
+    seen: set[str] = set()
+    for ref in value:
+        if len(ref) > CLAUSE_REF_MAX or not CLAUSE_REF.match(ref):
+            raise ValueError(
+                f"implements: {ref!r} is not a clause reference; write "
+                "<document-key>#<clause>, e.g. claims-authority#4 or ai-policy#2.1"
+            )
+        if ref in seen:
+            raise ValueError(f"implements: {ref!r} is listed twice")
+        seen.add(ref)
+    return value
 
 
 # --- policy document models ---
@@ -103,7 +148,37 @@ class Match(BaseModel):
     args: ArgsMap | None = None
 
 
-class Rule(BaseModel):
+class _Implements(BaseModel):
+    """`implements:` -- the company-policy clauses a decision-making entry
+    carries out (policy-records.v1 §3).
+
+    Named for the relation it records, not for what it points at: a rule
+    *implements* a clause, and the clause *addresses* an ISO/IEC 42001
+    control. The second hop lives with the clause, in the approved policy
+    document, never here -- a rule that pointed straight at a control would
+    let a programme claim conformance with no policy a person approved.
+
+    Optional and omitted from the dump when empty, so `policy_digest` of every
+    policy that does not use it is unchanged (the same reason
+    `attestation_floors` is omitted): a digest is what an audit entry cites.
+    """
+
+    implements: list[str] = Field(default_factory=list)
+
+    @field_validator("implements")
+    @classmethod
+    def _refs(cls, value: list[str]) -> list[str]:
+        return check_implements(value)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_implements(self, handler: Any) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if not self.implements:
+            data.pop("implements", None)
+        return data
+
+
+class Rule(_Implements):
     model_config = ConfigDict(extra="forbid")
 
     id: str
@@ -114,7 +189,7 @@ class Rule(BaseModel):
     reason: str | None = None
 
 
-class Floor(BaseModel):
+class Floor(_Implements):
     """Forces DEFER between the exact and wildcard tiers (policy.v2.md §3)."""
 
     model_config = ConfigDict(extra="forbid")
@@ -126,7 +201,7 @@ class Floor(BaseModel):
     reason: str | None = None
 
 
-class AttestationFloor(BaseModel):
+class AttestationFloor(_Implements):
     """A minimum chain grade for a matched verb class — build-01 §5.
 
     Today the strength of every rule is silently the weakest identity path in
@@ -361,6 +436,7 @@ class _Compiled:
     args: dict[str, list[tuple[str, list[Any]]]] | None
     condition: celpy.Runner | None
     is_exact: bool  # no wildcard in the tool pattern
+    implements: tuple[str, ...] = ()
 
 
 class PolicyEngine:
@@ -385,6 +461,7 @@ class PolicyEngine:
             effect: Verdict,
             audit_level: str,
             reason: str | None,
+            implements: list[str] | None = None,
         ) -> _Compiled:
             if id_ in seen_ids:
                 raise PolicyError(f"duplicate rule id: {id_!r}")
@@ -410,22 +487,27 @@ class PolicyEngine:
                 args=_compile_args(match.args, id_) if match.args else None,
                 condition=condition,
                 is_exact="*" not in match.tool,
+                implements=tuple(implements or ()),
             )
 
         rules = [
-            compile_one(r.id, r.match, r.when, Verdict(r.effect), r.audit_level, r.reason)
+            compile_one(
+                r.id, r.match, r.when, Verdict(r.effect), r.audit_level, r.reason, r.implements
+            )
             for r in doc.rules
         ]
         # Constitutional tier (UAI-216): compiled like any rule but evaluated
         # ahead of everything, so it cannot be overridden. Empty ⇒ no-op.
         self._constitutional = [
-            compile_one(r.id, r.match, r.when, Verdict(r.effect), r.audit_level, r.reason)
+            compile_one(
+                r.id, r.match, r.when, Verdict(r.effect), r.audit_level, r.reason, r.implements
+            )
             for r in doc.constitutional
         ]
         # Precedence tier 1 vs 3 is decided by the tool pattern; floors are tier 2.
         self._exact = [c for c in rules if c.is_exact]
         self._floors = [
-            compile_one(f.id, f.match, f.when, Verdict.DEFER, f.audit_level, f.reason)
+            compile_one(f.id, f.match, f.when, Verdict.DEFER, f.audit_level, f.reason, f.implements)
             for f in doc.floors
         ]
         self._wildcard = [c for c in rules if not c.is_exact]
@@ -435,7 +517,15 @@ class PolicyEngine:
         # not offered: a floor that could be conditioned off is not a floor.
         self._attestation: list[tuple[_Compiled, Attestation]] = [
             (
-                compile_one(f.id, f.match, None, Verdict(f.effect), f.audit_level, f.reason),
+                compile_one(
+                    f.id,
+                    f.match,
+                    None,
+                    Verdict(f.effect),
+                    f.audit_level,
+                    f.reason,
+                    f.implements,
+                ),
                 f.minimum,
             )
             for f in doc.attestation_floors
@@ -527,6 +617,7 @@ class PolicyEngine:
                             "condition_error",
                             c.audit_level,
                             f"condition raised: {exc}",
+                            implements=c.implements,
                         )
                     if not isinstance(result, celpy.celtypes.BoolType):
                         return Decision(
@@ -535,10 +626,13 @@ class PolicyEngine:
                             "condition_error",
                             c.audit_level,
                             f"condition returned {type(result).__name__}, not bool",
+                            implements=c.implements,
                         )
                     if not result:
                         continue  # condition false → rule does not match
-                return Decision(c.effect, c.id, source, c.audit_level, c.reason)
+                return Decision(
+                    c.effect, c.id, source, c.audit_level, c.reason, implements=c.implements
+                )
             return None
 
         # Constitutional first: the one tier no floor may waive (UAI-216).
@@ -630,6 +724,7 @@ class PolicyEngine:
                         "human_rooted": principal.human_rooted(),
                     }
                 },
+                implements=c.implements,
             )
         return None
 

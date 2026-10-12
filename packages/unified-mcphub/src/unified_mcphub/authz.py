@@ -121,6 +121,9 @@ class Decision:
     #: is the engine's vocabulary, and it carries the rule id (now the
     #: readable pattern, see `_RuleIds`) and the policy digest together.
     engine: EngineDecision | None = None
+    #: The company-policy clauses the deciding rule implements (audit
+    #: `implements`, policy-records.v1). Empty when it names none.
+    implements: tuple[str, ...] = ()
 
 
 _VERDICT_TO_EFFECT = {
@@ -247,6 +250,7 @@ class AuthzResolver:
                     ),
                     effect="defer" if rule.effect == "prompt" else rule.effect,
                     audit_level=rule.audit_level,
+                    implements=list(rule.implements or []),
                 )
             )
         floors: list[EngineFloor] = []
@@ -488,4 +492,5 @@ class AuthzResolver:
             source="danger_floor" if d.source == "floor" else d.source,
             policy_digest=d.policy_digest,
             engine=d,
+            implements=tuple(d.implements),
         )

@@ -595,6 +595,14 @@ class AuditChain:
                 # absent, like `counters`, so the common entry does not grow a
                 # key every reader has to learn to ignore.
                 **({"context": decision.context} if decision.context else {}),
+                # The company-policy clauses the deciding rule implements
+                # (policy-records.v1 §3): what lets an evidence pack say which
+                # clause -- and through the clause, which ISO/IEC 42001 control
+                # -- each decision carried out. Inside the hashed, signed body,
+                # never detached: it is policy metadata, not agent content.
+                # Omitted when empty, so a policy that does not use the key
+                # writes exactly the entry it wrote before.
+                **({"implements": list(decision.implements)} if decision.implements else {}),
             },
             detach=DECISION_PAYLOADS,
         )
@@ -623,6 +631,10 @@ class AuditChain:
         payload = asdict(recorded)
         if payload.get("attachments_digest", "absent") is None:
             del payload["attachments_digest"]
+        # The same for the signed authority (attest v4): absent unless the
+        # resolution carried one.
+        if payload.get("authority", "absent") is None:
+            del payload["authority"]
         return self.append("approval", payload)
 
     # --- verification ---

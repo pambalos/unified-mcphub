@@ -71,6 +71,14 @@ RESOLUTION_VERSION = 2
 #: attachments keeps working, and a request *with* them can only come from a
 #: sidecar that knows to check the digest.
 RESOLUTION_VERSION_ATTACHMENTS = 3
+#: The same payload (with or without `attachments_digest`), plus `authority`:
+#: under what standing the person answered -- their membership and role, the
+#: authority limits evaluated and how each came out, whether it was an
+#: override of somebody else's claim, and the case (entity-rbac §4, §11). A
+#: control plane signs it only for a reporter that said it verifies it
+#: (`signed_authority` on the approval request), so every sidecar built
+#: before it keeps receiving -- and verifying -- v2 and v3 exactly as before.
+RESOLUTION_VERSION_AUTHORITY = 4
 REVOCATIONS_SCHEMA = "unified.revocations/v1"
 KEYSET_SCHEMA = "unified.keyset/v1"
 
@@ -540,6 +548,7 @@ def verify_files(manifest: Mapping[str, Any], files: Mapping[str, bytes]) -> Ver
 #   fleet_id       one tenant's decision cannot be served to another
 #   expires_at_ms  a captured allow is an answer, not a standing credential
 #   approver       who authorised it cannot be rewritten after the fact
+#   authority      (v4) under which membership and limits they did, likewise
 #
 # The nonce is deliberately *not* a replay defence here. A sidecar legitimately
 # re-polls the same decision for the same action and must get the same answer;
@@ -593,6 +602,7 @@ def resolution_payload(
     nonce: str,
     fleet_id: str,
     attachments_digest: str | None = None,
+    authority: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Exactly what is signed.
 
@@ -600,6 +610,12 @@ def resolution_payload(
     was shown (`attachments_digest()` below). Present only when the request
     had attachments, and then the payload is v3; absent, the payload is the v2
     one byte for byte.
+
+    `authority` is the answering person's standing (`AUTHORITY_FIELDS`), and
+    makes the payload v4 whether or not attachments are present. Absent, the
+    payload is v2 or v3 byte for byte -- the property every older sidecar's
+    verification rests on. Like `approver` it is passed through whole: the
+    response carries the object, so there is nothing to reconstruct.
 
     One function on each side of the wire, and the vendored copy makes them the
     same function. A verifier that reconstructs the payload independently is a
@@ -625,7 +641,36 @@ def resolution_payload(
     if attachments_digest is not None:
         payload["v"] = RESOLUTION_VERSION_ATTACHMENTS
         payload["attachments_digest"] = attachments_digest
+    if authority is not None:
+        payload["v"] = RESOLUTION_VERSION_AUTHORITY
+        payload["authority"] = dict(authority)
     return payload
+
+
+#: Every key a v4 `authority` object carries: the membership the answer was
+#: given under, its role, the entity, the limits evaluated (each `{"id",
+#: "when", "held"}`), whether it overrode somebody else's claim, and the case.
+#: Listed so a response that drops one is malformed rather than silently
+#: canonicalising to something the producer never signed.
+AUTHORITY_FIELDS = ("membership", "role", "entity", "limits", "override", "case")
+
+
+def authority_problem(authority: Any) -> str | None:
+    """Why a v4 `authority` object is malformed, or None. Shape only: whether
+    the limits *held* is what the signature attests, read by whoever audits."""
+    if not isinstance(authority, Mapping):
+        return "authority is not an object"
+    missing = [f for f in AUTHORITY_FIELDS if f not in authority]
+    if missing:
+        return f"authority lacks {', '.join(missing)}"
+    limits = authority.get("limits")
+    if not isinstance(limits, list) or not all(
+        isinstance(item, Mapping) and isinstance(item.get("held"), bool) for item in limits
+    ):
+        return "authority limits are not a list of evaluated limits"
+    if not isinstance(authority.get("override"), bool):
+        return "authority override is not a boolean"
+    return None
 
 
 #: Every key a manifest entry carries, so two producers cannot disagree about
@@ -713,6 +758,13 @@ def accept_resolution(
     if not isinstance(approver, Mapping) or any(f not in approver for f in APPROVER_FIELDS):
         return _refuse(Reason.MALFORMED, "resolution names no complete approver")
 
+    # Optional, and inside the signature when present (v4): stripping it from
+    # a v4 response, or adding one to a v2/v3 response, changes the bytes and
+    # fails verification below like any other edit.
+    authority = response.get("authority")
+    if authority is not None and (problem := authority_problem(authority)) is not None:
+        return _refuse(Reason.MALFORMED, problem)
+
     signature_b64 = response.get("signature")
     kid = response.get("key_id")
     nonce = response.get("nonce")
@@ -771,6 +823,7 @@ def accept_resolution(
                 nonce=nonce,
                 fleet_id=fleet_id,
                 attachments_digest=attachments_digest,
+                authority=authority,
             )
         )
     except CanonicalisationError as exc:

@@ -482,7 +482,13 @@ class Approval:
             # The signed scope, not `persistent`'s decision about it: a scope
             # this hub declined to persist was still what the approver signed.
             resolution=(
-                {"kind": outcome.kind.value, "scope": outcome.scope}
+                {
+                    "kind": outcome.kind.value,
+                    "scope": outcome.scope,
+                    # The approver's signed standing (attest v4), when the
+                    # control plane signed one: part of what is re-verified.
+                    **({"authority": outcome.authority} if outcome.authority else {}),
+                }
                 if outcome.attestation is not None and outcome.kind is not None
                 else None
             ),

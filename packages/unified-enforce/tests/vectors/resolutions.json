@@ -1,0 +1,129 @@
+{
+  "fleet_id": "acme",
+  "now_ms": 1786000000000,
+  "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "vectors": [
+    {
+      "attachments_digest": null,
+      "canonical": "{\"action_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"approver\":{\"auth_time_ms\":1785999000000,\"email\":\"alice@acme.test\",\"sid\":\"sess-1\",\"sub\":\"google:117000000000000000001\"},\"expires_at_ms\":1786003600000,\"fleet_id\":\"acme\",\"kind\":\"allow\",\"nonce\":\"Xczcmdh4Gjpfk7Q6OCXuWw\",\"resolved_at_ms\":1786000000000,\"scope\":null,\"v\":2}",
+      "name": "v2",
+      "response": {
+        "action_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "approver": {
+          "auth_time_ms": 1785999000000,
+          "email": "alice@acme.test",
+          "sid": "sess-1",
+          "sub": "google:117000000000000000001"
+        },
+        "expires_at_ms": 1786003600000,
+        "fleet_id": "acme",
+        "key_id": "56475aa75463474c",
+        "kind": "allow",
+        "nonce": "Xczcmdh4Gjpfk7Q6OCXuWw",
+        "resolved_at_ms": 1786000000000,
+        "scope": null,
+        "signature": "btNgJE87PUxMIydR0JqadcVaxFaYFM6VS6Bk7pdVeHmZuY27Htl28HZWM7pNiV8Z288IZQw80d0R4cxvZ9RVDg",
+        "status": "resolved"
+      }
+    },
+    {
+      "attachments_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "canonical": "{\"action_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"approver\":{\"auth_time_ms\":1785999000000,\"email\":\"alice@acme.test\",\"sid\":\"sess-1\",\"sub\":\"google:117000000000000000001\"},\"attachments_digest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"expires_at_ms\":1786003600000,\"fleet_id\":\"acme\",\"kind\":\"allow\",\"nonce\":\"Xczcmdh4Gjpfk7Q6OCXuWw\",\"resolved_at_ms\":1786000000000,\"scope\":null,\"v\":3}",
+      "name": "v3-attachments",
+      "response": {
+        "action_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "approver": {
+          "auth_time_ms": 1785999000000,
+          "email": "alice@acme.test",
+          "sid": "sess-1",
+          "sub": "google:117000000000000000001"
+        },
+        "attachments_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "expires_at_ms": 1786003600000,
+        "fleet_id": "acme",
+        "key_id": "56475aa75463474c",
+        "kind": "allow",
+        "nonce": "Xczcmdh4Gjpfk7Q6OCXuWw",
+        "resolved_at_ms": 1786000000000,
+        "scope": null,
+        "signature": "vEZEK_SPnoniQCgwZNWbISQmYIctDjE0ZhgiscecsRT_-6XsnGvUG4blm66Csw7Lj9q47Q1AqL9bVAHv5PtRCw",
+        "status": "resolved"
+      }
+    },
+    {
+      "attachments_digest": null,
+      "canonical": "{\"action_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"approver\":{\"auth_time_ms\":1785999000000,\"email\":\"alice@acme.test\",\"sid\":\"sess-1\",\"sub\":\"google:117000000000000000001\"},\"authority\":{\"case\":\"01JCASECLM2001000000000000\",\"entity\":\"01JENTITYACME0000000000000\",\"limits\":[{\"held\":false,\"id\":\"csr-payout-cap\",\"when\":\"tool != \\\"mcp://insurance/approve_claim\\\" || double(params.amount) <= 5000.0\"}],\"membership\":\"01JMEMBERSHIP0000000000000\",\"override\":false,\"role\":\"csr\"},\"expires_at_ms\":1786003600000,\"fleet_id\":\"acme\",\"kind\":\"allow\",\"nonce\":\"Xczcmdh4Gjpfk7Q6OCXuWw\",\"resolved_at_ms\":1786000000000,\"scope\":null,\"v\":4}",
+      "name": "v4-authority",
+      "response": {
+        "action_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "approver": {
+          "auth_time_ms": 1785999000000,
+          "email": "alice@acme.test",
+          "sid": "sess-1",
+          "sub": "google:117000000000000000001"
+        },
+        "authority": {
+          "case": "01JCASECLM2001000000000000",
+          "entity": "01JENTITYACME0000000000000",
+          "limits": [
+            {
+              "held": false,
+              "id": "csr-payout-cap",
+              "when": "tool != \"mcp://insurance/approve_claim\" || double(params.amount) <= 5000.0"
+            }
+          ],
+          "membership": "01JMEMBERSHIP0000000000000",
+          "override": false,
+          "role": "csr"
+        },
+        "expires_at_ms": 1786003600000,
+        "fleet_id": "acme",
+        "key_id": "56475aa75463474c",
+        "kind": "allow",
+        "nonce": "Xczcmdh4Gjpfk7Q6OCXuWw",
+        "resolved_at_ms": 1786000000000,
+        "scope": null,
+        "signature": "MLNKiXyfl9XfIrt3ft1WzjScbD0EeJF6GfBi1fkTja_hv6wpYAVnQ1nN2aEsGVgMHqLbCAxSePu3ZfDrBoD2Aw",
+        "status": "resolved"
+      }
+    },
+    {
+      "attachments_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "canonical": "{\"action_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"approver\":{\"auth_time_ms\":1785999000000,\"email\":\"alice@acme.test\",\"sid\":\"sess-1\",\"sub\":\"google:117000000000000000001\"},\"attachments_digest\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"authority\":{\"case\":\"01JCASECLM2001000000000000\",\"entity\":\"01JENTITYACME0000000000000\",\"limits\":[{\"held\":false,\"id\":\"csr-payout-cap\",\"when\":\"tool != \\\"mcp://insurance/approve_claim\\\" || double(params.amount) <= 5000.0\"}],\"membership\":\"01JMEMBERSHIP0000000000000\",\"override\":false,\"role\":\"csr\"},\"expires_at_ms\":1786003600000,\"fleet_id\":\"acme\",\"kind\":\"allow\",\"nonce\":\"Xczcmdh4Gjpfk7Q6OCXuWw\",\"resolved_at_ms\":1786000000000,\"scope\":null,\"v\":4}",
+      "name": "v4-authority-and-attachments",
+      "response": {
+        "action_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "approver": {
+          "auth_time_ms": 1785999000000,
+          "email": "alice@acme.test",
+          "sid": "sess-1",
+          "sub": "google:117000000000000000001"
+        },
+        "attachments_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "authority": {
+          "case": "01JCASECLM2001000000000000",
+          "entity": "01JENTITYACME0000000000000",
+          "limits": [
+            {
+              "held": false,
+              "id": "csr-payout-cap",
+              "when": "tool != \"mcp://insurance/approve_claim\" || double(params.amount) <= 5000.0"
+            }
+          ],
+          "membership": "01JMEMBERSHIP0000000000000",
+          "override": false,
+          "role": "csr"
+        },
+        "expires_at_ms": 1786003600000,
+        "fleet_id": "acme",
+        "key_id": "56475aa75463474c",
+        "kind": "allow",
+        "nonce": "Xczcmdh4Gjpfk7Q6OCXuWw",
+        "resolved_at_ms": 1786000000000,
+        "scope": null,
+        "signature": "-NXtGg42eb6yjKfKFjci24Y-e_RWuHRIUtmTSS50m3umfX0sanXvxsUSNuMhaWM690x_tXlDJoXruUJ_mcPYCw",
+        "status": "resolved"
+      }
+    }
+  ]
+}
